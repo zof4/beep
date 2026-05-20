@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+source /runtime/bin/beep-runtime-env
+
+: "${BEEP_PI_ROOT:=/opt/pi}"
+tsx_bin="$BEEP_PI_ROOT/node_modules/.bin/tsx"
+
+if [ ! -x "$tsx_bin" ]; then
+  printf 'Missing Pi tsx runtime at %s. Rebuild the runtime image.\n' "$tsx_bin" >&2
+  exit 70
+fi
+
+exec "$tsx_bin" /runtime/src/beep-runtime-api.mjs "$@"

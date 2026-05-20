@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+source /runtime/bin/beep-runtime-env
+
+tsx_bin="${BEEP_PI_ROOT:-/opt/pi}/node_modules/.bin/tsx"
+
+if ! command -v codex >/dev/null 2>&1; then
+  echo "codex CLI is not installed in this runtime image." >&2
+  exit 127
+fi
+
+if [ ! -x "$tsx_bin" ]; then
+  echo "Pi dependencies are not installed at $tsx_bin." >&2
+  echo "Rebuild the runtime image." >&2
+  exit 2
+fi
+
+run_id="$(date -u +%Y%m%dT%H%M%SZ)"
+proof_dir="$BEEP_STATE_DIR/proofs/$run_id"
+workspace="$BEEP_WORKSPACE_DIR/codex-agent-proof/$run_id"
+events_file="$proof_dir/events.jsonl"
+stderr_file="$proof_dir/stderr.log"
+last_message_file="$proof_dir/last-message.md"
+summary_file="$proof_dir/summary.json"
+lcm_summary_file="$proof_dir/lcm-summary.json"
+
+mkdir -p "$proof_dir" "$workspace"
+
+codex --version > "$proof_dir/codex-version.txt" 2>&1
+
+if ! codex login status > "$proof_dir/login-status.txt" 2>&1; then
+  cat "$proof_dir/login-status.txt" >&2
+  echo "Run beep-codex-login first, then rerun beep-codex-agent-proof." >&2
+  exit 2
+fi
+
+if [ "$#" -gt 0 ]; then
+  prompt="$*"
+else
+  prompt='You are running inside Beep runtime proof sandbox. Prove this is a real autonomous Codex agent loop, not a smoke test. Work only in the current directory. First inspect the directory and runtime basics with shell commands: pwd, ls -la, node --version, and uname -a. Then create proof-calculator.mjs. The script must compute a deterministic checksum, write proof-result.json, and print the same result. Run node ./proof-calculator.mjs, observe the output, fix anything that fails, and rerun until it works. Then create proof-report.md summarizing the commands you ran, files you created, and final computed result. Finish by verifying all three files exist with test -s proof-calculator.mjs proof-result.json proof-report.md and by printing proof-result.json.'
+fi
+
+{
+  printf 'run_id=%s\n' "$run_id"
+  printf 'workspace=%s\n' "$workspace"
+  printf 'proof_dir=%s\n' "$proof_dir"
+  printf 'started_at_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  printf 'prompt=%s\n' "$prompt"
+} > "$proof_dir/run.env"
+
+cmd=(
+  codex exec
+  --json
+  --skip-git-repo-check
+  --dangerously-bypass-approvals-and-sandbox
+  --cd "$workspace"
+  --output-last-message "$last_message_file"
+)
+
+if [ -n "${BEEP_CODEX_MODEL:-}" ]; then
+  cmd+=(--model "$BEEP_CODEX_MODEL")
+fi
+
+cmd+=("$prompt")
+
+echo "Running Codex agent proof inside runtime."
+echo "Workspace: $workspace"
+echo "Proof dir: $proof_dir"
+
+set +e
+"${cmd[@]}" > "$events_file" 2> "$stderr_file"
+status=$?
+set -e
+
+"$tsx_bin" /runtime/src/lcm-record-events.mjs codex "$events_file" "$workspace" "$run_id" "$lcm_summary_file" "$proof_dir" \
+  > "$proof_dir/lcm-record.log"
+node /runtime/src/summarize-codex-events.mjs "$events_file" "$workspace" "$summary_file" "$status"
+cat "$summary_file"
+
+if [ "$status" -ne 0 ]; then
+  echo "Codex agent proof failed; stderr follows." >&2
+  cat "$stderr_file" >&2
+  exit "$status"
+fi

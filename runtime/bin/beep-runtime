@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+source /runtime/bin/beep-runtime-env
+
+pi_root="${BEEP_PI_ROOT:-/opt/pi}"
+tsx_bin="$pi_root/node_modules/.bin/tsx"
+
+if [ ! -x "$tsx_bin" ]; then
+  echo "Pi dependencies are not installed at $tsx_bin." >&2
+  echo "Rebuild the runtime image." >&2
+  exit 2
+fi
+
+exec "$tsx_bin" /runtime/src/beep-runtime.mjs "$@"

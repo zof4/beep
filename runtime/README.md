@@ -1,0 +1,153 @@
+# Beep Runtime Slice
+
+This runtime is the first container slice for Beep. It assumes there is no API
+key, installs the official Codex CLI in the image, and persists ChatGPT/Codex
+auth under `/state/codex`.
+
+The command surface is:
+
+- `beep-runtime`: Beep-owned JSON control surface for runtime capabilities,
+  model selection, reasoning effort, account status, and usage/context status.
+- `beep-agentd`: starts the long-running Beep daemon inside the runtime
+  container. It autostarts one canonical Pi RPC agent session, queues user work,
+  records state under `/state`, and exposes a private control surface.
+- `beep-runtime-api`: compatibility alias for `beep-agentd`.
+- `beep-codex-login`: starts `codex login --device-auth` inside the runtime.
+- `beep-codex-status`: checks the persisted Codex login state.
+- `beep-codex-agent-proof`: runs `codex exec` inside `/workspace` with JSONL
+  events written to `/state/proofs/<run-id>/events.jsonl`.
+- `beep-pi-codex-proof`: runs vendored Pi against Codex's ChatGPT auth state
+  and writes JSONL plus a parsed summary under `/state/proofs/pi-<run-id>`.
+- `beep-lcm-inspect`: prints the current Lossless Claw database row counts and
+  recent conversations.
+
+Host wrappers:
+
+```bash
+./scripts/beep-runtime.sh capabilities
+./scripts/beep-runtime.sh models list
+./scripts/beep-runtime.sh models current
+./scripts/beep-runtime.sh models set gpt-5.5
+./scripts/beep-runtime.sh thinking get
+./scripts/beep-runtime.sh thinking set low
+./scripts/beep-runtime.sh usage status
+./scripts/beep-runtime.sh account status
+./scripts/beep-agentd.sh
+./scripts/beep-runtime-api.sh
+./scripts/codex-runtime-login.sh
+./scripts/codex-runtime-status.sh
+./scripts/codex-runtime-agent-proof.sh
+./scripts/pi-runtime-codex-proof.sh
+./scripts/lcm-runtime-inspect.sh
+```
+
+The proof command requires a completed ChatGPT device login first. A successful
+run creates a workspace under `.beep-dev/workspace/codex-agent-proof/<run-id>`
+and a parsed proof summary under `.beep-dev/state/proofs/<run-id>/summary.json`.
+
+The Pi proof uses the same Codex `auth.json` created by `beep-codex-login`,
+then passes the access token into Pi's vendored `openai-codex-responses`
+provider. It reads the selected model and thinking level from `beep-runtime`
+unless `BEEP_PI_CODEX_MODEL` or `BEEP_PI_THINKING` are set. Vendored Pi is baked
+into the runtime image under `/opt/pi`; `/vendor` remains a read-only reference
+mount.
+
+`beep-agentd` is the long-running runtime process. It starts inside the Docker
+container and stays up. On boot, it autostarts the canonical Beep session
+`agent_beep` unless `BEEP_AGENT_AUTOSTART=0` is set. That session is a Pi
+`--mode rpc` process using the refreshed Codex ChatGPT OAuth access token. Its
+workspace is `/workspace/api-sessions/agent_beep`, and its event/session state
+is under `/state/api/sessions/agent_beep`.
+
+The daemon keeps a durable request queue under `/state/api/agents/beep`. The
+control plane should use the `/agent` endpoints for normal Beep work:
+
+```bash
+curl http://127.0.0.1:8787/health
+curl http://127.0.0.1:8787/agent
+curl -X POST http://127.0.0.1:8787/agent/submit \
+  -H 'content-type: application/json' \
+  -d '{"message":"Work in the current directory and create proof.txt"}'
+curl http://127.0.0.1:8787/agent/requests
+curl http://127.0.0.1:8787/agent/events?limit=20
+curl http://127.0.0.1:8787/agent/summary
+```
+
+`beep-agentd` is not the future trust boundary for external tools. It owns the
+sandbox-local agent loop, queue, events, Pi RPC process, and LCM adapter. Future
+website, location, calendar, email, Docker, and secret tools should be exposed
+to the harness as local stubs that submit `ToolIntent` requests to the control
+plane. The control plane owns the durable tool router, gatekeeper, grants,
+audit log, and typed broker execution.
+
+For testing or side sessions, the lower-level session API still exists. It
+starts additional Pi RPC sessions and stores each under
+`/state/api/sessions/<session-id>` with a matching workspace under
+`/workspace/api-sessions/<session-id>`:
+
+```bash
+curl http://127.0.0.1:8787/capabilities
+curl -X POST http://127.0.0.1:8787/sessions -d '{}'
+curl -X POST http://127.0.0.1:8787/sessions/<id>/prompt \
+  -H 'content-type: application/json' \
+  -d '{"message":"Work in the current directory and create proof.txt","waitForCompletion":true}'
+curl http://127.0.0.1:8787/sessions/<id>/events
+curl http://127.0.0.1:8787/sessions/<id>/summary
+```
+
+`POST /runs` is the convenience endpoint for a complete autonomous task. It
+creates a Pi RPC session, sends the prompt, waits for completion, records the
+turn stream into LCM by default, closes the session, and returns the final text,
+workspace path, event summary, and LCM ingest summary. Long-lived sessions stay
+available through `/sessions/:id/prompt`, `/sessions/:id/steer`,
+`/sessions/:id/follow-up`, `/sessions/:id/abort`, and `/sessions/:id/rpc`.
+
+The Beep daemon path is more important than `/runs`: `/agent/submit` queues work
+onto the always-on `agent_beep` session instead of creating a throwaway session.
+After each completed request, new Pi session messages are incrementally ingested
+through an in-process `LcmService` backed by Lossless Claw's
+`LcmContextEngine`, with a checkpoint so repeated
+requests do not duplicate earlier canonical transcript messages. Raw Pi RPC
+events remain diagnostic data for progress, replay, and debugging; they are not
+the LCM memory substrate.
+
+The control plane can inspect and operate LCM through private agent endpoints:
+
+```bash
+curl http://127.0.0.1:8787/agent/lcm/status
+curl -X POST http://127.0.0.1:8787/agent/lcm/compact \
+  -H 'content-type: application/json' \
+  -d '{"force":true,"tokenBudget":2048,"currentTokenCount":2400}'
+curl -X POST http://127.0.0.1:8787/agent/lcm/assemble-preview \
+  -H 'content-type: application/json' \
+  -d '{"tokenBudget":2048}'
+curl -X POST http://127.0.0.1:8787/agent/lcm/maintain
+curl -X POST http://127.0.0.1:8787/agent/lcm/backup
+curl http://127.0.0.1:8787/agent/lcm/doctor
+```
+
+`beep-runtime models list` merges Codex's refreshed `models_cache.json` with
+Pi's `openai-codex` model registry. `beep-runtime usage status` reads prior
+Codex/Pi proof event streams and reports aggregate usage plus the last known
+context usage against the selected model's context window. `account status`
+intentionally redacts tokens and only reports token/account presence.
+
+Lossless Claw is baked into the image under `/opt/lossless-claw`. The Beep
+daemon uses the vendored engine directly; `lcm-record-pi-session.mjs` remains as
+a thin CLI wrapper for dev proof runs. The proof directory contains
+`lcm-summary.json`, and the parsed `summary.json` includes that same LCM
+section.
+
+Beep also loads `/runtime/pi-extensions/lcm-context-extension.mjs` into the
+long-running Pi RPC process. The extension uses Pi's native `context` hook, so
+each provider call asks `beep-agentd` for `LcmContextEngine.assemble(...)`
+output before Pi converts messages to the model payload. The internal route is
+`POST /internal/lcm/context` and is protected by an in-memory bearer token that
+is only passed to the child runtime process.
+
+When LCM context injection is enabled, `beep-agentd` disables Pi native
+auto-compaction over RPC. Pi still owns the agent loop, tools, queueing,
+steering, model selection, and usage reporting; LCM owns pre-model context
+assembly and post-turn canonical transcript ingestion. Per-turn telemetry is
+written to `lcm-context-injection.json` and appears in `GET /agent/summary`
+under `lcmContextInjection`.
