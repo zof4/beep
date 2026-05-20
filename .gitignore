@@ -1,0 +1,14 @@
+.beep-dev/
+
+node_modules/
+**/node_modules/
+
+dist/
+**/dist/
+
+.DS_Store
+**/.DS_Store
+
+.env
+.env.*
+*.log

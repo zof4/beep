@@ -1,0 +1,14 @@
+[submodule "vendor/openai-codex"]
+	path = vendor/openai-codex
+	url = https://github.com/openai/codex.git
+	branch = main
+
+[submodule "vendor/pi"]
+	path = vendor/pi
+	url = https://github.com/earendil-works/pi.git
+	branch = main
+
+[submodule "vendor/lossless-claw"]
+	path = vendor/lossless-claw
+	url = https://github.com/martian-engineering/lossless-claw.git
+	branch = main
