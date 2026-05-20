@@ -1,0 +1,45 @@
+x-beep-runtime-common: &beep-runtime-common
+  build:
+    context: ..
+    dockerfile: docker/runtime.Dockerfile
+  environment:
+    BEEP_NO_API_KEY: "1"
+    BEEP_STATE_DIR: /state
+    BEEP_WORKSPACE_DIR: /workspace
+    BEEP_LCM_DIR: /lcm
+    BEEP_LCM_ROOT: /opt/lossless-claw
+    BEEP_LCM_DB: /lcm/beep-lcm.sqlite
+    CODEX_HOME: /state/codex
+    HOME: /state/home
+    XDG_CACHE_HOME: /state/xdg-cache
+    XDG_CONFIG_HOME: /state/xdg-config
+    NPM_CONFIG_CACHE: /state/npm-cache
+  volumes:
+    - ../vendor:/vendor:ro
+    - ../.beep-dev/workspace:/workspace
+    - ../.beep-dev/lcm:/lcm
+    - ../.beep-dev/history:/history
+    - ../.beep-dev/state:/state
+  read_only: true
+  tmpfs:
+    - /tmp:size=256m,mode=1777
+  security_opt:
+    - no-new-privileges:true
+
+services:
+  beep-runtime:
+    <<: *beep-runtime-common
+
+  beep-runtime-api:
+    <<: *beep-runtime-common
+    command: ["/runtime/bin/beep-agentd"]
+    profiles:
+      - api
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8787:8787"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8787/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
