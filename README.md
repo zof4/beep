@@ -2,39 +2,7 @@
 
 Beep is an experimental agent runtime and control-plane slice. It separates
 host authority, model credentials, approvals, and lifecycle management from the
-sandboxed runtime that runs the agent loop.
-
-The runtime currently centers on:
-
-- a long-running `beep-agentd` daemon API
-- a host-side control plane for lifecycle, approvals, and scoped tools
-- LCM-backed runtime memory and recall tools
-- environment-driven model and provider credentials
-- Docker-based local development
-
-## Credentials
-
-Credentials are intentionally supplied through environment variables or local
-state under `.beep-dev/`. Do not commit `.env` files, auth JSON, provider keys,
-runtime tokens, or generated state.
-
-Primary model credential path:
-
-```bash
-export BEEP_MODEL_GATEWAY_CREDENTIAL_URL="https://example.internal/model-credential"
-export BEEP_MODEL_GATEWAY_CAPABILITY_TOKEN="..."
-```
-
-Local development can opt into the temporary Codex auth compatibility path:
-
-```bash
-export BEEP_ALLOW_RUNTIME_CODEX_AUTH=1
-```
-
-That mode reads an existing `CODEX_HOME/auth.json` access token from local
-state and is not the production credential-custody model.
-
-Optional web providers are also configured by environment:
+sandboxed runtime that runs the agent loop. The goal is to create a long running agent that can be scaled with implementation yet has the tools necessary for real work. 
 
 ```bash
 export BEEP_TAVILY_API_KEY="..."
