@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${BEEP_STATE_DIR:=/state}"
+: "${BEEP_WORKSPACE_DIR:=/workspace}"
+: "${BEEP_LCM_DIR:=/lcm}"
+: "${BEEP_LCM_ROOT:=/opt/lossless-claw}"
+: "${BEEP_LCM_DB:=$BEEP_LCM_DIR/beep-lcm.sqlite}"
+: "${BEEP_HISTORY_DIR:=/history}"
+: "${CODEX_HOME:=$BEEP_STATE_DIR/codex}"
+: "${BEEP_HOME_DIR:=$BEEP_STATE_DIR/home}"
+
+export BEEP_STATE_DIR
+export BEEP_WORKSPACE_DIR
+export BEEP_LCM_DIR
+export BEEP_LCM_ROOT
+export BEEP_LCM_DB
+export BEEP_HISTORY_DIR
+export CODEX_HOME
+export HOME="$BEEP_HOME_DIR"
+export SHELL="${SHELL:-/bin/bash}"
+export XDG_CACHE_HOME="${XDG_CACHE_HOME:-$BEEP_STATE_DIR/xdg-cache}"
+export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$BEEP_STATE_DIR/xdg-config}"
+export NPM_CONFIG_CACHE="${NPM_CONFIG_CACHE:-$BEEP_STATE_DIR/npm-cache}"
+
+mkdir -p \
+  "$BEEP_STATE_DIR" \
+  "$BEEP_WORKSPACE_DIR" \
+  "$BEEP_LCM_DIR" \
+  "$BEEP_HISTORY_DIR" \
+  "$CODEX_HOME" \
+  "$HOME" \
+  "$XDG_CACHE_HOME" \
+  "$XDG_CONFIG_HOME" \
+  "$NPM_CONFIG_CACHE"
+
+chmod 700 "$CODEX_HOME" "$HOME" 2>/dev/null || true
+
+if [ ! -f "$CODEX_HOME/config.toml" ]; then
+  umask 077
+  {
+    printf 'approval_policy = "never"\n'
+    printf 'sandbox_mode = "workspace-write"\n'
+    printf 'cli_auth_credentials_store = "file"\n'
+  } > "$CODEX_HOME/config.toml"
+fi

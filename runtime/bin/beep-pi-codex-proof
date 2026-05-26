@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+source /runtime/bin/beep-runtime-env
+
+if [ "${BEEP_RUNTIME_DEV_PROOF_TOOLS:-0}" != "1" ]; then
+  echo "beep-pi-codex-proof is a dev-only standalone proof tool." >&2
+  echo "Use the canonical /agent/submit runtime path for LCM-recorded Beep work." >&2
+  exit 64
+fi
+
+pi_root="${BEEP_PI_ROOT:-/opt/pi}"
+tsx_bin="$pi_root/node_modules/.bin/tsx"
+pi_cli="$pi_root/packages/coding-agent/src/cli.ts"
+
+if [ ! -x "$tsx_bin" ]; then
+  echo "Pi dependencies are not installed at $tsx_bin." >&2
+  echo "Rebuild the runtime image." >&2
+  exit 2
+fi
+
+if [ ! -f "$pi_cli" ]; then
+  echo "Vendored Pi CLI source is missing at $pi_cli." >&2
+  exit 2
+fi
+
+selected_model="${BEEP_PI_CODEX_MODEL:-}"
+if [ -z "$selected_model" ]; then
+  selected_model="$("$tsx_bin" /runtime/src/beep-runtime.mjs config get model)"
+fi
+
+selected_thinking="${BEEP_PI_THINKING:-}"
+if [ -z "$selected_thinking" ]; then
+  selected_thinking="$("$tsx_bin" /runtime/src/beep-runtime.mjs config get thinking)"
+fi
+
+run_id="$(date -u +%Y%m%dT%H%M%SZ)"
+proof_dir="$BEEP_STATE_DIR/proofs/pi-$run_id"
+workspace="$BEEP_WORKSPACE_DIR/pi-codex-proof/$run_id"
+events_file="$proof_dir/pi-events.jsonl"
+stderr_file="$proof_dir/pi-stderr.log"
+stdout_file="$proof_dir/pi-stdout.log"
+summary_file="$proof_dir/summary.json"
+session_dir="$proof_dir/sessions"
+
+mkdir -p "$proof_dir" "$workspace" "$session_dir"
+
+access_token="$(node /runtime/src/model-credential.mjs openai-codex "$selected_model" "$selected_thinking")"
+
+if [ "$#" -gt 0 ]; then
+  prompt="$*"
+else
+  prompt='You are Beep running through the Pi harness with the OpenAI Codex Responses provider. Prove this is not a smoke test. Work only in the current directory. First inspect the directory and runtime basics with pwd, ls -la, node --version, and uname -a. Then create pi-proof-calculator.mjs. It must compute a deterministic SHA-256 checksum, write pi-proof-result.json, and print the same result. Run node ./pi-proof-calculator.mjs, observe the output, fix anything that fails, and rerun until it works. Then write pi-proof-report.md summarizing the commands you ran, files you created, and final checksum. Finish by verifying all three files exist with separate test -s commands and by printing pi-proof-result.json.'
+fi
+
+{
+  printf 'run_id=%s\n' "$run_id"
+  printf 'workspace=%s\n' "$workspace"
+  printf 'proof_dir=%s\n' "$proof_dir"
+  printf 'started_at_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  printf 'pi_root=%s\n' "$pi_root"
+  printf 'model=%s\n' "$selected_model"
+  printf 'thinking=%s\n' "$selected_thinking"
+} > "$proof_dir/run.env"
+
+echo "Running Pi Codex proof inside runtime."
+echo "Workspace: $workspace"
+echo "Proof dir: $proof_dir"
+
+set +e
+(
+  cd "$workspace"
+  "$tsx_bin" "$pi_cli" \
+    --provider openai-codex \
+    --model "$selected_model" \
+    --thinking "$selected_thinking" \
+    --api-key "$access_token" \
+    --mode json \
+    --no-session \
+    --session-dir "$session_dir" \
+    "$prompt"
+) > "$events_file" 2> "$stderr_file"
+status=$?
+set -e
+
+cp "$events_file" "$stdout_file"
+node /runtime/src/summarize-pi-events.mjs "$events_file" "$workspace" "$summary_file" "$status"
+cat "$summary_file"
+
+if [ "$status" -ne 0 ]; then
+  echo "Pi Codex proof failed; stderr follows." >&2
+  cat "$stderr_file" >&2
+  exit "$status"
+fi

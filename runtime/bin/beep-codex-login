@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+source /runtime/bin/beep-runtime-env
+
+if ! command -v codex >/dev/null 2>&1; then
+  echo "codex CLI is not installed in this runtime image." >&2
+  exit 127
+fi
+
+echo "Starting Codex ChatGPT device login inside the runtime container."
+echo "CODEX_HOME=$CODEX_HOME"
+echo "Auth will persist in the mounted runtime state volume."
+exec codex login --device-auth

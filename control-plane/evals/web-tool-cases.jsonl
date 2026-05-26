@@ -1,0 +1,4 @@
+{"id":"official-openai-web-search","query":"OpenAI Responses API web search tool official documentation","intent":"official_docs","includeDomains":["openai.com"],"expectedDomains":["openai.com"],"maxResults":5}
+{"id":"tavily-extract-docs","query":"Tavily Extract API raw_content request_id usage documentation","intent":"technical","includeDomains":["tavily.com","tavilyai.mintlify.app"],"expectedDomains":["tavilyai.mintlify.app"],"maxResults":5}
+{"id":"exa-contents-docs","query":"Exa Contents API urls text highlights summary request parameters","intent":"technical","includeDomains":["exa.ai","docs.exa.ai"],"expectedDomains":["exa.ai","docs.exa.ai"],"maxResults":5}
+{"id":"perplexity-search-api","query":"Perplexity Search API max_results snippet date last_updated official docs","intent":"technical","includeDomains":["perplexity.ai"],"expectedDomains":["perplexity.ai"],"maxResults":5}
