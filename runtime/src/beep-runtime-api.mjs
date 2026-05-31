@@ -80,6 +80,19 @@ function writeJsonFile(path, value, mode = 0o600) {
   renameSync(tmpPath, path);
 }
 
+function safeRecordHindsightMemory(session, event) {
+  if (!session) return null;
+  try {
+    return session.recordHindsightMemory(event);
+  } catch (error) {
+    return {
+      ok: false,
+      telemetryDropped: true,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
 function safeNumber(value, fallback) {
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
@@ -1053,7 +1066,7 @@ class AgentSupervisor {
           nextMessageEntryCount: request.lcm.session.nextMessageEntryCount,
           queuePath: join(session.rootDir, "hindsight-retain-queue.jsonl"),
         });
-        session.recordHindsightMemory({
+        safeRecordHindsightMemory(session, {
           kind: "hindsight_retain",
           ok: request.hindsight.ok,
           enabled: request.hindsight.enabled,
@@ -1429,7 +1442,7 @@ async function handleRun(req, res) {
         nextMessageEntryCount: lcm.session.nextMessageEntryCount,
         queuePath: join(session.rootDir, "hindsight-retain-queue.jsonl"),
       });
-      session.recordHindsightMemory({
+      safeRecordHindsightMemory(session, {
         kind: "hindsight_retain",
         ok: hindsight.ok,
         enabled: hindsight.enabled,
@@ -1500,7 +1513,7 @@ async function handleInternalRoute(req, res, _url, parts) {
       prompt: body.prompt,
       messages: body.messages,
     });
-    session?.recordHindsightMemory({
+    safeRecordHindsightMemory(session, {
       ...memory.telemetry,
       at: nowIso(),
       durationMs: Date.now() - startedAtMs,
