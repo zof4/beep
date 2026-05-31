@@ -126,6 +126,23 @@ curl -X POST http://127.0.0.1:8787/agent/lcm/backup
 curl http://127.0.0.1:8787/agent/lcm/doctor
 ```
 
+### Hindsight Sidecar Smoke
+
+Beep can run the stock local Hindsight sidecar through Docker Compose. The
+sidecar is local-only Hindsight infrastructure; its LLM and embedding work are
+configured to use OpenAI Codex OAuth through the same persisted Codex login
+state mounted under `.beep-dev/state/codex`.
+
+Run:
+
+```bash
+./scripts/hindsight-runtime-smoke.sh
+```
+
+The smoke writes a canary to the configured Beep Hindsight bank, recalls it, and
+checks that the retained document is readable. It fails if the sidecar is down,
+if Codex auth is missing, or if Hindsight recall does not return the canary.
+
 `beep-runtime models list` merges Codex's refreshed `models_cache.json` with
 Pi's `openai-codex` model registry. `beep-runtime usage status` reads prior
 Codex/Pi proof event streams and reports aggregate usage plus the last known
