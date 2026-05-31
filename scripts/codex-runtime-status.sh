@@ -3,4 +3,6 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-docker compose -f "$ROOT_DIR/docker/compose.runtime-dev.yml" run --rm beep-runtime beep-codex-status
+mkdir -p "$ROOT_DIR/.beep-dev/hindsight"
+
+docker compose --env-file "$ROOT_DIR/docker/hindsight-image.env" -f "$ROOT_DIR/docker/compose.runtime-dev.yml" run --rm beep-runtime beep-codex-status

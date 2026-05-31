@@ -9,6 +9,11 @@ const imageDirs = {
   pi: process.env.BEEP_PI_ROOT || "/opt/pi",
   lcm: process.env.BEEP_LCM_ROOT || "/opt/lossless-claw",
 };
+const hindsightConfig = {
+  enabled: process.env.BEEP_HINDSIGHT_ENABLED === "1",
+  apiUrl: process.env.BEEP_HINDSIGHT_API_URL || null,
+  bankPrefix: process.env.BEEP_HINDSIGHT_BANK_ID_PREFIX || null,
+};
 
 function ensureDir(path) {
   if (!existsSync(path)) {
@@ -45,6 +50,7 @@ const result = {
     node: process.version,
     noApiKeyAssumption: process.env.BEEP_NO_API_KEY === "1",
   },
+  hindsight: hindsightConfig,
   mounts: Object.fromEntries(
     requiredDirs.map((dir) => [
       dir,

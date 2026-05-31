@@ -9,6 +9,15 @@ x-beep-runtime-common: &beep-runtime-common
     BEEP_LCM_DIR: /lcm
     BEEP_LCM_ROOT: /opt/lossless-claw
     BEEP_LCM_DB: /lcm/beep-lcm.sqlite
+    BEEP_HINDSIGHT_ENABLED: "1"
+    BEEP_HINDSIGHT_API_URL: http://hindsight:8888
+    BEEP_HINDSIGHT_BANK_ID_PREFIX: beep
+    BEEP_HINDSIGHT_DEPLOYMENT_ID: local
+    BEEP_HINDSIGHT_USER_ID: default-user
+    BEEP_HINDSIGHT_PROJECT_ID: beep2
+    BEEP_HINDSIGHT_RECALL_BUDGET: high
+    BEEP_HINDSIGHT_RECALL_MAX_TOKENS: "4096"
+    BEEP_HINDSIGHT_RETAIN_ASYNC: "1"
     CODEX_HOME: /state/codex
     HOME: /state/home
     XDG_CACHE_HOME: /state/xdg-cache
@@ -27,6 +36,31 @@ x-beep-runtime-common: &beep-runtime-common
     - no-new-privileges:true
 
 services:
+  hindsight:
+    image: ${BEEP_HINDSIGHT_IMAGE:-ghcr.io/vectorize-io/hindsight:v0.7.0}
+    environment:
+      HINDSIGHT_API_WORKER_ID: beep-hindsight-local
+      HINDSIGHT_API_LLM_PROVIDER: openai-codex
+      HINDSIGHT_API_LLM_MODEL: ${BEEP_HINDSIGHT_MEMORY_MODEL:-gpt-5.4-mini}
+      HINDSIGHT_API_LLM_REASONING_EFFORT: low
+      HINDSIGHT_API_RETAIN_LLM_PROVIDER: openai-codex
+      HINDSIGHT_API_RETAIN_LLM_MODEL: ${BEEP_HINDSIGHT_RETAIN_MODEL:-gpt-5.4-mini}
+      HINDSIGHT_API_REFLECT_LLM_PROVIDER: openai-codex
+      HINDSIGHT_API_REFLECT_LLM_MODEL: ${BEEP_HINDSIGHT_REFLECT_MODEL:-gpt-5.4-mini}
+      HINDSIGHT_API_EMBEDDINGS_PROVIDER: openai-codex
+      HINDSIGHT_API_EMBEDDINGS_OPENAI_MODEL: text-embedding-3-small
+    volumes:
+      - ../.beep-dev/hindsight:/home/hindsight/.pg0
+      - ../.beep-dev/state/codex:/home/hindsight/.codex:ro
+    ports:
+      - "127.0.0.1:8888:8888"
+      - "127.0.0.1:9999:9999"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8888/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
   beep-runtime:
     <<: *beep-runtime-common
 
@@ -38,6 +72,9 @@ services:
     restart: unless-stopped
     ports:
       - "127.0.0.1:8787:8787"
+    depends_on:
+      hindsight:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8787/health"]
       interval: 10s
