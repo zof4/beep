@@ -8,6 +8,7 @@ mkdir -p \
   "$ROOT_DIR/.beep-dev/lcm" \
   "$ROOT_DIR/.beep-dev/history" \
   "$ROOT_DIR/.beep-dev/hindsight" \
-  "$ROOT_DIR/.beep-dev/state"
+  "$ROOT_DIR/.beep-dev/state" \
+  "$ROOT_DIR/.beep-dev/state/codex"
 
 docker compose --env-file "$ROOT_DIR/docker/hindsight-image.env" -f "$ROOT_DIR/docker/compose.runtime-dev.yml" up --build --abort-on-container-exit --remove-orphans
