@@ -1,15 +1,23 @@
 function normalizeMemory(memory) {
+  if (!memory || typeof memory !== "object") return null;
   return {
     id: String(memory.id || ""),
     text: String(memory.text || ""),
     kind: String(memory.type || memory.kind || "memory"),
     score: Number.isFinite(Number(memory.score)) ? Number(memory.score) : null,
     documentId: memory.document_id || memory.documentId || null,
-    tags: Array.isArray(memory.tags) ? memory.tags : [],
+    tags: Array.isArray(memory.tags) ? [...memory.tags] : [],
     sourceRef: memory.metadata?.sourceRef || memory.sourceRef || null,
     createdAt: memory.created_at || memory.createdAt || null,
     updatedAt: memory.updated_at || memory.updatedAt || memory.mentioned_at || null,
   };
+}
+
+function escapeRenderedMemoryField(value) {
+  return String(value || "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
 }
 
 export function buildExternalMemoryHints({
@@ -21,7 +29,7 @@ export function buildExternalMemoryHints({
   recall,
 } = {}) {
   const memories = Array.isArray(recall?.results)
-    ? recall.results.map(normalizeMemory).filter((memory) => memory.text)
+    ? recall.results.map(normalizeMemory).filter((memory) => memory?.text)
     : [];
   return {
     schemaVersion: 1,
@@ -34,16 +42,17 @@ export function buildExternalMemoryHints({
     budget: "high",
     generatedAt,
     tokenBudget,
-    tags,
+    tags: Array.isArray(tags) ? [...tags] : [],
     memories,
   };
 }
 
 function memoryLine(memory) {
-  const kind = memory.kind ? ` [${memory.kind}]` : "";
-  const id = memory.id ? ` (${memory.id})` : "";
-  const when = memory.updatedAt || memory.createdAt ? ` at ${memory.updatedAt || memory.createdAt}` : "";
-  return `- ${memory.text}${kind}${id}${when}`;
+  const kind = memory.kind ? ` [${escapeRenderedMemoryField(memory.kind)}]` : "";
+  const id = memory.id ? ` (${escapeRenderedMemoryField(memory.id)})` : "";
+  const whenValue = memory.updatedAt || memory.createdAt;
+  const when = whenValue ? ` at ${escapeRenderedMemoryField(whenValue)}` : "";
+  return `- ${escapeRenderedMemoryField(memory.text)}${kind}${id}${when}`;
 }
 
 export function renderExternalMemoryHintsAsMessages(hints) {
