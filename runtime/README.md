@@ -126,6 +126,23 @@ curl -X POST http://127.0.0.1:8787/agent/lcm/backup
 curl http://127.0.0.1:8787/agent/lcm/doctor
 ```
 
+### Updating Hindsight And LCM
+
+Use:
+
+```bash
+./scripts/update-vendored-references.sh
+```
+
+The script updates vendored OpenAI Codex, Pi, and Lossless Claw references, then
+pulls the pinned Hindsight image from `docker/hindsight-image.env` and records
+the resolved image digest in `docker/hindsight-image.lock`. After updating, run:
+
+```bash
+./scripts/hindsight-runtime-smoke.sh
+./scripts/lcm-runtime-inspect.sh
+```
+
 ### Hindsight Sidecar Smoke
 
 Beep can run the stock local Hindsight sidecar through Docker Compose. The
