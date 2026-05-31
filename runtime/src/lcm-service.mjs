@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { renderExternalMemoryHintsAsMessages } from "./external-memory-hints.mjs";
 
 const thisFile = fileURLToPath(import.meta.url);
 const defaultLcmRoot = join(dirname(thisFile), "../../vendor/lossless-claw");
@@ -183,6 +184,11 @@ export function canonicalMessagesFromEntries(entries) {
     }
     return message;
   });
+}
+
+export function messagesWithExternalMemoryHints(messages, externalMemoryHints = null) {
+  const hintMessages = renderExternalMemoryHintsAsMessages(externalMemoryHints);
+  return [...hintMessages, ...cloneJson(messages)];
 }
 
 function createLogSink(logs) {
@@ -682,7 +688,15 @@ export class LcmService {
     });
   }
 
-  async assembleMessages({ sessionId, sessionKey, messages, tokenBudget, prompt, includeMessages = true }) {
+  async assembleMessages({
+    sessionId,
+    sessionKey,
+    messages,
+    tokenBudget,
+    prompt,
+    includeMessages = true,
+    externalMemoryHints = null,
+  }) {
     if (!sessionId) {
       throw new Error("LCM assemble requires a sessionId.");
     }
@@ -691,13 +705,14 @@ export class LcmService {
     }
 
     const canonicalMessages = cloneJson(messages);
+    const messagesForAssembly = messagesWithExternalMemoryHints(canonicalMessages, externalMemoryHints);
     return this.exclusive(async () => {
       const { engine } = await this.ready();
       const logStart = this.logs.length;
       const result = await engine.assemble({
         sessionId,
         sessionKey,
-        messages: canonicalMessages,
+        messages: messagesForAssembly,
         tokenBudget: normalizePositiveInteger(tokenBudget, 128_000),
         prompt: prompt || "Assemble Beep's next-turn LCM context projection.",
       });
@@ -706,6 +721,16 @@ export class LcmService {
         source: {
           mode: "live-pi-context",
           inputMessageCount: canonicalMessages.length,
+          assemblyInputMessageCount: messagesForAssembly.length,
+          externalMemoryHints: externalMemoryHints
+            ? {
+                source: externalMemoryHints.source,
+                bankId: externalMemoryHints.bankId,
+                memoryCount: Array.isArray(externalMemoryHints.memories) ? externalMemoryHints.memories.length : 0,
+                persist: externalMemoryHints.persist === true,
+                stripOnRetain: externalMemoryHints.stripOnRetain === true,
+              }
+            : null,
           canonical: summarizeCanonicalMessages(canonicalMessages),
         },
         assemble: this.serializeAssembleResult(result, includeMessages),

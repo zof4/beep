@@ -126,6 +126,56 @@ curl -X POST http://127.0.0.1:8787/agent/lcm/backup
 curl http://127.0.0.1:8787/agent/lcm/doctor
 ```
 
+### Updating Hindsight And LCM
+
+Use:
+
+```bash
+./scripts/update-vendored-references.sh
+```
+
+The script updates vendored OpenAI Codex, Pi, and Lossless Claw references, then
+pulls the pinned Hindsight image from `docker/hindsight-image.env` and records
+the resolved image digest in `docker/hindsight-image.lock`. After updating, run:
+
+```bash
+./scripts/hindsight-runtime-smoke.sh
+./scripts/lcm-runtime-inspect.sh
+```
+
+### Hindsight Sidecar Smoke
+
+Beep can run the stock local Hindsight sidecar through Docker Compose. The
+sidecar is local-only Hindsight infrastructure; its LLM and embedding work are
+configured to use OpenAI Codex OAuth through the same persisted Codex login
+state mounted under `.beep-dev/state/codex`.
+
+Run:
+
+```bash
+./scripts/hindsight-runtime-smoke.sh
+```
+
+The smoke writes a canary to the configured Beep Hindsight bank, recalls it, and
+checks that the retained document is readable. It fails if the sidecar is down,
+if Codex auth is missing, or if Hindsight recall does not return the canary.
+
+### Hindsight + LCM Live Proof
+
+Run:
+
+```bash
+./scripts/smoke-test-hindsight-lcm.sh
+```
+
+The proof seeds a project rule, forces LCM compaction, restarts the runtime API,
+then asks Beep to continue without restating the rule. Passing evidence is:
+
+- `hindsightMemory.latest.kind` includes `hindsight_recall` or `hindsight_retain`
+- `lcmContextInjection.latest.kind` is `assemble`
+- `/workspace/api-sessions/agent_beep/hindsight-lcm-proof-recall.txt` contains
+  the sidecar + LCM ordering rule
+
 `beep-runtime models list` merges Codex's refreshed `models_cache.json` with
 Pi's `openai-codex` model registry. `beep-runtime usage status` reads prior
 Codex/Pi proof event streams and reports aggregate usage plus the last known

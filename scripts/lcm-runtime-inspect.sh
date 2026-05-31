@@ -7,6 +7,8 @@ mkdir -p \
   "$ROOT_DIR/.beep-dev/workspace" \
   "$ROOT_DIR/.beep-dev/lcm" \
   "$ROOT_DIR/.beep-dev/history" \
-  "$ROOT_DIR/.beep-dev/state"
+  "$ROOT_DIR/.beep-dev/hindsight" \
+  "$ROOT_DIR/.beep-dev/state" \
+  "$ROOT_DIR/.beep-dev/state/codex"
 
-docker compose -f "$ROOT_DIR/docker/compose.runtime-dev.yml" run --rm beep-runtime beep-lcm-inspect "$@"
+docker compose --env-file "$ROOT_DIR/docker/hindsight-image.env" -f "$ROOT_DIR/docker/compose.runtime-dev.yml" run --rm beep-runtime beep-lcm-inspect "$@"

@@ -19,6 +19,7 @@ import {
   lcmSessionKeyForRuntimeSession,
   writeLcmSummaryFile,
 } from "./lcm-service.mjs";
+import { defaultMemoryCoordinator } from "./memory-coordinator.mjs";
 
 const STATE_DIR = process.env.BEEP_STATE_DIR || "/state";
 const WORKSPACE_DIR = process.env.BEEP_WORKSPACE_DIR || "/workspace";
@@ -77,6 +78,19 @@ function writeJsonFile(path, value, mode = 0o600) {
   const tmpPath = `${path}.${process.pid}.${Date.now()}.tmp`;
   writeFileSync(tmpPath, next, { mode });
   renameSync(tmpPath, path);
+}
+
+function safeRecordHindsightMemory(session, event) {
+  if (!session) return null;
+  try {
+    return session.recordHindsightMemory(event);
+  } catch (error) {
+    return {
+      ok: false,
+      telemetryDropped: true,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
 }
 
 function safeNumber(value, fallback) {
@@ -285,6 +299,7 @@ class PiRpcSession {
     this.summaryPath = join(rootDir, "summary.json");
     this.lcmSummaryPath = join(rootDir, "lcm-summary.json");
     this.lcmContextInjectionPath = join(rootDir, "lcm-context-injection.json");
+    this.hindsightMemoryPath = join(rootDir, "hindsight-memory.json");
     const existingEvents = parseJsonl(this.eventsPath);
     const existingSummary = summarizeEvents(existingEvents);
     this.createdAt = nowIso();
@@ -552,6 +567,7 @@ class PiRpcSession {
       lastAssistantText: this.lastAssistantText,
       lcm: readJsonFile(this.lcmSummaryPath, null),
       lcmContextInjection: this.readLcmContextInjection(),
+      hindsightMemory: this.readHindsightMemory(),
       ...extra,
     };
     writeJsonFile(this.summaryPath, summary);
@@ -578,6 +594,8 @@ class PiRpcSession {
       summaryPath: this.summaryPath,
       lcmContextInjectionPath: this.lcmContextInjectionPath,
       lcmContextInjection: this.readLcmContextInjection(),
+      hindsightMemoryPath: this.hindsightMemoryPath,
+      hindsightMemory: this.readHindsightMemory(),
       eventCount: this.eventCount,
       agentEndCount: this.agentEndCount,
       pendingResponseCount: this.pendingResponses.size,
@@ -618,6 +636,40 @@ class PiRpcSession {
       history: [...history, nextEvent].slice(-50),
     };
     writeJsonFile(this.lcmContextInjectionPath, next);
+    return next;
+  }
+
+  readHindsightMemory() {
+    return readJsonFile(this.hindsightMemoryPath, {
+      schemaVersion: 1,
+      enabled: false,
+      total: 0,
+      failures: 0,
+      history: [],
+    });
+  }
+
+  recordHindsightMemory(event) {
+    const current = this.readHindsightMemory();
+    const history = Array.isArray(current.history) ? current.history : [];
+    const nextEvent = {
+      ...event,
+      kind: event.kind || "unknown",
+      at: event.at || nowIso(),
+    };
+    const byKind = { ...(current.byKind && typeof current.byKind === "object" ? current.byKind : {}) };
+    const kind = nextEvent.kind || "unknown";
+    byKind[kind] = Number(byKind[kind] || 0) + 1;
+    const next = {
+      schemaVersion: 1,
+      enabled: Boolean(current.enabled || nextEvent.enabled),
+      total: Number(current.total || 0) + 1,
+      byKind,
+      failures: Number(current.failures || 0) + (nextEvent.ok === false ? 1 : 0),
+      latest: nextEvent,
+      history: [...history, nextEvent].slice(-50),
+    };
+    writeJsonFile(this.hindsightMemoryPath, next);
     return next;
   }
 
@@ -933,6 +985,7 @@ class AgentSupervisor {
       finalText: request.finalText || null,
       error: request.error || null,
       lcm: request.lcm || null,
+      hindsight: request.hindsight || null,
       promptResult: request.promptResult || null,
     };
   }
@@ -1005,6 +1058,24 @@ class AgentSupervisor {
       request.finalText = promptResult.finalText || null;
       if (request.recordLcm) {
         request.lcm = await session.recordLcm();
+        request.hindsight = await defaultMemoryCoordinator.retainPiSessionSpan({
+          runtimeSessionId: session.id,
+          requestId: request.id,
+          sessionPath: request.lcm.session.path,
+          fromMessageEntry: request.lcm.session.fromMessageEntry,
+          nextMessageEntryCount: request.lcm.session.nextMessageEntryCount,
+          queuePath: join(session.rootDir, "hindsight-retain-queue.jsonl"),
+        });
+        safeRecordHindsightMemory(session, {
+          kind: "hindsight_retain",
+          ok: request.hindsight.ok,
+          enabled: request.hindsight.enabled,
+          requestId: request.id,
+          bankId: request.hindsight.bankId || null,
+          documentId: request.hindsight.documentId || null,
+          queued: request.hindsight.queued === true,
+          error: request.hindsight.error || null,
+        });
       }
       request.status = "completed";
       request.completedAt = nowIso();
@@ -1354,6 +1425,7 @@ async function handleRun(req, res) {
   });
   let promptResult;
   let lcm = null;
+  let hindsight = null;
   try {
     promptResult = await session.prompt(prompt, {
       waitForCompletion: true,
@@ -1362,6 +1434,24 @@ async function handleRun(req, res) {
     });
     if (body.recordLcm !== false) {
       lcm = await session.recordLcm({ force: Boolean(body.forceLcm) });
+      hindsight = await defaultMemoryCoordinator.retainPiSessionSpan({
+        runtimeSessionId: session.id,
+        requestId: session.id,
+        sessionPath: lcm.session.path,
+        fromMessageEntry: lcm.session.fromMessageEntry,
+        nextMessageEntryCount: lcm.session.nextMessageEntryCount,
+        queuePath: join(session.rootDir, "hindsight-retain-queue.jsonl"),
+      });
+      safeRecordHindsightMemory(session, {
+        kind: "hindsight_retain",
+        ok: hindsight.ok,
+        enabled: hindsight.enabled,
+        requestId: session.id,
+        bankId: hindsight.bankId || null,
+        documentId: hindsight.documentId || null,
+        queued: hindsight.queued === true,
+        error: hindsight.error || null,
+      });
     }
   } finally {
     if (body.closeOnComplete !== false) {
@@ -1375,6 +1465,7 @@ async function handleRun(req, res) {
     session: readSessionStatus(session.id) || session.status(),
     prompt: promptResult,
     lcm,
+    hindsight,
   });
 }
 
@@ -1417,6 +1508,17 @@ async function handleInternalRoute(req, res, _url, parts) {
   const sessionKey = lcmSessionKeyForRuntimeSession(runtimeSessionId);
 
   try {
+    const memory = await defaultMemoryCoordinator.recallForContext({
+      runtimeSessionId,
+      prompt: body.prompt,
+      messages: body.messages,
+    });
+    safeRecordHindsightMemory(session, {
+      ...memory.telemetry,
+      at: nowIso(),
+      durationMs: Date.now() - startedAtMs,
+      runtimeSessionId,
+    });
     const result = await defaultLcmService.assembleMessages({
       sessionId,
       sessionKey,
@@ -1424,6 +1526,7 @@ async function handleInternalRoute(req, res, _url, parts) {
       tokenBudget: body.tokenBudget,
       prompt: body.prompt,
       includeMessages: true,
+      externalMemoryHints: memory.externalMemoryHints,
     });
     const assemble = result.assemble;
     const telemetry = {
@@ -1445,6 +1548,13 @@ async function handleInternalRoute(req, res, _url, parts) {
       context: {
         ...telemetry,
         lcmLogTail: result.lcmLogTail,
+        hindsight: {
+          ok: memory.ok,
+          enabled: memory.enabled,
+          error: memory.error || null,
+          memoryCount: memory.externalMemoryHints?.memories?.length || 0,
+          bankId: memory.externalMemoryHints?.bankId || null,
+        },
       },
     });
   } catch (error) {
