@@ -46,9 +46,17 @@ export function buildRecallQuery({ prompt, messages }) {
 
 function retainContentFromMessages(messages) {
   return messages
-    .map((message) => `${message.role}: ${cleanRetainText(textFromContent(message.content))}`)
-    .filter((line) => line.trim().length > 0)
+    .map((message) => ({
+      role: message.role,
+      text: cleanRetainText(textFromContent(message.content)).trim(),
+    }))
+    .filter((message) => message.text.length > 0)
+    .map((message) => `${message.role}: ${message.text}`)
     .join("\n\n");
+}
+
+function errorMessage(error) {
+  return error instanceof Error ? error.message : String(error);
 }
 
 export class MemoryCoordinator {
@@ -110,8 +118,20 @@ export class MemoryCoordinator {
   }
 
   appendRetainFailure(queuePath, entry) {
+    if (!queuePath) {
+      return { queued: false };
+    }
     ensureFile(queuePath);
     appendFileSync(queuePath, `${JSON.stringify(entry)}\n`);
+    return { queued: true };
+  }
+
+  queueRetainFailure(queuePath, entry) {
+    try {
+      return this.appendRetainFailure(queuePath, entry);
+    } catch (error) {
+      return { queued: false, queueError: errorMessage(error) };
+    }
   }
 
   async retainPiSessionSpan({
@@ -123,19 +143,42 @@ export class MemoryCoordinator {
     queuePath,
   }) {
     const config = this.hindsightService.config;
-    ensureFile(queuePath);
     if (!config?.enabled) {
       return { ok: true, enabled: false, retained: false };
     }
-    const transcript = extractPiSessionTranscript(sessionPath);
+    const bankId = deriveHindsightBankId(config, { runtimeSessionId });
+    const documentId = `beep-pi:${runtimeSessionId}:${fromMessageEntry}:${nextMessageEntryCount}`;
+    let transcript;
+    try {
+      transcript = extractPiSessionTranscript(sessionPath);
+    } catch (error) {
+      const failure = {
+        at: this.now(),
+        bankId,
+        documentId,
+        sessionPath,
+        fromMessageEntry,
+        nextMessageEntryCount,
+        error: errorMessage(error),
+      };
+      const queueResult = this.queueRetainFailure(queuePath, failure);
+      return {
+        ok: false,
+        enabled: true,
+        retained: false,
+        bankId,
+        documentId,
+        queued: queueResult.queued,
+        error: failure.error,
+        ...(queueResult.queueError ? { queueError: queueResult.queueError } : {}),
+      };
+    }
     const selectedEntries = transcript.messageEntries.slice(fromMessageEntry, nextMessageEntryCount);
     const messages = canonicalMessagesFromEntries(selectedEntries);
     const content = retainContentFromMessages(messages);
     if (!content) {
       return { ok: true, enabled: true, retained: false, reason: "empty_content" };
     }
-    const bankId = deriveHindsightBankId(config, { runtimeSessionId });
-    const documentId = `beep-pi:${runtimeSessionId}:${fromMessageEntry}:${nextMessageEntryCount}`;
     const tags = [...hindsightTags(config), `session:${tagSegment(runtimeSessionId, "session")}`, "source:beep-pi"];
     const item = {
       content,
@@ -164,10 +207,19 @@ export class MemoryCoordinator {
         bankId,
         documentId,
         item,
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       };
-      this.appendRetainFailure(queuePath, failure);
-      return { ok: false, enabled: true, retained: false, bankId, documentId, queued: true, error: failure.error };
+      const queueResult = this.queueRetainFailure(queuePath, failure);
+      return {
+        ok: false,
+        enabled: true,
+        retained: false,
+        bankId,
+        documentId,
+        queued: queueResult.queued,
+        error: failure.error,
+        ...(queueResult.queueError ? { queueError: queueResult.queueError } : {}),
+      };
     }
   }
 }
