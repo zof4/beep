@@ -1,10 +1,13 @@
-import { existsSync, lstatSync, readdirSync, statSync } from "node:fs";
+import { lstatSync, readdirSync } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import {
   GATEKEEPER_MAX_STATIC_SITE_BYTES,
   GATEKEEPER_MAX_STATIC_SITE_FILES,
   ROOT_DIR,
 } from "../config.mjs";
+
+export const GATEKEEPER_MAX_STATIC_SITE_DIRS = 100;
+export const GATEKEEPER_MAX_STATIC_SITE_DEPTH = 20;
 
 const SECRET_NAME_PATTERNS = [
   /^\.env(?:[.\-].*)?$/iu,
@@ -17,6 +20,20 @@ const SECRET_NAME_PATTERNS = [
 
 export function fileNameLooksSuspicious(name) {
   return SECRET_NAME_PATTERNS.some((pattern) => pattern.test(name));
+}
+
+function pathIsInside(root, candidate) {
+  const resolvedRoot = resolve(root);
+  const resolvedCandidate = resolve(candidate);
+  const relativePath = relative(resolvedRoot, resolvedCandidate);
+  return (
+    resolvedCandidate === resolvedRoot ||
+    (relativePath !== ".." && !relativePath.startsWith(`..${sep}`) && !isAbsolute(relativePath))
+  );
+}
+
+function intLimit(value, fallback) {
+  return Number.isInteger(value) && value >= 0 ? value : fallback;
 }
 
 function runtimeWorkspacePathToHostPath(sourcePath) {
@@ -36,11 +53,7 @@ function runtimeWorkspacePathToHostPath(sourcePath) {
   const workspaceRoot = resolve(ROOT_DIR, ".beep-dev/workspace");
   const relativeSource = sourcePath === "/workspace" ? "" : sourcePath.slice("/workspace/".length);
   const hostPath = resolve(workspaceRoot, relativeSource);
-  const relativeHostPath = relative(workspaceRoot, hostPath);
-  const pathWithinWorkspace =
-    hostPath === workspaceRoot ||
-    (relativeHostPath !== ".." && !relativeHostPath.startsWith(`..${sep}`) && !isAbsolute(relativeHostPath));
-  if (!pathWithinWorkspace) {
+  if (!pathIsInside(workspaceRoot, hostPath)) {
     return {
       ok: false,
       error: "sourcePath must remain inside the runtime workspace.",
@@ -49,8 +62,55 @@ function runtimeWorkspacePathToHostPath(sourcePath) {
   return { ok: true, workspaceRoot, hostPath };
 }
 
-function walkDirectory(root, { maxFiles, maxBytes }) {
-  const stack = [root];
+function validateTrustedDirectoryPath(workspaceRoot, hostPath) {
+  let current = workspaceRoot;
+  const relativeHostPath = relative(workspaceRoot, hostPath);
+  const parts = relativeHostPath ? relativeHostPath.split(sep).filter(Boolean) : [];
+
+  for (const part of ["", ...parts]) {
+    if (part) current = join(current, part);
+    const label = relative(workspaceRoot, current) || ".";
+    let stats;
+    try {
+      stats = lstatSync(current);
+    } catch (error) {
+      return {
+        ok: false,
+        error:
+          part === parts.at(-1)
+            ? "sourcePath does not resolve to an existing workspace path."
+            : `Could not validate sourcePath component ${label}: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+      };
+    }
+    if (stats.isSymbolicLink()) {
+      return {
+        ok: false,
+        error: `sourcePath component ${label} must not be a symlink.`,
+      };
+    }
+    if (!stats.isDirectory()) {
+      return {
+        ok: false,
+        error: part === parts.at(-1) ? "sourcePath does not resolve to a directory." : `${label} is not a directory.`,
+      };
+    }
+  }
+
+  return { ok: true };
+}
+
+function indexHtmlExists(hostPath) {
+  try {
+    return lstatSync(join(hostPath, "index.html")).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function walkDirectory(root, { maxFiles, maxBytes, maxDirs, maxDepth }) {
+  const stack = [{ dir: root, depth: 0 }];
   const suspiciousFiles = [];
   const symlinks = [];
   let fileCount = 0;
@@ -59,8 +119,53 @@ function walkDirectory(root, { maxFiles, maxBytes }) {
   let truncated = false;
 
   while (stack.length) {
-    const dir = stack.pop();
+    const { dir, depth } = stack.pop();
+    if (depth > maxDepth) {
+      truncated = true;
+      return {
+        ok: true,
+        fileCount,
+        dirCount,
+        totalBytes,
+        suspiciousFiles,
+        symlinks,
+        truncated,
+        limitExceeded: "depth",
+      };
+    }
     dirCount += 1;
+    if (dirCount > maxDirs) {
+      truncated = true;
+      return {
+        ok: true,
+        fileCount,
+        dirCount,
+        totalBytes,
+        suspiciousFiles,
+        symlinks,
+        truncated,
+        limitExceeded: "dirs",
+      };
+    }
+
+    let dirStats;
+    try {
+      dirStats = lstatSync(dir);
+    } catch (error) {
+      return {
+        ok: false,
+        error: `Could not validate directory during evidence collection: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      };
+    }
+    if (dirStats.isSymbolicLink() || !dirStats.isDirectory()) {
+      return {
+        ok: false,
+        error: `${relative(root, dir) || "."} is not a safe directory.`,
+      };
+    }
+
     let entries = [];
     try {
       entries = readdirSync(dir, { withFileTypes: true });
@@ -78,16 +183,41 @@ function walkDirectory(root, { maxFiles, maxBytes }) {
         suspiciousFiles.push(relativePath);
       }
 
-      if (entry.isSymbolicLink()) {
+      let entryStats;
+      try {
+        entryStats = lstatSync(fullPath);
+      } catch (error) {
+        return {
+          ok: false,
+          error: `Could not validate path during evidence collection: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        };
+      }
+
+      if (entryStats.isSymbolicLink()) {
         symlinks.push(relativePath);
         continue;
       }
 
-      if (entry.isDirectory()) {
-        stack.push(fullPath);
+      if (entryStats.isDirectory()) {
+        if (depth + 1 > maxDepth) {
+          truncated = true;
+          return {
+            ok: true,
+            fileCount,
+            dirCount,
+            totalBytes,
+            suspiciousFiles,
+            symlinks,
+            truncated,
+            limitExceeded: "depth",
+          };
+        }
+        stack.push({ dir: fullPath, depth: depth + 1 });
         continue;
       }
-      if (!entry.isFile()) continue;
+      if (!entryStats.isFile()) continue;
 
       fileCount += 1;
       if (fileCount > maxFiles) {
@@ -103,11 +233,7 @@ function walkDirectory(root, { maxFiles, maxBytes }) {
           limitExceeded: "files",
         };
       }
-      try {
-        totalBytes += statSync(fullPath).size;
-      } catch {
-        fileCount -= 1;
-      }
+      totalBytes += entryStats.size;
       if (totalBytes > maxBytes) {
         truncated = true;
         return {
@@ -148,60 +274,28 @@ export function collectStaticSiteEvidence(args = {}) {
   }
 
   const { hostPath, workspaceRoot } = pathResult;
-  if (!existsSync(hostPath)) {
+  const trustedPath = validateTrustedDirectoryPath(workspaceRoot, hostPath);
+  if (!trustedPath.ok) {
     return {
       kind: "static_site",
       ok: false,
       sourcePath: args.sourcePath,
       hostPath,
       workspaceRoot,
-      error: "sourcePath does not resolve to an existing workspace path.",
+      error: trustedPath.error,
     };
   }
 
-  let stats;
-  let lstats;
-  try {
-    lstats = lstatSync(hostPath);
-    stats = statSync(hostPath);
-  } catch (error) {
-    return {
-      kind: "static_site",
-      ok: false,
-      sourcePath: args.sourcePath,
-      hostPath,
-      workspaceRoot,
-      error: `Could not stat sourcePath: ${error instanceof Error ? error.message : String(error)}`,
-    };
-  }
-
-  if (lstats.isSymbolicLink()) {
-    return {
-      kind: "static_site",
-      ok: false,
-      sourcePath: args.sourcePath,
-      hostPath,
-      workspaceRoot,
-      error: "sourcePath must not be a symlink.",
-    };
-  }
-
-  if (!stats.isDirectory()) {
-    return {
-      kind: "static_site",
-      ok: false,
-      sourcePath: args.sourcePath,
-      hostPath,
-      workspaceRoot,
-      error: "sourcePath does not resolve to a directory.",
-    };
-  }
-
-  const indexPath = join(hostPath, "index.html");
-  const hasIndexHtml = existsSync(indexPath) && !lstatSync(indexPath).isSymbolicLink() && statSync(indexPath).isFile();
+  const maxFiles = intLimit(args.maxFiles, GATEKEEPER_MAX_STATIC_SITE_FILES);
+  const maxBytes = intLimit(args.maxBytes, GATEKEEPER_MAX_STATIC_SITE_BYTES);
+  const maxDirs = intLimit(args.maxDirs, GATEKEEPER_MAX_STATIC_SITE_DIRS);
+  const maxDepth = intLimit(args.maxDepth, GATEKEEPER_MAX_STATIC_SITE_DEPTH);
+  const hasIndexHtml = indexHtmlExists(hostPath);
   const walk = walkDirectory(hostPath, {
-    maxFiles: GATEKEEPER_MAX_STATIC_SITE_FILES,
-    maxBytes: GATEKEEPER_MAX_STATIC_SITE_BYTES,
+    maxFiles,
+    maxBytes,
+    maxDirs,
+    maxDepth,
   });
   return {
     kind: "static_site",
@@ -211,8 +305,10 @@ export function collectStaticSiteEvidence(args = {}) {
     workspaceRoot,
     siteName: typeof args.siteName === "string" ? args.siteName : null,
     hasIndexHtml,
-    maxFiles: GATEKEEPER_MAX_STATIC_SITE_FILES,
-    maxBytes: GATEKEEPER_MAX_STATIC_SITE_BYTES,
+    maxFiles,
+    maxBytes,
+    maxDirs,
+    maxDepth,
     ...walk,
   };
 }
@@ -220,8 +316,14 @@ export function collectStaticSiteEvidence(args = {}) {
 export function staticSiteExecutionRejectionReason(evidence) {
   if (!evidence?.ok) return evidence?.error || "static preview source evidence is invalid.";
   if (!evidence.hasIndexHtml) return "source directory does not contain a root index.html.";
-  if (evidence.limitExceeded === "files" || evidence.limitExceeded === "bytes") {
-    return `source directory exceeds configured ${evidence.limitExceeded} limit.`;
+  const limitLabels = {
+    files: "file count",
+    bytes: "byte",
+    dirs: "directory count",
+    depth: "depth",
+  };
+  if (Object.hasOwn(limitLabels, evidence.limitExceeded)) {
+    return `source directory exceeds configured ${limitLabels[evidence.limitExceeded]} limit.`;
   }
   if (Array.isArray(evidence.suspiciousFiles) && evidence.suspiciousFiles.length > 0) {
     return `source directory contains suspicious secret-like files: ${evidence.suspiciousFiles.join(", ")}.`;

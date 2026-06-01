@@ -8,7 +8,7 @@ import {
   lstatSync,
   mkdirSync,
   openSync,
-  readFileSync,
+  readSync,
   readdirSync,
   rmSync,
   statSync,
@@ -27,6 +27,8 @@ import {
 import {
   collectStaticSiteEvidence,
   fileNameLooksSuspicious,
+  GATEKEEPER_MAX_STATIC_SITE_DEPTH,
+  GATEKEEPER_MAX_STATIC_SITE_DIRS,
   staticSiteExecutionRejectionReason,
 } from "./gatekeeper/evidence.mjs";
 import { ToolBrokerError } from "./tool-broker-error.mjs";
@@ -129,7 +131,7 @@ function verifyDirectoryIdentity(sourceDir, relativePath) {
   }
 }
 
-function readRegularFileNoFollow(sourcePath, relativePath, verifyParent) {
+function readRegularFileNoFollow(sourcePath, relativePath, verifyParent, remainingBytes) {
   let fd = null;
   try {
     verifyParent();
@@ -146,8 +148,25 @@ function readRegularFileNoFollow(sourcePath, relativePath, verifyParent) {
     if (!stats.isFile() || !sameFileIdentity(expectedStats, stats)) {
       throw snapshotError(`${relativePath} changed while opening file.`);
     }
+    if (stats.size > remainingBytes) {
+      throw snapshotError(`total bytes exceed configured limit while reading ${relativePath}.`);
+    }
     verifyParent();
-    return readFileSync(fd);
+    const chunks = [];
+    let total = 0;
+    for (;;) {
+      const remaining = remainingBytes - total;
+      const chunk = Buffer.allocUnsafe(Math.min(64 * 1024, Math.max(1, remaining + 1)));
+      const bytesRead = readSync(fd, chunk, 0, chunk.length, null);
+      if (bytesRead === 0) break;
+      total += bytesRead;
+      if (total > remainingBytes) {
+        throw snapshotError(`total bytes exceed configured limit while reading ${relativePath}.`);
+      }
+      chunks.push(chunk.subarray(0, bytesRead));
+    }
+    verifyParent();
+    return Buffer.concat(chunks, total);
   } catch (error) {
     if (error instanceof ToolBrokerError) throw error;
     throw snapshotError(
@@ -165,6 +184,8 @@ export function createStaticSiteSnapshot({
   trustedRoot = sourceHostPath,
   maxFiles = GATEKEEPER_MAX_STATIC_SITE_FILES,
   maxBytes = GATEKEEPER_MAX_STATIC_SITE_BYTES,
+  maxDirs = GATEKEEPER_MAX_STATIC_SITE_DIRS,
+  maxDepth = GATEKEEPER_MAX_STATIC_SITE_DEPTH,
 }) {
   if (!siteId || typeof siteId !== "string") {
     throw new ToolBrokerError("Static preview snapshot requires a siteId.", 400);
@@ -185,13 +206,6 @@ export function createStaticSiteSnapshot({
   const resolvedTrustedRoot = resolve(trustedRoot);
   if (!pathIsInside(resolvedTrustedRoot, resolvedSourceHostPath)) {
     throw new ToolBrokerError("Static preview snapshot source must remain inside its trusted workspace root.", 400);
-  }
-  if (
-    !existsSync(resolvedSourceHostPath) ||
-    lstatSync(resolvedSourceHostPath).isSymbolicLink() ||
-    !statSync(resolvedSourceHostPath).isDirectory()
-  ) {
-    throw new ToolBrokerError("Static preview snapshot source must be an existing directory.", 400);
   }
   if (existsSync(snapshotPath)) {
     throw new ToolBrokerError(`Static preview snapshot already exists for ${siteId}.`, 409);
@@ -244,12 +258,18 @@ export function createStaticSiteSnapshot({
     }
   };
 
-  const copyDirectory = (sourceDir, targetDir) => {
+  const copyDirectory = (sourceDir, targetDir, depth = 0) => {
+    if (depth > maxDepth) {
+      throw snapshotError(`directory depth exceeds configured limit of ${maxDepth}.`);
+    }
     const relativeDir = relative(resolvedSourceHostPath, sourceDir) || ".";
     assertGuardedAncestorsUnchanged(sourceDir);
     recordDirectoryIdentity(sourceDir, relativeDir);
 
     dirCount += 1;
+    if (dirCount > maxDirs) {
+      throw snapshotError(`directory count exceeds configured limit of ${maxDirs}.`);
+    }
     mkdirSync(targetDir, { recursive: true, mode: 0o755 });
 
     assertGuardedAncestorsUnchanged(sourceDir);
@@ -277,7 +297,10 @@ export function createStaticSiteSnapshot({
         throw snapshotError(`${relativePath} is a symlink.`);
       }
       if (entryStats.isDirectory()) {
-        copyDirectory(sourcePath, targetPath);
+        if (depth + 1 > maxDepth) {
+          throw snapshotError(`directory depth exceeds configured limit of ${maxDepth}.`);
+        }
+        copyDirectory(sourcePath, targetPath, depth + 1);
         continue;
       }
       if (!entryStats.isFile()) {
@@ -290,6 +313,7 @@ export function createStaticSiteSnapshot({
       }
       const data = readRegularFileNoFollow(sourcePath, relativePath, () =>
         assertGuardedAncestorsUnchanged(sourcePath),
+        maxBytes - totalBytes,
       );
       totalBytes += data.length;
       if (totalBytes > maxBytes) {
@@ -299,10 +323,10 @@ export function createStaticSiteSnapshot({
     }
   };
 
+  recordTrustedPathComponents();
   mkdirSync(resolvedSnapshotRoot, { recursive: true, mode: 0o700 });
   mkdirSync(snapshotPath, { mode: 0o755 });
   try {
-    recordTrustedPathComponents();
     copyDirectory(resolvedSourceHostPath, snapshotPath);
     const snapshotIndexPath = join(snapshotPath, "index.html");
     if (!existsSync(snapshotIndexPath) || !statSync(snapshotIndexPath).isFile()) {
@@ -328,6 +352,11 @@ function removeStaticSiteSnapshot(snapshotPath, snapshotRoot = STATIC_SITE_SNAPS
     throw new ToolBrokerError("Refusing to remove unmanaged static preview snapshot path.", 500);
   }
   rmSync(resolvedSnapshotPath, { recursive: true, force: true });
+}
+
+function isMissingDockerContainerError(error) {
+  const message = error instanceof Error ? error.message : String(error);
+  return /No such (?:container|object)/iu.test(message);
 }
 
 function staticServerScript() {
@@ -465,7 +494,17 @@ export async function removeStaticSitePreview({ site, store }) {
   if (site.status === "stopped") {
     return site;
   }
-  await run("docker", ["rm", "-f", site.containerName]);
+  let dockerRemoval = "removed";
+  let dockerError = null;
+  try {
+    await run("docker", ["rm", "-f", site.containerName]);
+  } catch (error) {
+    if (!isMissingDockerContainerError(error)) {
+      throw error;
+    }
+    dockerRemoval = "container_missing";
+    dockerError = error instanceof Error ? error.message : String(error);
+  }
   const stopped = {
     ...site,
     status: "stopped",
@@ -476,6 +515,8 @@ export async function removeStaticSitePreview({ site, store }) {
     siteId: site.siteId,
     runtimeId: site.runtimeId,
     containerName: site.containerName,
+    dockerRemoval,
+    dockerError,
   });
   removeStaticSiteSnapshot(site.snapshotPath);
   return stopped;
