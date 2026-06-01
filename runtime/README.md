@@ -80,6 +80,15 @@ to the harness as local stubs that submit `ToolIntent` requests to the control
 plane. The control plane owns the durable tool router, gatekeeper, grants,
 audit log, and typed broker execution.
 
+### Local Control Plane
+
+The local control plane lives under `control-plane/` and can be run from the
+host with `./scripts/beep-control-plane.sh start`, inspected with
+`./scripts/beep-control-plane.sh status`, and stopped with
+`./scripts/beep-control-plane.sh stop`. It owns host authority and issues scoped
+runtime control-plane tool credentials, while LCM context assembly, transcript
+ingest, and Hindsight ordering stay runtime-owned.
+
 For testing or side sessions, the lower-level session API still exists. It
 starts additional Pi RPC sessions and stores each under
 `/state/api/sessions/<session-id>` with a matching workspace under
