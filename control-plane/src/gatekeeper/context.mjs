@@ -43,10 +43,18 @@ function collectRuntimeRequestText(requestsPayload) {
     .join("\n\n");
 }
 
-function collectControlPlaneRequestText(store, runtimeId) {
+function requestMatchesToolCall(request, toolCallId) {
+  if (!toolCallId) return false;
+  const scalarIds = [request.toolCallId, request.runtimeRequestId, request.requestId, request.id];
+  if (scalarIds.some((id) => id === toolCallId)) return true;
+  return Array.isArray(request.toolCallIds) && request.toolCallIds.includes(toolCallId);
+}
+
+function collectControlPlaneRequestText(store, runtimeId, toolCallId) {
   if (!store?.listAgentRequests) return "";
   return store
     .listAgentRequests({ runtimeId, limit: 12 })
+    .filter((request) => requestMatchesToolCall(request, toolCallId))
     .map((request) =>
       [
         `control-plane-request ${request.requestId || "unknown"} status=${request.status || "unknown"}`,
@@ -67,7 +75,7 @@ function collectEventText(eventsPayload) {
     .join("\n");
 }
 
-export async function collectGatekeeperContext({ store = null, runtimeId = null } = {}) {
+export async function collectGatekeeperContext({ store = null, runtimeId = null, toolCallId = null } = {}) {
   const [requests, events, summary] = await Promise.all([
     fetchRuntimeJson("/agent/requests"),
     fetchRuntimeJson("/agent/events?limit=80"),
@@ -75,7 +83,7 @@ export async function collectGatekeeperContext({ store = null, runtimeId = null 
   ]);
 
   const sections = [];
-  const authorizationText = collectControlPlaneRequestText(store, runtimeId);
+  const authorizationText = collectControlPlaneRequestText(store, runtimeId, toolCallId);
   if (authorizationText.trim()) {
     sections.push(`CONTROL-PLANE USER REQUESTS\n${authorizationText}`);
   }

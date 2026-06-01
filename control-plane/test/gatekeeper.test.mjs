@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { collectGatekeeperContext } from "../src/gatekeeper/context.mjs";
 import { normalizeGatekeeperDecision } from "../src/gatekeeper/decision-schema.mjs";
 import { Gatekeeper } from "../src/gatekeeper/index.mjs";
 import { StateStore } from "../src/state-store.mjs";
@@ -41,6 +42,26 @@ function validStaticSiteEvidence(overrides = {}) {
     limitExceeded: null,
     ...overrides,
   };
+}
+
+function installRuntimeFetchMock(t) {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const path = String(url);
+    if (path.endsWith("/agent/requests")) {
+      return { ok: true, json: async () => ({ requests: [] }) };
+    }
+    if (path.includes("/agent/events")) {
+      return { ok: true, json: async () => ({ events: [] }) };
+    }
+    if (path.endsWith("/agent/summary")) {
+      return { ok: true, json: async () => ({ summary: "" }) };
+    }
+    return { ok: false, status: 404, statusText: "not found", json: async () => ({}) };
+  };
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
 }
 
 test("gatekeeper decision schema rejects non-public outcomes", () => {
@@ -273,10 +294,13 @@ test("broker records gatekeeper review id when auto-approved execution succeeds"
       collectEvidence: () => validStaticSiteEvidence(),
     });
     const broker = new ToolBroker({ store, gatekeeper });
-    broker.executeApprovedApproval = async () => ({
-      siteId: "demo-site",
-      proxyUrl: "http://127.0.0.1:8788/sites/demo-site/",
-    });
+    broker.executeApprovedApproval = async (approval) => {
+      assert.equal(approval.status, "executing");
+      return {
+        siteId: "demo-site",
+        proxyUrl: "http://127.0.0.1:8788/sites/demo-site/",
+      };
+    };
 
     const result = await broker.call({
       runtimeId: "local",
@@ -287,10 +311,44 @@ test("broker records gatekeeper review id when auto-approved execution succeeds"
 
     assert.equal(result.ok, true);
     assert.equal(result.result.gatekeeper.decision.outcome, "allow");
+    const [approval] = store.listApprovals();
+    assert.equal(approval.status, "approved");
+    assert.equal(approval.decision, "auto_approve");
 
     const [toolCall] = store.listAudit(1);
     assert.equal(toolCall.kind, "tool_call");
     assert.equal(toolCall.gatekeeperReviewId, result.result.gatekeeper.reviewId);
+  } finally {
+    cleanup();
+  }
+});
+
+test("gatekeeper does not authorize a path from a longer path prefix", async () => {
+  const { store, cleanup } = tempStore();
+  try {
+    const gatekeeper = new Gatekeeper({
+      store,
+      mode: "auto_review",
+      collectContext: async () => ({
+        ok: true,
+        errors: [],
+        authorizationText: "Create a static preview container for /workspace/site-public.",
+        text: "",
+      }),
+      collectEvidence: () => validStaticSiteEvidence({ sourcePath: "/workspace/site" }),
+    });
+
+    const review = await gatekeeper.review({
+      runtimeId: "local",
+      toolCallId: "call_prefix_path",
+      action: "preview.container.createStaticSite",
+      args: { siteName: "site", sourcePath: "/workspace/site" },
+      definition: staticSiteDefinition(),
+      classification: { risk: "high", reason: "Tool is configured for review." },
+    });
+
+    assert.equal(review.decision.outcome, "escalate_to_user");
+    assert.equal(review.decision.userAuthorization, "unknown");
   } finally {
     cleanup();
   }
@@ -452,6 +510,88 @@ test("gatekeeper denies static preview evidence that contains symlinks", async (
     assert.equal(result.status, "denied");
     assert.match(result.error, /symlink/iu);
     assert.equal(store.listApprovals().length, 0);
+  } finally {
+    cleanup();
+  }
+});
+
+for (const limitExceeded of ["dirs", "depth"]) {
+  test(`gatekeeper denies static preview evidence that exceeds ${limitExceeded} limit`, async () => {
+    const { store, cleanup } = tempStore();
+    try {
+      const gatekeeper = new Gatekeeper({
+        store,
+        mode: "auto_review",
+        collectContext: async () => ({
+          ok: true,
+          errors: [],
+          authorizationText:
+            "Create a static site and request a managed static preview container for /workspace/api-sessions/agent_beep/site.",
+          text: "",
+        }),
+        collectEvidence: () => validStaticSiteEvidence({ limitExceeded }),
+      });
+
+      const review = await gatekeeper.review({
+        runtimeId: "local",
+        toolCallId: `call_limit_${limitExceeded}`,
+        action: "preview.container.createStaticSite",
+        args: { siteName: "demo", sourcePath: "/workspace/api-sessions/agent_beep/site" },
+        definition: staticSiteDefinition(),
+        classification: { risk: "high", reason: "Tool is configured for review." },
+      });
+
+      assert.equal(review.decision.outcome, "deny");
+      assert.match(review.decision.auditRationale, new RegExp(limitExceeded, "iu"));
+      assert.equal(review.decision.userPrompt, null);
+    } finally {
+      cleanup();
+    }
+  });
+}
+
+test("gatekeeper context excludes stale unrelated control-plane requests from authorization text", async (t) => {
+  installRuntimeFetchMock(t);
+  const { store, cleanup } = tempStore();
+  try {
+    store.createAgentRequest({
+      runtimeId: "local",
+      toolCallId: "call_stale",
+      message: "Create a static preview container for /workspace/stale-site.",
+    });
+
+    const context = await collectGatekeeperContext({
+      store,
+      runtimeId: "local",
+      toolCallId: "call_current",
+    });
+
+    assert.equal(context.authorizationText, "");
+    assert.doesNotMatch(context.text, /stale-site/iu);
+  } finally {
+    cleanup();
+  }
+});
+
+test("gatekeeper context includes control-plane authorization scoped to the current tool call", async (t) => {
+  installRuntimeFetchMock(t);
+  const { store, cleanup } = tempStore();
+  try {
+    store.createAgentRequest({
+      runtimeId: "local",
+      toolCallId: "call_current",
+      message:
+        "Create a static site and request a managed static preview container for /workspace/api-sessions/agent_beep/site.",
+    });
+
+    const context = await collectGatekeeperContext({
+      store,
+      runtimeId: "local",
+      toolCallId: "call_current",
+    });
+
+    assert.match(context.authorizationText, /api-sessions\/agent_beep\/site/iu);
+    assert.match(context.text, /CONTROL-PLANE USER REQUESTS/u);
   } finally {
     cleanup();
   }

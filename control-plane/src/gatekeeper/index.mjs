@@ -17,6 +17,17 @@ function normalizeText(text) {
   return String(text || "").toLowerCase();
 }
 
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+}
+
+function normalizeReferencePath(value) {
+  return String(value || "")
+    .trim()
+    .replace(/\/+$/u, "")
+    .toLowerCase();
+}
+
 function authorizationUnits(text) {
   return String(text || "")
     .split(/[\r\n]+|(?<=[!?;])\s+|[.]\s+/u)
@@ -30,22 +41,27 @@ function pathReferencesForStaticPreview(args = {}) {
   const sourcePath = typeof args.sourcePath === "string" ? args.sourcePath.trim() : "";
   const siteName = typeof args.siteName === "string" ? args.siteName.trim() : "";
   if (sourcePath) {
-    refs.add(sourcePath.toLowerCase());
+    refs.add(normalizeReferencePath(sourcePath));
     if (sourcePath.startsWith("/workspace/")) {
-      const relativeSource = sourcePath.slice("/workspace/".length).toLowerCase();
+      const relativeSource = normalizeReferencePath(sourcePath.slice("/workspace/".length));
       if (relativeSource.includes("/") || !genericRefs.has(relativeSource)) refs.add(relativeSource);
     }
-    const basename = sourcePath.split("/").filter(Boolean).at(-1);
-    if (basename && !genericRefs.has(basename.toLowerCase())) refs.add(basename.toLowerCase());
   }
   if (siteName && !genericRefs.has(siteName.toLowerCase())) refs.add(siteName.toLowerCase());
   return [...refs].filter((ref) => ref.length >= 3);
 }
 
+function textContainsPathReference(text, ref) {
+  const escaped = escapeRegExp(ref);
+  const pathBoundary = "[^A-Za-z0-9_./-]";
+  const sentencePeriod = "[.](?=\\s|$)";
+  return new RegExp(`(^|${pathBoundary})${escaped}/?(?=$|${pathBoundary}|${sentencePeriod})`, "u").test(text);
+}
+
 function textReferencesRequestedPath(text, args) {
   const haystack = normalizeText(text);
   const refs = pathReferencesForStaticPreview(args);
-  return refs.length > 0 && refs.some((ref) => haystack.includes(ref));
+  return refs.length > 0 && refs.some((ref) => textContainsPathReference(haystack, ref));
 }
 
 function textReferencesAnyWorkspacePath(text) {
@@ -156,7 +172,7 @@ function localReviewStaticPreview({ args, context, evidence }) {
       userPrompt: null,
     };
   }
-  if (evidence.limitExceeded === "files" || evidence.limitExceeded === "bytes") {
+  if (evidence.limitExceeded) {
     return {
       ...base,
       outcome: "deny",

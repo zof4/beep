@@ -29,7 +29,8 @@ Allow a `preview.container.createStaticSite` request only when:
 - No suspicious secret-like files are present.
 - User authorization is at least `medium`.
 
-Escalate to the user when the action might be appropriate but evidence is
-missing or suspicious files are present. Deny invalid paths, missing source
-directories, missing `index.html`, oversized sites, or any action that appears
-to expose secrets.
+Escalate to the user when the action might be appropriate but user
+authorization is unclear. Deny invalid paths, missing source directories,
+missing `index.html`, oversized sites, excessive traversal depth or directory
+count, suspicious secret-like files, or any action that appears to expose
+secrets.

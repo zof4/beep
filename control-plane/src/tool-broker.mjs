@@ -131,20 +131,25 @@ export class ToolBroker {
     });
 
     if (review?.decision?.outcome === "allow") {
-      const executing = this.createApproval({
+      const approval = this.createApproval({
         runtimeId,
         toolCallId,
         action: requestedAction,
         args,
         risk: review.decision.riskLevel || risk,
         prompt,
-        reason: review.decision.auditRationale || reason,
-        status: "executing",
+        reason: review.decision.agentMessage || reason,
         decision: "auto_approve",
         decidedBy: "gatekeeper",
         gatekeeperReviewId: review.reviewId,
         decidedAt: new Date().toISOString(),
       });
+      const executing = this.store.updateApproval(approval.approvalId, {
+        status: "executing",
+      });
+      if (!executing) {
+        throw new ToolBrokerError("Auto-approved broker approval could not transition to executing.", 409);
+      }
       try {
         const result = await this.executeApprovedApproval(executing);
         const approved = this.store.updateApproval(executing.approvalId, {
@@ -201,9 +206,8 @@ export class ToolBroker {
       args,
       risk: review?.decision?.riskLevel || risk,
       prompt: review?.decision?.userPrompt || prompt,
-      reason: review?.decision?.auditRationale || reason,
+      reason: review?.decision?.agentMessage || reason,
       gatekeeperReviewId: review?.reviewId || null,
-      gatekeeperDecision: review?.decision || null,
     });
     return this.finish({
       runtimeId,
