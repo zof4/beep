@@ -342,3 +342,80 @@ test("state store fails closed for malformed valid state shapes", () => {
     }
   }
 });
+
+test("state store fails closed for malformed nested map records", () => {
+  const cases = [
+    { name: "approval null", value: { approvals: { appr_bad: null }, audit: [] } },
+    { name: "approval array", value: { approvals: { appr_bad: [] }, audit: [] } },
+    { name: "agent request primitive", value: { agentRequests: { cp_req_bad: "bad" }, audit: [] } },
+    {
+      name: "approval id mismatch",
+      value: { approvals: { appr_bad: { approvalId: "appr_other" } }, audit: [] },
+    },
+    {
+      name: "agent request id mismatch",
+      value: { agentRequests: { cp_req_bad: { requestId: "cp_req_other" } }, audit: [] },
+    },
+    {
+      name: "gatekeeper review id mismatch",
+      value: { gatekeeperReviews: { gk_bad: { reviewId: "gk_other" } }, audit: [] },
+    },
+    { name: "site id mismatch", value: { sites: { site_bad: { siteId: "site_other" } }, audit: [] } },
+  ];
+
+  for (const { name, value } of cases) {
+    const { dir, store, cleanup } = tempStore();
+    try {
+      const statePath = join(dir, "state.json");
+      const originalState = `${JSON.stringify(value)}\n`;
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(statePath, originalState, { mode: 0o600 });
+
+      assert.throws(() => store.readState(), /invalid state shape/, name);
+      assert.throws(
+        () => {
+          store.update((state) => {
+            state.audit.push({ kind: "should_not_write" });
+          });
+        },
+        /invalid state shape/,
+        name,
+      );
+      assert.equal(fs.readFileSync(statePath, "utf8"), originalState);
+    } finally {
+      cleanup();
+    }
+  }
+});
+
+test("state store fails closed for malformed audit entries", () => {
+  const cases = [
+    { name: "audit null entry", value: { audit: [null] } },
+    { name: "audit array entry", value: { audit: [[]] } },
+    { name: "audit primitive entry", value: { audit: ["bad"] } },
+  ];
+
+  for (const { name, value } of cases) {
+    const { dir, store, cleanup } = tempStore();
+    try {
+      const statePath = join(dir, "state.json");
+      const originalState = `${JSON.stringify(value)}\n`;
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(statePath, originalState, { mode: 0o600 });
+
+      assert.throws(() => store.readState(), /invalid state shape/, name);
+      assert.throws(
+        () => {
+          store.update((state) => {
+            state.audit.push({ kind: "should_not_write" });
+          });
+        },
+        /invalid state shape/,
+        name,
+      );
+      assert.equal(fs.readFileSync(statePath, "utf8"), originalState);
+    } finally {
+      cleanup();
+    }
+  }
+});

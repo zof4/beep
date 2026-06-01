@@ -25,6 +25,13 @@ const STATE_OBJECT_MAP_FIELDS = [
   "gatekeeperReviews",
   "sites",
 ];
+const STATE_MAP_ID_FIELDS = {
+  agentRequests: "requestId",
+  approvals: "approvalId",
+  gatekeeperReviews: "reviewId",
+  runtimes: "runtimeId",
+  sites: "siteId",
+};
 const sleepArray = new Int32Array(new SharedArrayBuffer(4));
 
 function nowIso() {
@@ -98,6 +105,18 @@ function invalidStateShape(path, message) {
   throw new Error(`invalid state shape: ${path}: ${message}`);
 }
 
+function validateStateMapRecords(state, field, path) {
+  const idField = STATE_MAP_ID_FIELDS[field];
+  for (const [key, record] of Object.entries(state[field])) {
+    if (!isPlainObject(record)) {
+      invalidStateShape(path, `${field}.${key} must be an object`);
+    }
+    if (idField && Object.hasOwn(record, idField) && record[idField] !== key) {
+      invalidStateShape(path, `${field}.${key}.${idField} must match map key`);
+    }
+  }
+}
+
 function normalizeStateShape(state, path) {
   if (!isPlainObject(state)) {
     invalidStateShape(path, "top-level state must be an object");
@@ -108,11 +127,17 @@ function normalizeStateShape(state, path) {
     } else if (!isPlainObject(state[field])) {
       invalidStateShape(path, `${field} must be an object map`);
     }
+    validateStateMapRecords(state, field, path);
   }
   if (state.audit === undefined) {
     state.audit = [];
   } else if (!Array.isArray(state.audit)) {
     invalidStateShape(path, "audit must be an array");
+  }
+  for (const [index, event] of state.audit.entries()) {
+    if (!isPlainObject(event)) {
+      invalidStateShape(path, `audit.${index} must be an object`);
+    }
   }
   return state;
 }
