@@ -103,7 +103,7 @@ function resultFromToolPayload(toolName, response, payload, successText) {
 }
 
 export default function beepControlPlaneToolsExtension(pi) {
-  if (!boolEnv("BEEP_CONTROL_PLANE_TOOLS_ENABLED", true)) return;
+  if (!boolEnv("BEEP_CONTROL_PLANE_TOOLS_ENABLED", false)) return;
 
   pi.registerTool({
     name: "preview_port_expose",

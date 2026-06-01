@@ -30,7 +30,8 @@ async function registeredTools() {
   return tools;
 }
 
-function withExtensionEnv(callback) {
+function withExtensionEnv(callback, options = {}) {
+  const toolsEnabled = Object.hasOwn(options, "toolsEnabled") ? options.toolsEnabled : "1";
   const keys = [
     "BEEP_CONTROL_PLANE_TOOLS_ENABLED",
     "BEEP_CONTROL_PLANE_URL",
@@ -41,7 +42,11 @@ function withExtensionEnv(callback) {
     "BEEP_MODEL_GATEWAY_CREDENTIAL_URL",
   ];
   const originalEnv = new Map(keys.map((key) => [key, process.env[key]]));
-  process.env.BEEP_CONTROL_PLANE_TOOLS_ENABLED = "1";
+  if (toolsEnabled === undefined) {
+    delete process.env.BEEP_CONTROL_PLANE_TOOLS_ENABLED;
+  } else {
+    process.env.BEEP_CONTROL_PLANE_TOOLS_ENABLED = toolsEnabled;
+  }
   process.env.BEEP_CONTROL_PLANE_URL = "http://control-plane.test/root/";
   process.env.BEEP_CONTROL_PLANE_RUNTIME_ID = "runtime-alpha";
   process.env.BEEP_CONTROL_PLANE_RUNTIME_TOKEN = "runtime-token";
@@ -64,6 +69,26 @@ function withExtensionEnv(callback) {
 function textFromResult(result) {
   return result?.content?.map((part) => part?.text || "").join("\n") || "";
 }
+
+test("extension defaults off when tools enabled env is unset", async () => {
+  await withExtensionEnv(
+    async () => {
+      const tools = await registeredTools();
+      assert.deepEqual(tools, []);
+    },
+    { toolsEnabled: undefined },
+  );
+});
+
+test("extension registers tools when explicitly enabled", async () => {
+  await withExtensionEnv(async () => {
+    const tools = await registeredTools();
+    assert.deepEqual(
+      tools.map((tool) => tool.name).sort(),
+      ["preview_container_create_static_site", "preview_port_expose"],
+    );
+  });
+});
 
 test("preview_port_expose posts to internal tools call with runtime token and request body", async () => {
   await withExtensionEnv(async () => {
