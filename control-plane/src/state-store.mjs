@@ -27,14 +27,14 @@ function ensureDir(path) {
 }
 
 function readJson(path, fallback) {
+  if (!existsSync(path)) return fallback;
   try {
-    if (!existsSync(path)) return fallback;
     return JSON.parse(readFileSync(path, "utf8"));
   } catch (error) {
-    return {
-      ...fallback,
-      readError: error instanceof Error ? error.message : String(error),
-    };
+    const message = error instanceof Error ? error.message : String(error);
+    const stateError = new Error(`failed to read state JSON: ${path}: ${message}`);
+    stateError.cause = error;
+    throw stateError;
   }
 }
 
@@ -217,14 +217,16 @@ export class StateStore {
   }
 
   ensureTokenFile(path) {
-    this.ensure();
-    if (existsSync(path)) {
-      const token = readFileSync(path, "utf8").trim();
-      if (token) return token;
-    }
-    const token = randomBytes(32).toString("base64url");
-    writeFileSync(path, `${token}\n`, { mode: 0o600 });
-    return token;
+    return this.withLock(() => {
+      this.ensureUnlocked();
+      if (existsSync(path)) {
+        const token = readFileSync(path, "utf8").trim();
+        if (token) return token;
+      }
+      const token = randomBytes(32).toString("base64url");
+      writeFileSync(path, `${token}\n`, { mode: 0o600 });
+      return token;
+    });
   }
 
   ensureRuntimeToken() {
@@ -265,16 +267,17 @@ export class StateStore {
 
   createAgentRequest(request) {
     const requestId = newId("cp_req");
+    const createdAt = nowIso();
     const created = {
+      ...request,
       schemaVersion: 1,
       requestId,
       runtimeId: request.runtimeId || null,
       message: request.message || "",
-      status: request.status || "submitted",
+      status: "submitted",
       source: request.source || "control-plane",
-      createdAt: nowIso(),
-      updatedAt: nowIso(),
-      ...request,
+      createdAt,
+      updatedAt: createdAt,
     };
     this.update((state) => {
       state.agentRequests[requestId] = created;
@@ -344,13 +347,14 @@ export class StateStore {
 
   createApproval(approval) {
     const approvalId = newId("appr");
+    const createdAt = nowIso();
     const created = {
+      ...approval,
       schemaVersion: 1,
       approvalId,
       status: "pending",
-      createdAt: nowIso(),
-      updatedAt: nowIso(),
-      ...approval,
+      createdAt,
+      updatedAt: createdAt,
     };
     this.update((state) => {
       state.approvals[approvalId] = created;
@@ -443,13 +447,14 @@ export class StateStore {
 
   createGatekeeperReview(review) {
     const reviewId = newId("gk");
+    const createdAt = nowIso();
     const created = {
+      ...review,
       schemaVersion: 1,
       reviewId,
       status: "started",
-      createdAt: nowIso(),
-      updatedAt: nowIso(),
-      ...review,
+      createdAt,
+      updatedAt: createdAt,
     };
     this.update((state) => {
       state.gatekeeperReviews[reviewId] = created;

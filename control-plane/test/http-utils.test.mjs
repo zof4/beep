@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { sendJson } from "../src/http-utils.mjs";
+import { readJsonBody, sendJson } from "../src/http-utils.mjs";
+
+async function* requestChunks(...chunks) {
+  for (const chunk of chunks) {
+    yield chunk;
+  }
+}
 
 test("control-plane JSON responses do not allow wildcard CORS by default", () => {
   let headers = null;
@@ -16,4 +22,33 @@ test("control-plane JSON responses do not allow wildcard CORS by default", () =>
   assert.equal(headers["access-control-allow-origin"], "http://127.0.0.1:8788");
   assert.notEqual(headers["access-control-allow-origin"], "*");
   assert.equal(headers.vary, "Origin");
+});
+
+test("readJsonBody returns an empty object for empty bodies", async () => {
+  assert.deepEqual(await readJsonBody(requestChunks()), {});
+  assert.deepEqual(await readJsonBody(requestChunks(Buffer.from("   \n\t"))), {});
+});
+
+test("readJsonBody rejects invalid JSON with a 400 status", async () => {
+  await assert.rejects(readJsonBody(requestChunks(Buffer.from("{"))), {
+    status: 400,
+    message: /invalid JSON body/,
+  });
+});
+
+test("readJsonBody enforces the byte limit before parsing", async () => {
+  await assert.rejects(readJsonBody(requestChunks(Buffer.from('{"message":"too large"}')), 8), {
+    status: 413,
+    message: "request body too large",
+  });
+});
+
+test("readJsonBody preserves UTF-8 characters split across chunks", async () => {
+  const payload = Buffer.from(JSON.stringify({ message: "hello 🙂" }));
+  const emoji = Buffer.from("🙂");
+  const splitAt = payload.indexOf(emoji) + 1;
+
+  const parsed = await readJsonBody(requestChunks(payload.subarray(0, splitAt), payload.subarray(splitAt)));
+
+  assert.deepEqual(parsed, { message: "hello 🙂" });
 });

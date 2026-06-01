@@ -1,17 +1,18 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { StateStore } from "../src/state-store.mjs";
 
 function tempStore() {
-  const dir = mkdtempSync(join(tmpdir(), "beep-state-store-test-"));
+  const dir = fs.mkdtempSync(join(tmpdir(), "beep-state-store-test-"));
   const store = new StateStore(dir);
   return {
     dir,
     store,
-    cleanup: () => rmSync(dir, { recursive: true, force: true }),
+    cleanup: () => fs.rmSync(dir, { recursive: true, force: true }),
   };
 }
 
@@ -32,7 +33,7 @@ test("state store records approval and audit entry in one locked mutation", () =
     assert.equal(state.approvals[approval.approvalId].approvalId, approval.approvalId);
     assert.equal(state.audit.at(-1).kind, "approval_created");
     assert.equal(state.audit.at(-1).approvalId, approval.approvalId);
-    assert.equal(existsSync(join(dir, "state.lock")), false);
+    assert.equal(fs.existsSync(join(dir, "state.lock")), false);
   } finally {
     cleanup();
   }
@@ -70,6 +71,72 @@ test("state store approval transitions compare current status under the lock", (
   }
 });
 
+test("state store create methods ignore caller-supplied reserved fields", () => {
+  const { store, cleanup } = tempStore();
+  try {
+    const agentRequest = store.createAgentRequest({
+      requestId: "caller-request",
+      runtimeId: "local",
+      message: "hello",
+      status: "approved",
+      createdAt: "caller-created",
+      updatedAt: "caller-updated",
+    });
+    const approval = store.createApproval({
+      approvalId: "caller-approval",
+      runtimeId: "local",
+      toolCallId: "call_reserved",
+      action: "preview.container.createStaticSite",
+      status: "approved",
+      createdAt: "caller-created",
+      updatedAt: "caller-updated",
+    });
+    const review = store.createGatekeeperReview({
+      reviewId: "caller-review",
+      runtimeId: "local",
+      toolCallId: "call_reserved",
+      action: "preview.container.createStaticSite",
+      status: "approved",
+      createdAt: "caller-created",
+      updatedAt: "caller-updated",
+    });
+
+    const state = store.readState();
+    const requestAudit = state.audit.find((event) => event.kind === "agent_request_created");
+    const approvalAudit = state.audit.find((event) => event.kind === "approval_created");
+    const reviewAudit = state.audit.find((event) => event.kind === "gatekeeper_review_created");
+
+    assert.match(agentRequest.requestId, /^cp_req_/);
+    assert.equal(agentRequest.status, "submitted");
+    assert.notEqual(agentRequest.createdAt, "caller-created");
+    assert.notEqual(agentRequest.updatedAt, "caller-updated");
+    assert.equal(state.agentRequests[agentRequest.requestId].requestId, agentRequest.requestId);
+    assert.equal(state.agentRequests["caller-request"], undefined);
+    assert.equal(requestAudit.requestId, agentRequest.requestId);
+    assert.equal(requestAudit.status, "submitted");
+
+    assert.match(approval.approvalId, /^appr_/);
+    assert.equal(approval.status, "pending");
+    assert.notEqual(approval.createdAt, "caller-created");
+    assert.notEqual(approval.updatedAt, "caller-updated");
+    assert.equal(state.approvals[approval.approvalId].approvalId, approval.approvalId);
+    assert.equal(state.approvals["caller-approval"], undefined);
+    assert.equal(approvalAudit.approvalId, approval.approvalId);
+    assert.equal(approvalAudit.status, "pending");
+
+    assert.match(review.reviewId, /^gk_/);
+    assert.equal(review.status, "started");
+    assert.notEqual(review.createdAt, "caller-created");
+    assert.notEqual(review.updatedAt, "caller-updated");
+    assert.equal(state.gatekeeperReviews[review.reviewId].reviewId, review.reviewId);
+    assert.equal(state.gatekeeperReviews["caller-review"], undefined);
+    assert.equal(reviewAudit.reviewId, review.reviewId);
+    assert.equal(reviewAudit.status, "started");
+  } finally {
+    cleanup();
+  }
+});
+
 test("state store separates runtime, runtime API, model credential, and operator tokens", () => {
   const { store, cleanup } = tempStore();
   try {
@@ -83,6 +150,54 @@ test("state store separates runtime, runtime API, model credential, and operator
     assert.equal(store.ensureRuntimeApiToken(), runtimeApiToken);
     assert.equal(store.ensureModelCredentialToken(), modelCredentialToken);
     assert.equal(store.ensureOperatorToken(), operatorToken);
+  } finally {
+    cleanup();
+  }
+});
+
+test("state store creates first-time token files while holding the state lock", async () => {
+  const { dir, cleanup } = tempStore();
+  const tokenPath = join(dir, "runtime-token");
+  const lockPath = join(dir, "state.lock");
+  const originalWriteFileSync = fs.writeFileSync;
+
+  try {
+    fs.writeFileSync = function writeFileSyncWithTokenLockCheck(path, ...args) {
+      if (path === tokenPath && !fs.existsSync(lockPath)) {
+        throw new Error("token file was created without the state lock");
+      }
+      return originalWriteFileSync.call(this, path, ...args);
+    };
+    syncBuiltinESMExports();
+
+    const { StateStore: CheckedStateStore } = await import(`../src/state-store.mjs?token-lock=${Date.now()}`);
+    const store = new CheckedStateStore(dir);
+
+    assert.match(store.ensureRuntimeToken(), /^[A-Za-z0-9_-]+$/);
+  } finally {
+    fs.writeFileSync = originalWriteFileSync;
+    syncBuiltinESMExports();
+    cleanup();
+  }
+});
+
+test("state store fails closed and preserves malformed state JSON", () => {
+  const { dir, store, cleanup } = tempStore();
+  try {
+    store.ensure();
+    const statePath = join(dir, "state.json");
+    fs.writeFileSync(statePath, "{not-json\n", { mode: 0o600 });
+
+    assert.throws(() => store.readState(), /failed to read state JSON/);
+    assert.throws(
+      () => {
+        store.update((state) => {
+          state.audit.push({ kind: "should_not_write" });
+        });
+      },
+      /failed to read state JSON/,
+    );
+    assert.equal(fs.readFileSync(statePath, "utf8"), "{not-json\n");
   } finally {
     cleanup();
   }

@@ -28,15 +28,19 @@ export function parseRequestUrl(request) {
 }
 
 export async function readJsonBody(request, limitBytes = 1024 * 1024) {
-  let body = "";
+  const chunks = [];
+  let totalBytes = 0;
   for await (const chunk of request) {
-    body += chunk;
-    if (Buffer.byteLength(body) > limitBytes) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    totalBytes += buffer.byteLength;
+    if (totalBytes > limitBytes) {
       const error = new Error("request body too large");
       error.status = 413;
       throw error;
     }
+    chunks.push(buffer);
   }
+  const body = Buffer.concat(chunks, totalBytes).toString("utf8");
   if (!body.trim()) return {};
   try {
     return JSON.parse(body);
