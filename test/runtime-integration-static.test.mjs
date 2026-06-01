@@ -87,3 +87,27 @@ test("control-plane tool env is passed to Pi without changing Hindsight memory o
   assert.ok(assembleIndex > 0, "LCM assemble should still exist");
   assert.ok(recallIndex < assembleIndex, "Hindsight recall must still happen before LCM assemble");
 });
+
+test("control-plane tools are fail closed by default and Pi env is sanitized", () => {
+  assert.match(
+    apiSource,
+    /process\.env\.BEEP_CONTROL_PLANE_TOOLS_ENABLED\s*\|\|\s*"0"/,
+    "runtime control-plane tools should default disabled",
+  );
+  assert.match(apiSource, /function buildPiChildEnv\(/, "Pi child env should be built through a sanitizer");
+  assert.doesNotMatch(apiSource, /\.\.\.process\.env/, "Pi child env must not inherit the full runtime environment");
+  assert.match(apiSource, /delete env\.BEEP_MODEL_GATEWAY_CREDENTIAL_URL/);
+  assert.match(apiSource, /delete env\.BEEP_MODEL_GATEWAY_CAPABILITY_TOKEN/);
+  assert.match(apiSource, /delete env\.BEEP_RUNTIME_API_TOKEN/);
+  assert.match(apiSource, /delete env\.BEEP_CONTROL_PLANE_OPERATOR_TOKEN/);
+  assert.doesNotMatch(
+    apiSource,
+    /BEEP_CONTROL_PLANE_RUNTIME_TOKEN:\s*CONTROL_PLANE_RUNTIME_TOKEN/,
+    "Pi child env should only receive the runtime tool token when the tool extension is loaded",
+  );
+  assert.match(
+    apiSource,
+    /if \(controlPlaneToolsExtensionLoaded\) \{[\s\S]*env\.BEEP_CONTROL_PLANE_RUNTIME_TOKEN = CONTROL_PLANE_RUNTIME_TOKEN/,
+    "runtime tool token should be assigned inside the control-plane tools loaded guard",
+  );
+});

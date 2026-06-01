@@ -45,7 +45,7 @@ const LCM_CONTEXT_TOKEN = process.env.BEEP_LCM_CONTEXT_TOKEN || randomUUID();
 const LCM_CONTEXT_TOKEN_BUDGET = process.env.BEEP_LCM_CONTEXT_TOKEN_BUDGET || "128000";
 const LCM_CONTEXT_TIMEOUT_MS = process.env.BEEP_LCM_CONTEXT_TIMEOUT_MS || "15000";
 const CONTROL_PLANE_TOOLS_ENABLED =
-  !["0", "false", "no", "off"].includes(String(process.env.BEEP_CONTROL_PLANE_TOOLS_ENABLED || "1").toLowerCase());
+  !["0", "false", "no", "off"].includes(String(process.env.BEEP_CONTROL_PLANE_TOOLS_ENABLED || "0").toLowerCase());
 const CONTROL_PLANE_TOOLS_EXTENSION_PATH =
   process.env.BEEP_CONTROL_PLANE_TOOLS_EXTENSION_PATH || "/runtime/pi-extensions/control-plane-tools-extension.mjs";
 const CONTROL_PLANE_URL = process.env.BEEP_CONTROL_PLANE_URL || "";
@@ -291,6 +291,47 @@ function validateThinking(thinking) {
   }
 }
 
+function buildPiChildEnv(session, { lcmContextExtensionLoaded, controlPlaneToolsExtensionLoaded }) {
+  const env = {
+    PATH: process.env.PATH || "",
+    HOME: process.env.HOME || join(STATE_DIR, "home"),
+    TMPDIR: process.env.TMPDIR || "/tmp",
+    CODEX_HOME,
+    BEEP_STATE_DIR: STATE_DIR,
+    BEEP_WORKSPACE_DIR: WORKSPACE_DIR,
+    PI_CODING_AGENT_DIR: join(session.rootDir, "pi-agent"),
+    PI_CODING_AGENT_SESSION_DIR: session.sessionDir,
+    BEEP_LCM_CONTEXT_ENABLED: lcmContextExtensionLoaded ? "1" : "0",
+    BEEP_LCM_CONTEXT_URL: LCM_CONTEXT_URL,
+    BEEP_LCM_CONTEXT_TOKEN: LCM_CONTEXT_TOKEN,
+    BEEP_LCM_RUNTIME_SESSION_ID: session.id,
+    BEEP_LCM_CONTEXT_TOKEN_BUDGET: LCM_CONTEXT_TOKEN_BUDGET,
+    BEEP_LCM_CONTEXT_TIMEOUT_MS: LCM_CONTEXT_TIMEOUT_MS,
+    BEEP_CONTROL_PLANE_TOOLS_ENABLED: controlPlaneToolsExtensionLoaded ? "1" : "0",
+  };
+
+  if (controlPlaneToolsExtensionLoaded) {
+    env.BEEP_CONTROL_PLANE_TOOLS_EXTENSION_PATH = CONTROL_PLANE_TOOLS_EXTENSION_PATH;
+    env.BEEP_CONTROL_PLANE_URL = CONTROL_PLANE_URL;
+    env.BEEP_CONTROL_PLANE_RUNTIME_ID = CONTROL_PLANE_RUNTIME_ID;
+    env.BEEP_CONTROL_PLANE_RUNTIME_TOKEN = CONTROL_PLANE_RUNTIME_TOKEN;
+    env.BEEP_CONTROL_PLANE_TOOL_TIMEOUT_MS = CONTROL_PLANE_TOOL_TIMEOUT_MS;
+  }
+
+  delete env.BEEP_MODEL_GATEWAY_CREDENTIAL_URL;
+  delete env.BEEP_MODEL_GATEWAY_CAPABILITY_TOKEN;
+  delete env.BEEP_RUNTIME_API_TOKEN;
+  delete env.BEEP_CONTROL_PLANE_OPERATOR_TOKEN;
+  delete env.BEEP_OPERATOR_TOKEN;
+  delete env.BEEP_MODEL_CREDENTIAL_TOKEN;
+  delete env.BEEP_MODEL_GATEWAY_TOKEN;
+
+  for (const [key, value] of Object.entries(env)) {
+    if (value === undefined || value === null) delete env[key];
+  }
+  return env;
+}
+
 class PiRpcSession {
   constructor({ id, model, thinking, rootDir, workspace, sessionDir, resumeLatest = false }) {
     this.id = id;
@@ -424,24 +465,7 @@ class PiRpcSession {
       createdAt: this.createdAt,
     });
 
-    const env = {
-      ...process.env,
-      HOME: process.env.HOME || join(STATE_DIR, "home"),
-      PI_CODING_AGENT_DIR: join(this.rootDir, "pi-agent"),
-      PI_CODING_AGENT_SESSION_DIR: this.sessionDir,
-      BEEP_LCM_CONTEXT_ENABLED: lcmContextExtensionLoaded ? "1" : "0",
-      BEEP_LCM_CONTEXT_URL: LCM_CONTEXT_URL,
-      BEEP_LCM_CONTEXT_TOKEN: LCM_CONTEXT_TOKEN,
-      BEEP_LCM_RUNTIME_SESSION_ID: this.id,
-      BEEP_LCM_CONTEXT_TOKEN_BUDGET: LCM_CONTEXT_TOKEN_BUDGET,
-      BEEP_LCM_CONTEXT_TIMEOUT_MS: LCM_CONTEXT_TIMEOUT_MS,
-      BEEP_CONTROL_PLANE_TOOLS_ENABLED: controlPlaneToolsExtensionLoaded ? "1" : "0",
-      BEEP_CONTROL_PLANE_TOOLS_EXTENSION_PATH: CONTROL_PLANE_TOOLS_EXTENSION_PATH,
-      BEEP_CONTROL_PLANE_URL: CONTROL_PLANE_URL,
-      BEEP_CONTROL_PLANE_RUNTIME_ID: CONTROL_PLANE_RUNTIME_ID,
-      BEEP_CONTROL_PLANE_RUNTIME_TOKEN: CONTROL_PLANE_RUNTIME_TOKEN,
-      BEEP_CONTROL_PLANE_TOOL_TIMEOUT_MS: CONTROL_PLANE_TOOL_TIMEOUT_MS,
-    };
+    const env = buildPiChildEnv(this, { lcmContextExtensionLoaded, controlPlaneToolsExtensionLoaded });
 
     this.stdoutStream = createWriteStream(this.stdoutPath, { flags: "a" });
     this.stderrStream = createWriteStream(this.stderrPath, { flags: "a" });

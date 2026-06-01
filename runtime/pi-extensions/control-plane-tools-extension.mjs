@@ -53,20 +53,31 @@ async function callControlPlaneTool(action, args, toolCallId) {
     };
   }
 
-  const { response, payload } = await postJson(
-    `${controlPlaneUrl.replace(/\/+$/u, "")}/internal/tools/call`,
-    {
-      runtimeId,
-      action,
-      args,
-      toolCallId,
-    },
-    {
-      token,
-      timeoutMs: positiveIntegerEnv("BEEP_CONTROL_PLANE_TOOL_TIMEOUT_MS", 15_000),
-    },
-  );
-  return { response, payload };
+  try {
+    const { response, payload } = await postJson(
+      `${controlPlaneUrl.replace(/\/+$/u, "")}/internal/tools/call`,
+      {
+        runtimeId,
+        action,
+        args,
+        toolCallId,
+      },
+      {
+        token,
+        timeoutMs: positiveIntegerEnv("BEEP_CONTROL_PLANE_TOOL_TIMEOUT_MS", 15_000),
+      },
+    );
+    return { response, payload };
+  } catch (error) {
+    return {
+      response: null,
+      payload: {
+        ok: false,
+        status: "request_failed",
+        error: error instanceof Error ? error.message : String(error),
+      },
+    };
+  }
 }
 
 function resultFromToolPayload(toolName, response, payload, successText) {

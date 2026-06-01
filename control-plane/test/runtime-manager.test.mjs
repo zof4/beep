@@ -6,6 +6,8 @@ import test from "node:test";
 import { RuntimeManager } from "../src/runtime-manager.mjs";
 import { StateStore } from "../src/state-store.mjs";
 
+const runtimeManagerSource = readFileSync(new URL("../src/runtime-manager.mjs", import.meta.url), "utf8");
+
 const requiredRuntimeBoundaryEnv = [
   "BEEP_RUNTIME_API_TOKEN",
   "BEEP_MODEL_GATEWAY_CREDENTIAL_URL",
@@ -78,4 +80,19 @@ test("runtime compose file declares control-plane boundary environment", () => {
   for (const envName of requiredRuntimeBoundaryEnv) {
     assert.match(compose, new RegExp(`^\\s+${envName}:`, "mu"), `${envName} must be declared in compose environment`);
   }
+});
+
+test("control-plane tools default fail closed for compose and managed launches", () => {
+  const compose = readFileSync(join(process.cwd(), "docker/compose.runtime-dev.yml"), "utf8");
+
+  assert.match(
+    compose,
+    /BEEP_CONTROL_PLANE_TOOLS_ENABLED:\s*"\$\{BEEP_CONTROL_PLANE_TOOLS_ENABLED:-0\}"/u,
+    "compose should default control-plane tools disabled",
+  );
+  assert.match(
+    runtimeManagerSource,
+    /BEEP_CONTROL_PLANE_TOOLS_ENABLED:\s*process\.env\.BEEP_CONTROL_PLANE_TOOLS_ENABLED\s*\|\|\s*"0"/u,
+    "managed runtime launches should default control-plane tools disabled",
+  );
 });
