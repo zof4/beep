@@ -80,6 +80,7 @@ services:
     restart: unless-stopped
     ports:
       - "127.0.0.1:8787:8787"
+      - "127.0.0.1:13000-13099:3000-3099"
     depends_on:
       hindsight:
         condition: service_healthy

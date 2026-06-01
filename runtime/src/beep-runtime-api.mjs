@@ -13,6 +13,7 @@ import {
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { resolveCodexAccessToken } from "./codex-auth-for-pi.mjs";
+import { authorizeRuntimeApiRequest } from "./runtime-api-auth.mjs";
 import {
   defaultLcmService,
   lcmSessionIdForRuntimeSession,
@@ -35,6 +36,7 @@ const RUNTIME_STATE_PATH = process.env.BEEP_RUNTIME_STATE || join(STATE_DIR, "be
 const DEFAULT_MODEL = process.env.BEEP_PI_CODEX_MODEL || "gpt-5.5";
 const DEFAULT_THINKING = process.env.BEEP_PI_THINKING || "low";
 const DEFAULT_AGENT_ID = process.env.BEEP_AGENT_ID || "beep";
+const RUNTIME_API_TOKEN = process.env.BEEP_RUNTIME_API_TOKEN || "";
 const AGENT_AUTOSTART = process.env.BEEP_AGENT_AUTOSTART !== "0" && process.env.BEEP_AGENT_AUTOSTART !== "false";
 const LCM_CONTEXT_ENABLED =
   !["0", "false", "no", "off"].includes(String(process.env.BEEP_LCM_CONTEXT_ENABLED || "1").toLowerCase());
@@ -399,7 +401,11 @@ class PiRpcSession {
   }
 
   async spawn() {
-    const accessToken = await resolveCodexAccessToken(CODEX_HOME);
+    const accessToken = await resolveCodexAccessToken(CODEX_HOME, {
+      provider: "openai-codex",
+      model: this.model,
+      runtimeSessionId: this.id,
+    });
     const { tsxBin, piCli } = commandPath();
     const args = [
       piCli,
@@ -1944,6 +1950,17 @@ async function dispatch(req, res) {
     await handleCapabilities(req, res);
     return;
   }
+
+  const runtimeApiAuth = authorizeRuntimeApiRequest({
+    pathname: url.pathname,
+    authorization: req.headers.authorization,
+    runtimeApiToken: RUNTIME_API_TOKEN,
+  });
+  if (!runtimeApiAuth.ok) {
+    routeError(res, runtimeApiAuth.status, runtimeApiAuth.error);
+    return;
+  }
+
   if (url.pathname === "/sessions" && req.method === "GET") {
     jsonResponse(res, 200, { ok: true, sessions: listSessionStatuses() });
     return;

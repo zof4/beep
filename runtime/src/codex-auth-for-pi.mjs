@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 const TOKEN_URL = "https://auth.openai.com/oauth/token";
 const REFRESH_SKEW_SECONDS = 300;
+const FALSE_VALUES = new Set(["0", "false", "no", "off"]);
 
 function readAuth(authPath) {
   if (!existsSync(authPath)) {
@@ -84,7 +85,79 @@ async function refreshCodexAuth(authPath, auth) {
   return nextAuth;
 }
 
-export async function resolveCodexAccessToken(codexHome = process.env.CODEX_HOME || "/state/codex") {
+function runtimeCodexAuthAllowed(env = process.env) {
+  return !FALSE_VALUES.has(String(env.BEEP_ALLOW_RUNTIME_CODEX_AUTH || "").toLowerCase());
+}
+
+async function resolveGatewayAccessToken({
+  credentialUrl,
+  capabilityToken,
+  provider = "openai-codex",
+  model = "gpt-5.5",
+  runtimeSessionId = null,
+  fetchImpl = fetch,
+}) {
+  if (typeof capabilityToken !== "string" || capabilityToken.length === 0) {
+    throw new Error("Model credential gateway is configured but BEEP_MODEL_GATEWAY_CAPABILITY_TOKEN is missing.");
+  }
+
+  const response = await fetchImpl(credentialUrl, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${capabilityToken}`,
+    },
+    body: JSON.stringify({
+      provider,
+      model,
+      runtimeSessionId,
+    }),
+  });
+
+  if (!response.ok) {
+    const text = await response.text().catch(() => "");
+    throw new Error(`Model credential gateway request failed (${response.status}): ${text || response.statusText}`);
+  }
+
+  const json = await response.json();
+  if (json?.ok === false) {
+    throw new Error(`Model credential gateway denied credential request: ${json.error || "unknown error"}`);
+  }
+
+  const accessToken =
+    typeof json?.apiKey === "string" && json.apiKey.length > 0
+      ? json.apiKey
+      : typeof json?.accessToken === "string" && json.accessToken.length > 0
+        ? json.accessToken
+        : typeof json?.access_token === "string" && json.access_token.length > 0
+          ? json.access_token
+          : "";
+  if (!accessToken) {
+    throw new Error("Model credential gateway response did not include apiKey.");
+  }
+  return accessToken;
+}
+
+export async function resolveCodexAccessToken(codexHome = process.env.CODEX_HOME || "/state/codex", options = {}) {
+  const env = options.env || process.env;
+  const credentialUrl = env.BEEP_MODEL_GATEWAY_CREDENTIAL_URL || "";
+  if (credentialUrl) {
+    return resolveGatewayAccessToken({
+      credentialUrl,
+      capabilityToken: env.BEEP_MODEL_GATEWAY_CAPABILITY_TOKEN || "",
+      provider: options.provider || "openai-codex",
+      model: options.model || env.BEEP_PI_CODEX_MODEL || "gpt-5.5",
+      runtimeSessionId: options.runtimeSessionId || null,
+      fetchImpl: options.fetchImpl || fetch,
+    });
+  }
+
+  if (!runtimeCodexAuthAllowed(env)) {
+    throw new Error(
+      "Runtime Codex auth is disabled and no model credential gateway is configured; refusing to read CODEX_HOME auth.",
+    );
+  }
+
   const authPath = join(codexHome, "auth.json");
   let auth = readAuth(authPath);
   let accessToken = auth?.tokens?.access_token;

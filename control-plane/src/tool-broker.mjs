@@ -45,6 +45,15 @@ export class ToolBroker {
 
   async call({ runtimeId = RUNTIME_ID, action, tool, args = {}, toolCallId = null }) {
     const requestedAction = action || tool;
+    if (runtimeId !== RUNTIME_ID) {
+      return {
+        ok: false,
+        status: "denied",
+        decision: "deny",
+        error: `Unknown runtimeId: ${runtimeId}`,
+      };
+    }
+
     const definition = this.toolsByAction.get(requestedAction);
     if (!definition) {
       return this.finish({

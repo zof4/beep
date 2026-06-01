@@ -96,3 +96,19 @@ test("control-plane tools default fail closed for compose and managed launches",
     "managed runtime launches should default control-plane tools disabled",
   );
 });
+
+test("runtime compose publishes preview host port range for direct preview URLs", () => {
+  const compose = readFileSync(join(process.cwd(), "docker/compose.runtime-dev.yml"), "utf8");
+
+  assert.match(
+    compose,
+    /"127\.0\.0\.1:13000-13099:3000-3099"/u,
+    "compose should map preview host ports 13000-13099 to runtime container ports 3000-3099",
+  );
+});
+
+test("control-plane README does not reference missing agent runtime boundaries doc", () => {
+  const readme = readFileSync(join(process.cwd(), "control-plane/README.md"), "utf8");
+
+  assert.doesNotMatch(readme, /\.\.\/docs\/agent-runtime-boundaries\.md/u);
+});

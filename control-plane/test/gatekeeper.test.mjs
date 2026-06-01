@@ -44,9 +44,10 @@ function validStaticSiteEvidence(overrides = {}) {
   };
 }
 
-function installRuntimeFetchMock(t) {
+function installRuntimeFetchMock(t, onFetch = null) {
   const originalFetch = globalThis.fetch;
-  globalThis.fetch = async (url) => {
+  globalThis.fetch = async (url, options = {}) => {
+    onFetch?.(url, options);
     const path = String(url);
     if (path.endsWith("/agent/requests")) {
       return { ok: true, json: async () => ({ requests: [] }) };
@@ -592,6 +593,78 @@ test("gatekeeper context includes control-plane authorization scoped to the curr
 
     assert.match(context.authorizationText, /api-sessions\/agent_beep\/site/iu);
     assert.match(context.text, /CONTROL-PLANE USER REQUESTS/u);
+  } finally {
+    cleanup();
+  }
+});
+
+test("gatekeeper context sends runtime API token to runtime agent endpoints", async (t) => {
+  const { store, cleanup } = tempStore();
+  try {
+    const token = store.ensureRuntimeApiToken();
+    const seen = [];
+    installRuntimeFetchMock(t, (url, options) => {
+      seen.push({ url: String(url), authorization: options.headers?.authorization });
+    });
+
+    await collectGatekeeperContext({ store, runtimeId: "local", toolCallId: "call_auth" });
+
+    assert.deepEqual(
+      seen.map((request) => request.url.replace(/^http:\/\/127\.0\.0\.1:8787/u, "")),
+      ["/agent/requests", "/agent/events?limit=80", "/agent/summary"],
+    );
+    assert.deepEqual(
+      seen.map((request) => request.authorization),
+      [`Bearer ${token}`, `Bearer ${token}`, `Bearer ${token}`],
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test("broker rejects foreign runtime before gatekeeper review, approval, or preview exposure", async () => {
+  const { store, cleanup } = tempStore();
+  try {
+    const gatekeeper = new Gatekeeper({
+      store,
+      mode: "auto_review",
+      collectContext: async () => ({
+        ok: true,
+        errors: [],
+        authorizationText:
+          "Create a static site and request a managed static preview container for /workspace/api-sessions/agent_beep/site.",
+        text: "",
+      }),
+      collectEvidence: () => validStaticSiteEvidence(),
+    });
+    const broker = new ToolBroker({ store, gatekeeper });
+    broker.executeApprovedApproval = async () => {
+      throw new Error("foreign runtime should fail before execution");
+    };
+
+    const staticSite = await broker.call({
+      runtimeId: "not-local",
+      toolCallId: "call_foreign_static",
+      action: "preview.container.createStaticSite",
+      args: { siteName: "demo", sourcePath: "/workspace/api-sessions/agent_beep/site" },
+    });
+    const portExpose = await broker.call({
+      runtimeId: "not-local",
+      toolCallId: "call_foreign_port",
+      action: "preview.port.expose",
+      args: { port: 3000 },
+    });
+
+    assert.equal(staticSite.ok, false);
+    assert.equal(staticSite.status, "denied");
+    assert.match(staticSite.error, /Unknown runtimeId: not-local/u);
+    assert.equal(portExpose.ok, false);
+    assert.equal(portExpose.status, "denied");
+    assert.match(portExpose.error, /Unknown runtimeId: not-local/u);
+    assert.equal(store.listGatekeeperReviews().length, 0);
+    assert.equal(store.listApprovals().length, 0);
+    assert.equal(store.listAudit().length, 0);
+    assert.deepEqual(store.readState().exposures, {});
   } finally {
     cleanup();
   }

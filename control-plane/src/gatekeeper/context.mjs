@@ -10,11 +10,11 @@ function textFromValue(value, maxChars = 20_000) {
   }
 }
 
-async function fetchRuntimeJson(path, { timeoutMs = 1500 } = {}) {
+async function fetchRuntimeJson(path, { timeoutMs = 1500, headers = {} } = {}) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = await fetch(`${RUNTIME_API_URL}${path}`, { signal: controller.signal });
+    const response = await fetch(`${RUNTIME_API_URL}${path}`, { headers, signal: controller.signal });
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) {
       return { ok: false, status: response.status, error: payload?.error || response.statusText };
@@ -76,10 +76,13 @@ function collectEventText(eventsPayload) {
 }
 
 export async function collectGatekeeperContext({ store = null, runtimeId = null, toolCallId = null } = {}) {
+  const runtimeApiToken =
+    typeof store?.ensureRuntimeApiToken === "function" ? store.ensureRuntimeApiToken() : null;
+  const runtimeHeaders = runtimeApiToken ? { authorization: `Bearer ${runtimeApiToken}` } : {};
   const [requests, events, summary] = await Promise.all([
-    fetchRuntimeJson("/agent/requests"),
-    fetchRuntimeJson("/agent/events?limit=80"),
-    fetchRuntimeJson("/agent/summary"),
+    fetchRuntimeJson("/agent/requests", { headers: runtimeHeaders }),
+    fetchRuntimeJson("/agent/events?limit=80", { headers: runtimeHeaders }),
+    fetchRuntimeJson("/agent/summary", { headers: runtimeHeaders }),
   ]);
 
   const sections = [];

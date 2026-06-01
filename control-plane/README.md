@@ -8,8 +8,8 @@ ChatGPT credentials, Docker control, approval policy, or future gatekeeper
 policy. The agent workspace is a third, less-trusted area inside the runtime for
 model-directed shell and file work.
 
-See [Agent Runtime Boundaries](../docs/agent-runtime-boundaries.md) for the
-canonical split between the control plane, runtime house, and agent workspace.
+This README is the local reference for the split between the control plane,
+runtime house, and agent workspace.
 
 Run it in the foreground from the host:
 
