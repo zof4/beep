@@ -348,6 +348,12 @@ test("state store fails closed for malformed nested map records", () => {
     { name: "approval null", value: { approvals: { appr_bad: null }, audit: [] } },
     { name: "approval array", value: { approvals: { appr_bad: [] }, audit: [] } },
     { name: "agent request primitive", value: { agentRequests: { cp_req_bad: "bad" }, audit: [] } },
+    { name: "runtime missing id", value: { runtimes: { local: {} }, audit: [] } },
+    { name: "agent request missing id", value: { agentRequests: { cp_req_bad: {} }, audit: [] } },
+    { name: "approval missing id", value: { approvals: { appr_bad: {} }, audit: [] } },
+    { name: "gatekeeper review missing id", value: { gatekeeperReviews: { gk_bad: {} }, audit: [] } },
+    { name: "site missing id", value: { sites: { site_bad: {} }, audit: [] } },
+    { name: "runtime id mismatch", value: { runtimes: { local: { runtimeId: "other" } }, audit: [] } },
     {
       name: "approval id mismatch",
       value: { approvals: { appr_bad: { approvalId: "appr_other" } }, audit: [] },
@@ -361,6 +367,22 @@ test("state store fails closed for malformed nested map records", () => {
       value: { gatekeeperReviews: { gk_bad: { reviewId: "gk_other" } }, audit: [] },
     },
     { name: "site id mismatch", value: { sites: { site_bad: { siteId: "site_other" } }, audit: [] } },
+    {
+      name: "exposure key mismatch",
+      value: { exposures: { "local:3000": { runtimeId: "local", containerPort: 3001 } }, audit: [] },
+    },
+    {
+      name: "exposure missing runtime id",
+      value: { exposures: { "local:3000": { containerPort: 3000 } }, audit: [] },
+    },
+    {
+      name: "exposure blank runtime id",
+      value: { exposures: { "local:3000": { runtimeId: " ", containerPort: 3000 } }, audit: [] },
+    },
+    {
+      name: "exposure invalid container port",
+      value: { exposures: { "local:3000": { runtimeId: "local", containerPort: "03000" } }, audit: [] },
+    },
   ];
 
   for (const { name, value } of cases) {

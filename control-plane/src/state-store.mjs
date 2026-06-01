@@ -111,9 +111,29 @@ function validateStateMapRecords(state, field, path) {
     if (!isPlainObject(record)) {
       invalidStateShape(path, `${field}.${key} must be an object`);
     }
-    if (idField && Object.hasOwn(record, idField) && record[idField] !== key) {
+    if (idField && record[idField] !== key) {
       invalidStateShape(path, `${field}.${key}.${idField} must match map key`);
     }
+    if (field === "exposures") validateExposureRecord(key, record, path);
+  }
+}
+
+function normalizeExposureContainerPort(containerPort) {
+  if (Number.isInteger(containerPort)) return String(containerPort);
+  if (typeof containerPort !== "string" || !/^(0|[1-9]\d*)$/.test(containerPort)) return null;
+  return String(Number(containerPort)) === containerPort ? containerPort : null;
+}
+
+function validateExposureRecord(key, record, path) {
+  if (typeof record.runtimeId !== "string" || record.runtimeId.trim() === "") {
+    invalidStateShape(path, `exposures.${key}.runtimeId must be a non-empty string`);
+  }
+  const containerPort = normalizeExposureContainerPort(record.containerPort);
+  if (containerPort === null) {
+    invalidStateShape(path, `exposures.${key}.containerPort must be an integer or canonical integer string`);
+  }
+  if (`${record.runtimeId}:${containerPort}` !== key) {
+    invalidStateShape(path, `exposures.${key} key must match runtimeId and containerPort`);
   }
 }
 
