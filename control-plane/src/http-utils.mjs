@@ -28,9 +28,13 @@ export function sendNotFound(response) {
 export function parseRequestUrl(request) {
   const url = request.url || "/";
   try {
-    return new URL(url, `http://${request.headers.host || `${HOST}:${PORT}`}`);
+    return new URL(url, `http://${request.headers?.host || `${HOST}:${PORT}`}`);
   } catch {
-    return new URL(url, `http://${HOST}:${PORT}`);
+    try {
+      return new URL(url, `http://${HOST}:${PORT}`);
+    } catch {
+      return new URL("/", `http://${HOST}:${PORT}`);
+    }
   }
 }
 

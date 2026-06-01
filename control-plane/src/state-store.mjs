@@ -108,9 +108,16 @@ function isUnsafeStateMapKey(key) {
   return UNSAFE_STATE_MAP_KEYS.has(String(key));
 }
 
-function assertSafeStateMapKey(key) {
-  if (isUnsafeStateMapKey(key)) {
-    throw new Error(`unsafe state map key: ${key}`);
+function isValidStateIdentity(value) {
+  return typeof value === "string" && value.trim() !== "" && !isUnsafeStateMapKey(value);
+}
+
+function assertValidStateIdentity(value) {
+  if (typeof value !== "string" || value.trim() === "") {
+    throw new Error(`invalid state identity: ${value}`);
+  }
+  if (isUnsafeStateMapKey(value)) {
+    throw new Error(`unsafe state map key: ${value}`);
   }
 }
 
@@ -118,15 +125,20 @@ function invalidStateShape(path, message) {
   throw new Error(`invalid state shape: ${path}: ${message}`);
 }
 
+function validateStateIdentity(value, path, label) {
+  if (!isValidStateIdentity(value)) {
+    invalidStateShape(path, `${label} must be a non-empty safe string`);
+  }
+}
+
 function validateStateMapRecords(state, field, path) {
   const idField = STATE_MAP_ID_FIELDS[field];
   for (const [key, record] of Object.entries(state[field])) {
-    if (isUnsafeStateMapKey(key)) {
-      invalidStateShape(path, `unsafe state map key: ${field}.${key}`);
-    }
+    validateStateIdentity(key, path, `${field} map key`);
     if (!isPlainObject(record)) {
       invalidStateShape(path, `${field}.${key} must be an object`);
     }
+    if (idField) validateStateIdentity(record[idField], path, `${field}.${key}.${idField}`);
     if (idField && record[idField] !== key) {
       invalidStateShape(path, `${field}.${key}.${idField} must match map key`);
     }
@@ -141,9 +153,7 @@ function normalizeExposureContainerPort(containerPort) {
 }
 
 function validateExposureRecord(key, record, path) {
-  if (typeof record.runtimeId !== "string" || record.runtimeId.trim() === "") {
-    invalidStateShape(path, `exposures.${key}.runtimeId must be a non-empty string`);
-  }
+  validateStateIdentity(record.runtimeId, path, `exposures.${key}.runtimeId`);
   const containerPort = normalizeExposureContainerPort(record.containerPort);
   if (containerPort === null) {
     invalidStateShape(path, `exposures.${key}.containerPort must be an integer or canonical integer string`);
@@ -357,7 +367,7 @@ export class StateStore {
   }
 
   upsertRuntime(runtimeId, patch) {
-    assertSafeStateMapKey(runtimeId);
+    assertValidStateIdentity(runtimeId);
     this.update((state) => {
       state.runtimes[runtimeId] = {
         ...(state.runtimes[runtimeId] || {}),
@@ -370,7 +380,7 @@ export class StateStore {
 
   upsertExposure(exposure) {
     const exposureKey = `${exposure.runtimeId}:${exposure.containerPort}`;
-    assertSafeStateMapKey(exposureKey);
+    assertValidStateIdentity(exposureKey);
     this.update((state) => {
       state.exposures[exposureKey] = {
         ...exposure,
@@ -406,7 +416,7 @@ export class StateStore {
   }
 
   updateAgentRequest(requestId, patch) {
-    assertSafeStateMapKey(requestId);
+    assertValidStateIdentity(requestId);
     let next = null;
     this.update((state) => {
       const current = state.agentRequests[requestId];
@@ -438,7 +448,7 @@ export class StateStore {
   }
 
   upsertSite(site, auditEvent = null) {
-    assertSafeStateMapKey(site.siteId);
+    assertValidStateIdentity(site.siteId);
     this.update((state) => {
       state.sites[site.siteId] = {
         ...(state.sites[site.siteId] || {}),
@@ -500,7 +510,7 @@ export class StateStore {
   }
 
   updateApproval(approvalId, patch) {
-    assertSafeStateMapKey(approvalId);
+    assertValidStateIdentity(approvalId);
     let next = null;
     this.update((state) => {
       const current = state.approvals[approvalId];
@@ -528,7 +538,7 @@ export class StateStore {
   }
 
   transitionApproval(approvalId, expectedStatus, patch) {
-    assertSafeStateMapKey(approvalId);
+    assertValidStateIdentity(approvalId);
     let result = null;
     this.update((state) => {
       const current = state.approvals[approvalId];
@@ -590,7 +600,7 @@ export class StateStore {
   }
 
   updateGatekeeperReview(reviewId, patch) {
-    assertSafeStateMapKey(reviewId);
+    assertValidStateIdentity(reviewId);
     let next = null;
     this.update((state) => {
       const current = state.gatekeeperReviews[reviewId];

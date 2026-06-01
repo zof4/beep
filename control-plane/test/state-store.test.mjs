@@ -312,7 +312,7 @@ test("state store validates helper mutations before persisting", () => {
     const statePath = join(dir, "state.json");
     const originalState = fs.readFileSync(statePath, "utf8");
 
-    assert.throws(() => store.upsertSite({ status: "running" }), /invalid state shape/);
+    assert.throws(() => store.upsertSite({ status: "running" }), /invalid state (identity|shape)/);
     assert.equal(fs.readFileSync(statePath, "utf8"), originalState);
     assert.deepEqual(store.readState().sites, {});
 
@@ -341,6 +341,23 @@ test("state store rejects unsafe dynamic map keys before mutation or persistence
     assert.equal(fs.readFileSync(statePath, "utf8"), originalState);
     assert.equal(Object.hasOwn(store.readState().runtimes, "__proto__"), false);
     assert.equal(Object.hasOwn(store.readState().sites, "constructor"), false);
+  } finally {
+    cleanup();
+  }
+});
+
+test("state store rejects blank write-side map identities before persistence", () => {
+  const { dir, store, cleanup } = tempStore();
+  try {
+    store.ensure();
+    const statePath = join(dir, "state.json");
+    const originalState = fs.readFileSync(statePath, "utf8");
+
+    assert.throws(() => store.upsertRuntime("", {}), /invalid state identity/);
+    assert.throws(() => store.upsertSite({ siteId: "", status: "running" }), /invalid state identity/);
+    assert.equal(fs.readFileSync(statePath, "utf8"), originalState);
+    assert.equal(Object.hasOwn(store.readState().runtimes, ""), false);
+    assert.equal(Object.hasOwn(store.readState().sites, ""), false);
   } finally {
     cleanup();
   }
@@ -394,6 +411,8 @@ test("state store fails closed for malformed nested map records", () => {
     { name: "approval missing id", value: { approvals: { appr_bad: {} }, audit: [] } },
     { name: "gatekeeper review missing id", value: { gatekeeperReviews: { gk_bad: {} }, audit: [] } },
     { name: "site missing id", value: { sites: { site_bad: {} }, audit: [] } },
+    { name: "runtime blank id", value: { runtimes: { "": { runtimeId: "" } }, audit: [] } },
+    { name: "site blank id", value: { sites: { "": { siteId: "" } }, audit: [] } },
     { name: "runtime id mismatch", value: { runtimes: { local: { runtimeId: "other" } }, audit: [] } },
     {
       name: "unsafe runtime key",

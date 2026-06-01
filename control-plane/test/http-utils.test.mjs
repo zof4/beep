@@ -36,6 +36,13 @@ test("parseRequestUrl falls back when Host is malformed", () => {
   assert.equal(url.pathname, "/health");
 });
 
+test("parseRequestUrl falls back when absolute request target is malformed", () => {
+  const url = parseRequestUrl({ url: "http://[", headers: { host: "example.test" } });
+
+  assert.equal(url.origin, "http://127.0.0.1:8788");
+  assert.equal(url.pathname, "/");
+});
+
 test("readJsonBody rejects invalid JSON with a 400 status", async () => {
   await assert.rejects(readJsonBody(requestChunks(Buffer.from("{"))), {
     status: 400,
