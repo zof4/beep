@@ -67,6 +67,7 @@ function composeEnv({ runtimeToken, runtimeApiToken, modelCredentialToken }) {
     BEEP_CONTROL_PLANE_URL: CONTAINER_BASE_URL,
     BEEP_CONTROL_PLANE_RUNTIME_ID: RUNTIME_ID,
     BEEP_CONTROL_PLANE_RUNTIME_TOKEN: runtimeToken,
+    BEEP_CONTROL_PLANE_TOOLS_ENABLED: process.env.BEEP_CONTROL_PLANE_TOOLS_ENABLED || "0",
   };
 }
 

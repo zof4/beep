@@ -1,5 +1,6 @@
 import { createServer } from "node:http";
 import { request as httpRequest } from "node:http";
+import { pathToFileURL } from "node:url";
 import { DEFAULT_REQUEST_TIMEOUT_MS, HOST, PORT, RUNTIME_AUTH_PATH, RUNTIME_ID } from "./config.mjs";
 import { handleApprovalRoute } from "./approval-routes.mjs";
 import { resolveCodexCredentialFromAuthPath } from "./codex-token.mjs";
@@ -11,45 +12,12 @@ import { StateStore } from "./state-store.mjs";
 import { ToolBroker, hostPortForContainerPort, validatePreviewPort } from "./tool-broker.mjs";
 import { Gatekeeper } from "./gatekeeper/index.mjs";
 
-const store = new StateStore();
-const runtimeManager = new RuntimeManager({ store });
-const gatekeeper = new Gatekeeper({ store });
-const toolBroker = new ToolBroker({ store, gatekeeper });
-
-function requireRuntimeAuth(request) {
-  const expected = `Bearer ${store.ensureRuntimeToken()}`;
-  if (request.headers.authorization !== expected) {
-    const error = new Error("runtime capability token is invalid");
-    error.status = 401;
-    throw error;
-  }
-}
-
-function requireModelCredentialAuth(request) {
-  const expected = `Bearer ${store.ensureModelCredentialToken()}`;
-  if (request.headers.authorization !== expected) {
-    const error = new Error("model credential capability token is invalid");
-    error.status = 401;
-    throw error;
-  }
-}
-
-function requireOperatorAuth(request) {
-  const expected = `Bearer ${store.ensureOperatorToken()}`;
-  if (request.headers.authorization !== expected) {
-    const error = new Error("operator token is invalid");
-    error.status = 401;
-    throw error;
-  }
-}
-
-async function forwardRuntimeRequest(path, { method = "GET", body = null } = {}) {
-  const headers = body ? { "content-type": "application/json" } : {};
-  return runtimeManager.proxyToRuntime(path, {
-    method,
-    headers,
-    body: body ? JSON.stringify(body) : undefined,
-  });
+export function createDefaultComponents() {
+  const store = new StateStore();
+  const runtimeManager = new RuntimeManager({ store });
+  const gatekeeper = new Gatekeeper({ store });
+  const toolBroker = new ToolBroker({ store, gatekeeper });
+  return { store, runtimeManager, gatekeeper, toolBroker };
 }
 
 async function proxyLocalPort(request, response, hostPort, suffixPath) {
@@ -68,221 +36,295 @@ async function proxyLocalPort(request, response, hostPort, suffixPath) {
   request.pipe(upstream);
 }
 
-async function proxyPreview(request, response, runtimeId, containerPort, suffixPath) {
-  if (runtimeId !== RUNTIME_ID) {
-    sendJson(response, 404, { ok: false, error: `Unknown runtimeId: ${runtimeId}` });
-    return;
-  }
-  validatePreviewPort(containerPort);
-  await proxyLocalPort(request, response, hostPortForContainerPort(containerPort), suffixPath);
+function matchingExposure(store, runtimeId, containerPort) {
+  const exposure = store.readState().exposures?.[`${runtimeId}:${containerPort}`] || null;
+  if (!exposure || exposure.runtimeId !== runtimeId || Number(exposure.containerPort) !== containerPort) return null;
+  const expectedHostPort = hostPortForContainerPort(containerPort);
+  if (Number(exposure.hostPort) !== expectedHostPort) return null;
+  return { ...exposure, hostPort: expectedHostPort };
 }
 
-async function handle(request, response) {
-  if (request.method === "OPTIONS") {
-    sendJson(response, 204, {});
-    return;
-  }
-
-  const url = parseRequestUrl(request);
-  const pathname = url.pathname.replace(/\/+$/u, "") || "/";
-
-  if (request.method === "GET" && pathname === "/health") {
-    sendJson(response, 200, {
-      ok: true,
-      service: "beep-control-plane",
-      runtimeId: RUNTIME_ID,
-    });
-    return;
-  }
-
-  if (request.method === "GET" && pathname === "/api/tools") {
-    sendJson(response, 200, { ok: true, ...toolBroker.manifest() });
-    return;
-  }
-
-  if (request.method === "GET" && pathname === "/api/audit") {
-    requireOperatorAuth(request);
-    const limit = Math.min(Number.parseInt(url.searchParams.get("limit") || "100", 10) || 100, 1000);
-    sendJson(response, 200, { ok: true, audit: store.listAudit(limit) });
-    return;
-  }
-
-  if (request.method === "GET" && pathname === `/api/runtimes/${RUNTIME_ID}`) {
-    sendJson(response, 200, { ok: true, runtime: await runtimeManager.status() });
-    return;
-  }
-
-  if (request.method === "POST" && pathname === `/api/runtimes/${RUNTIME_ID}/start`) {
-    requireOperatorAuth(request);
-    sendJson(response, 200, { ok: true, runtime: await runtimeManager.ensureRuntime({ rebuild: true }) });
-    return;
-  }
-
-  if (request.method === "POST" && pathname === `/api/runtimes/${RUNTIME_ID}/stop`) {
-    requireOperatorAuth(request);
-    sendJson(response, 200, { ok: true, runtime: await runtimeManager.stopRuntime() });
-    return;
-  }
-
-  if (pathname === "/api/approvals" || pathname.startsWith("/api/approvals/")) {
-    await handleApprovalRoute({
-      request,
-      response,
-      pathname,
-      url,
-      store,
-      toolBroker,
-      requireOperatorAuth,
-    });
-    return;
-  }
-
-  if (pathname === "/api/sites" || pathname.startsWith("/api/sites/")) {
-    await handleSiteRoute({
-      request,
-      response,
-      pathname,
-      url,
-      store,
-      requireOperatorAuth,
-    });
-    return;
-  }
-
-  if (request.method === "POST" && pathname === "/api/requests") {
-    requireOperatorAuth(request);
-    const body = await readJsonBody(request);
-    await runtimeManager.ensureRuntime();
-    const controlPlaneRequest = store.createAgentRequest({
-      runtimeId: RUNTIME_ID,
-      message: String(body.message || ""),
-      status: "forwarding",
-      source: "api",
-    });
-    const runtimeBody = {
-      message: String(body.message || ""),
-      waitForCompletion: body.waitForCompletion !== false,
-      timeoutMs: Number(body.timeoutMs || DEFAULT_REQUEST_TIMEOUT_MS),
-    };
-    try {
-      const result = await forwardRuntimeRequest("/agent/submit", { method: "POST", body: runtimeBody });
-      store.updateAgentRequest(controlPlaneRequest.requestId, {
-        status: result?.ok === false ? "failed" : "submitted",
-        runtimeRequestId: result?.request?.id || null,
-        runtimeResult: result,
-        error: result?.ok === false ? result?.error || result?.request?.error || "Runtime request failed." : null,
-      });
-      sendJson(response, 200, { ok: true, requestId: controlPlaneRequest.requestId, result });
-    } catch (error) {
-      store.updateAgentRequest(controlPlaneRequest.requestId, {
-        status: "failed",
-        error: error instanceof Error ? error.message : String(error),
-      });
+export function createControlPlaneHandler({ store, runtimeManager, toolBroker, localPortProxy = proxyLocalPort }) {
+  function requireRuntimeAuth(request) {
+    const expected = `Bearer ${store.ensureRuntimeToken()}`;
+    if (request.headers.authorization !== expected) {
+      const error = new Error("runtime capability token is invalid");
+      error.status = 401;
       throw error;
     }
-    return;
   }
 
-  if (request.method === "GET" && pathname === "/api/agent") {
-    requireOperatorAuth(request);
-    sendJson(response, 200, { ok: true, agent: await forwardRuntimeRequest("/agent") });
-    return;
+  function requireModelCredentialAuth(request) {
+    const expected = `Bearer ${store.ensureModelCredentialToken()}`;
+    if (request.headers.authorization !== expected) {
+      const error = new Error("model credential capability token is invalid");
+      error.status = 401;
+      throw error;
+    }
   }
 
-  if (request.method === "GET" && pathname === "/api/agent/events") {
-    requireOperatorAuth(request);
-    sendJson(response, 200, await forwardRuntimeRequest(`/agent/events${url.search}`));
-    return;
+  function requireOperatorAuth(request) {
+    const expected = `Bearer ${store.ensureOperatorToken()}`;
+    if (request.headers.authorization !== expected) {
+      const error = new Error("operator token is invalid");
+      error.status = 401;
+      throw error;
+    }
   }
 
-  if (request.method === "GET" && pathname === "/api/agent/summary") {
-    requireOperatorAuth(request);
-    sendJson(response, 200, await forwardRuntimeRequest("/agent/summary"));
-    return;
-  }
-
-  if (request.method === "POST" && pathname === "/internal/model/credential") {
-    requireModelCredentialAuth(request);
-    const body = await readJsonBody(request);
-    const credential = await resolveCodexCredentialFromAuthPath(RUNTIME_AUTH_PATH);
-    store.appendAudit({
-      kind: "model_credential",
-      runtimeId: RUNTIME_ID,
-      provider: body.provider || "openai-codex",
-      model: body.model || null,
-      runtimeSessionId: body.runtimeSessionId || null,
-      decision: "allow",
-      source: credential.source,
+  async function forwardRuntimeRequest(path, { method = "GET", body = null } = {}) {
+    const headers = body ? { "content-type": "application/json" } : {};
+    return runtimeManager.proxyToRuntime(path, {
+      method,
+      headers,
+      body: body ? JSON.stringify(body) : undefined,
     });
-    sendJson(response, 200, {
-      ok: true,
-      apiKey: credential.apiKey,
-      source: credential.source,
-      expiresAt: credential.expiresAt,
-    });
-    return;
   }
 
-  if (request.method === "POST" && pathname === "/internal/tools/call") {
-    requireRuntimeAuth(request);
-    const body = await readJsonBody(request);
-    const result = await toolBroker.call(body);
-    sendJson(response, result.ok ? 200 : result.status === "needs_review" ? 202 : 403, result);
-    return;
-  }
-
-  const previewMatch = pathname.match(/^\/preview\/([^/]+)\/(\d+)(?:\/(.*))?$/u);
-  if (previewMatch) {
-    await proxyPreview(request, response, previewMatch[1], Number(previewMatch[2]), previewMatch[3] || "");
-    return;
-  }
-
-  const siteMatch = pathname.match(/^\/sites\/([^/]+)(?:\/(.*))?$/u);
-  if (siteMatch) {
-    const site = store.getSite(siteMatch[1]);
-    if (!site) {
-      sendJson(response, 404, { ok: false, error: `Unknown siteId: ${siteMatch[1]}` });
+  async function proxyPreview(request, response, runtimeId, containerPort, suffixPath) {
+    if (runtimeId !== RUNTIME_ID) {
+      sendJson(response, 404, { ok: false, error: `Unknown runtimeId: ${runtimeId}` });
       return;
     }
-    if (site.status === "stopped") {
-      sendJson(response, 410, { ok: false, error: `Site is stopped: ${siteMatch[1]}` });
+    validatePreviewPort(containerPort);
+    const exposure = matchingExposure(store, runtimeId, containerPort);
+    if (!exposure) {
+      sendJson(response, 404, { ok: false, error: `Unknown preview exposure: ${runtimeId}:${containerPort}` });
       return;
     }
-    await proxyLocalPort(request, response, Number(site.hostPort), siteMatch[2] || "");
-    return;
+    if (exposure.status === "stopped") {
+      sendJson(response, 410, { ok: false, error: `Preview exposure is stopped: ${runtimeId}:${containerPort}` });
+      return;
+    }
+    await localPortProxy(request, response, exposure.hostPort, suffixPath);
   }
 
-  sendNotFound(response);
+  async function handle(request, response) {
+    if (request.method === "OPTIONS") {
+      sendJson(response, 204, {});
+      return;
+    }
+
+    const url = parseRequestUrl(request);
+    const pathname = url.pathname.replace(/\/+$/u, "") || "/";
+
+    if (request.method === "GET" && pathname === "/health") {
+      sendJson(response, 200, {
+        ok: true,
+        service: "beep-control-plane",
+        runtimeId: RUNTIME_ID,
+      });
+      return;
+    }
+
+    if (request.method === "GET" && pathname === "/api/tools") {
+      sendJson(response, 200, { ok: true, ...toolBroker.manifest() });
+      return;
+    }
+
+    if (request.method === "GET" && pathname === "/api/audit") {
+      requireOperatorAuth(request);
+      const limit = Math.min(Number.parseInt(url.searchParams.get("limit") || "100", 10) || 100, 1000);
+      sendJson(response, 200, { ok: true, audit: store.listAudit(limit) });
+      return;
+    }
+
+    if (request.method === "GET" && pathname === `/api/runtimes/${RUNTIME_ID}`) {
+      requireOperatorAuth(request);
+      sendJson(response, 200, { ok: true, runtime: await runtimeManager.status() });
+      return;
+    }
+
+    if (request.method === "POST" && pathname === `/api/runtimes/${RUNTIME_ID}/start`) {
+      requireOperatorAuth(request);
+      sendJson(response, 200, { ok: true, runtime: await runtimeManager.ensureRuntime({ rebuild: true }) });
+      return;
+    }
+
+    if (request.method === "POST" && pathname === `/api/runtimes/${RUNTIME_ID}/stop`) {
+      requireOperatorAuth(request);
+      sendJson(response, 200, { ok: true, runtime: await runtimeManager.stopRuntime() });
+      return;
+    }
+
+    if (pathname === "/api/approvals" || pathname.startsWith("/api/approvals/")) {
+      await handleApprovalRoute({
+        request,
+        response,
+        pathname,
+        url,
+        store,
+        toolBroker,
+        requireOperatorAuth,
+      });
+      return;
+    }
+
+    if (pathname === "/api/sites" || pathname.startsWith("/api/sites/")) {
+      await handleSiteRoute({
+        request,
+        response,
+        pathname,
+        url,
+        store,
+        requireOperatorAuth,
+      });
+      return;
+    }
+
+    if (request.method === "POST" && pathname === "/api/requests") {
+      requireOperatorAuth(request);
+      const body = await readJsonBody(request);
+      await runtimeManager.ensureRuntime();
+      const controlPlaneRequest = store.createAgentRequest({
+        runtimeId: RUNTIME_ID,
+        message: String(body.message || ""),
+        status: "forwarding",
+        source: "api",
+      });
+      const runtimeBody = {
+        message: String(body.message || ""),
+        waitForCompletion: body.waitForCompletion !== false,
+        timeoutMs: Number(body.timeoutMs || DEFAULT_REQUEST_TIMEOUT_MS),
+      };
+      try {
+        const result = await forwardRuntimeRequest("/agent/submit", { method: "POST", body: runtimeBody });
+        store.updateAgentRequest(controlPlaneRequest.requestId, {
+          status: result?.ok === false ? "failed" : "submitted",
+          runtimeRequestId: result?.request?.id || null,
+          runtimeResult: result,
+          error: result?.ok === false ? result?.error || result?.request?.error || "Runtime request failed." : null,
+        });
+        sendJson(response, 200, { ok: true, requestId: controlPlaneRequest.requestId, result });
+      } catch (error) {
+        store.updateAgentRequest(controlPlaneRequest.requestId, {
+          status: "failed",
+          error: error instanceof Error ? error.message : String(error),
+        });
+        throw error;
+      }
+      return;
+    }
+
+    if (request.method === "GET" && pathname === "/api/agent") {
+      requireOperatorAuth(request);
+      sendJson(response, 200, { ok: true, agent: await forwardRuntimeRequest("/agent") });
+      return;
+    }
+
+    if (request.method === "GET" && pathname === "/api/agent/events") {
+      requireOperatorAuth(request);
+      sendJson(response, 200, await forwardRuntimeRequest(`/agent/events${url.search}`));
+      return;
+    }
+
+    if (request.method === "GET" && pathname === "/api/agent/summary") {
+      requireOperatorAuth(request);
+      sendJson(response, 200, await forwardRuntimeRequest("/agent/summary"));
+      return;
+    }
+
+    if (request.method === "POST" && pathname === "/internal/model/credential") {
+      requireModelCredentialAuth(request);
+      const body = await readJsonBody(request);
+      const credential = await resolveCodexCredentialFromAuthPath(RUNTIME_AUTH_PATH);
+      store.appendAudit({
+        kind: "model_credential",
+        runtimeId: RUNTIME_ID,
+        provider: body.provider || "openai-codex",
+        model: body.model || null,
+        runtimeSessionId: body.runtimeSessionId || null,
+        decision: "allow",
+        source: credential.source,
+      });
+      sendJson(response, 200, {
+        ok: true,
+        apiKey: credential.apiKey,
+        source: credential.source,
+        expiresAt: credential.expiresAt,
+      });
+      return;
+    }
+
+    if (request.method === "POST" && pathname === "/internal/tools/call") {
+      requireRuntimeAuth(request);
+      const body = await readJsonBody(request);
+      const result = await toolBroker.call(body);
+      sendJson(response, result.ok ? 200 : result.status === "needs_review" ? 202 : 403, result);
+      return;
+    }
+
+    const previewMatch = pathname.match(/^\/preview\/([^/]+)\/(\d+)(?:\/(.*))?$/u);
+    if (previewMatch) {
+      await proxyPreview(request, response, previewMatch[1], Number(previewMatch[2]), previewMatch[3] || "");
+      return;
+    }
+
+    const siteMatch = pathname.match(/^\/sites\/([^/]+)(?:\/(.*))?$/u);
+    if (siteMatch) {
+      const site = store.getSite(siteMatch[1]);
+      if (!site) {
+        sendJson(response, 404, { ok: false, error: `Unknown siteId: ${siteMatch[1]}` });
+        return;
+      }
+      if (site.status === "stopped") {
+        sendJson(response, 410, { ok: false, error: `Site is stopped: ${siteMatch[1]}` });
+        return;
+      }
+      await localPortProxy(request, response, Number(site.hostPort), siteMatch[2] || "");
+      return;
+    }
+
+    sendNotFound(response);
+  }
+
+  return async function controlPlaneHandler(request, response) {
+    try {
+      await handle(request, response);
+    } catch (error) {
+      const status = statusFromError(error);
+      sendJson(response, status, {
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  };
 }
 
-const server = createServer((request, response) => {
-  handle(request, response).catch((error) => {
-    const status = statusFromError(error);
-    sendJson(response, status, {
-      ok: false,
-      error: error instanceof Error ? error.message : String(error),
-    });
+export function createControlPlaneServer(components = createDefaultComponents()) {
+  const handler = createControlPlaneHandler(components);
+  const server = createServer(handler);
+  return { server, handler, ...components };
+}
+
+export function startControlPlaneServer() {
+  const { server, store, runtimeManager } = createControlPlaneServer();
+
+  server.on("error", (error) => {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
   });
-});
 
-server.on("error", (error) => {
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exitCode = 1;
-});
-
-server.listen(PORT, HOST, async () => {
-  store.ensure();
-  store.ensureRuntimeToken();
-  store.ensureRuntimeApiToken();
-  store.ensureModelCredentialToken();
-  store.ensureOperatorToken();
-  console.log(`beep-control-plane listening on http://${HOST}:${PORT}`);
-  if (process.env.BEEP_CONTROL_PLANE_AUTOSTART === "1") {
-    try {
-      await runtimeManager.ensureRuntime({ rebuild: true });
-      console.log(`runtime ${RUNTIME_ID} is ready`);
-    } catch (error) {
-      console.error(error instanceof Error ? error.message : String(error));
+  server.listen(PORT, HOST, async () => {
+    store.ensure();
+    store.ensureRuntimeToken();
+    store.ensureRuntimeApiToken();
+    store.ensureModelCredentialToken();
+    store.ensureOperatorToken();
+    console.log(`beep-control-plane listening on http://${HOST}:${PORT}`);
+    if (process.env.BEEP_CONTROL_PLANE_AUTOSTART === "1") {
+      try {
+        await runtimeManager.ensureRuntime({ rebuild: true });
+        console.log(`runtime ${RUNTIME_ID} is ready`);
+      } catch (error) {
+        console.error(error instanceof Error ? error.message : String(error));
+      }
     }
-  }
-});
+  });
+
+  return server;
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  startControlPlaneServer();
+}
