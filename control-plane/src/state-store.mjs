@@ -1,12 +1,12 @@
 import { randomBytes } from "node:crypto";
 import {
+  chmodSync,
   closeSync,
   existsSync,
   mkdirSync,
   openSync,
   readFileSync,
   renameSync,
-  statSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -15,7 +15,7 @@ import { STATE_DIR } from "./config.mjs";
 
 const LOCK_WAIT_MS = 25;
 const LOCK_TIMEOUT_MS = 10_000;
-const LOCK_STALE_MS = 30_000;
+const TOKEN_PATTERN = /^[A-Za-z0-9_-]{32,}$/;
 const sleepArray = new Int32Array(new SharedArrayBuffer(4));
 
 function nowIso() {
@@ -77,27 +77,8 @@ function appendAuditEvent(state, event) {
   state.audit = state.audit.slice(-1000);
 }
 
-function processIsAlive(pid) {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    if (error?.code === "ESRCH") return false;
-    return true;
-  }
-}
-
-function staleLockCanBeRemoved(lockPath) {
-  const stats = statSync(lockPath);
-  if (Date.now() - stats.mtimeMs <= LOCK_STALE_MS) return false;
-  try {
-    const owner = JSON.parse(readFileSync(lockPath, "utf8"));
-    if (processIsAlive(owner.pid)) return false;
-  } catch {
-    // Older lock files may not have owner metadata; age is the only recovery signal.
-  }
-  return true;
+function isValidToken(token) {
+  return TOKEN_PATTERN.test(token);
 }
 
 export class StateStore {
@@ -179,15 +160,6 @@ export class StateStore {
         }
       } catch (error) {
         if (error?.code !== "EEXIST") throw error;
-        try {
-          if (staleLockCanBeRemoved(this.lockPath)) {
-            unlinkSync(this.lockPath);
-            continue;
-          }
-        } catch (statError) {
-          if (statError?.code !== "ENOENT") throw statError;
-          continue;
-        }
         if (Date.now() - startedAt > LOCK_TIMEOUT_MS) {
           throw new Error(`Timed out waiting for state lock: ${this.lockPath}`);
         }
@@ -221,10 +193,14 @@ export class StateStore {
       this.ensureUnlocked();
       if (existsSync(path)) {
         const token = readFileSync(path, "utf8").trim();
-        if (token) return token;
+        if (isValidToken(token)) {
+          chmodSync(path, 0o600);
+          return token;
+        }
       }
       const token = randomBytes(32).toString("base64url");
       writeFileSync(path, `${token}\n`, { mode: 0o600 });
+      chmodSync(path, 0o600);
       return token;
     });
   }

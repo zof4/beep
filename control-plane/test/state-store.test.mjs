@@ -181,6 +181,75 @@ test("state store creates first-time token files while holding the state lock", 
   }
 });
 
+test("state store does not remove a fresh lock based on stale path evidence", async () => {
+  const { dir, cleanup } = tempStore();
+  const lockPath = join(dir, "state.lock");
+  const freshLock = `${JSON.stringify({ pid: process.pid, acquiredAt: "fresh" })}\n`;
+  const originalDateNow = Date.now;
+  const originalReadFileSync = fs.readFileSync;
+  const originalStatSync = fs.statSync;
+
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(lockPath, freshLock, { mode: 0o600 });
+    let nowCalls = 0;
+    Date.now = () => (nowCalls++ === 0 ? 0 : 40_001);
+    fs.statSync = function statSyncWithStaleEvidence(path, ...args) {
+      if (path === lockPath) return { mtimeMs: 0 };
+      return originalStatSync.call(this, path, ...args);
+    };
+    fs.readFileSync = function readFileSyncWithStaleEvidence(path, ...args) {
+      if (path === lockPath) {
+        return `${JSON.stringify({ pid: 999_999_999, acquiredAt: "stale" })}\n`;
+      }
+      return originalReadFileSync.call(this, path, ...args);
+    };
+    syncBuiltinESMExports();
+
+    const { StateStore: CheckedStateStore } = await import(`../src/state-store.mjs?stale-lock=${originalDateNow()}`);
+    const store = new CheckedStateStore(dir);
+
+    assert.throws(
+      () => {
+        store.withLock(() => {
+          throw new Error("acquired lock after removing fresh lock");
+        });
+      },
+      /Timed out waiting for state lock/,
+    );
+    assert.equal(originalReadFileSync.call(fs, lockPath, "utf8"), freshLock);
+  } finally {
+    Date.now = originalDateNow;
+    fs.readFileSync = originalReadFileSync;
+    fs.statSync = originalStatSync;
+    syncBuiltinESMExports();
+    cleanup();
+  }
+});
+
+test("state store validates existing token files and tightens token permissions", () => {
+  const { dir, store, cleanup } = tempStore();
+  const validToken = "A".repeat(32);
+  const validTokenPath = join(dir, "runtime-token");
+  const invalidTokenPath = join(dir, "operator-token");
+
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(validTokenPath, `${validToken}\n`, { mode: 0o644 });
+    fs.writeFileSync(invalidTokenPath, "not a valid token\n", { mode: 0o644 });
+
+    assert.equal(store.ensureRuntimeToken(), validToken);
+    assert.equal(fs.statSync(validTokenPath).mode & 0o777, 0o600);
+
+    const replacement = store.ensureOperatorToken();
+    assert.notEqual(replacement, "not a valid token");
+    assert.match(replacement, /^[A-Za-z0-9_-]{32,}$/);
+    assert.equal(fs.statSync(invalidTokenPath).mode & 0o777, 0o600);
+  } finally {
+    cleanup();
+  }
+});
+
 test("state store fails closed and preserves malformed state JSON", () => {
   const { dir, store, cleanup } = tempStore();
   try {
