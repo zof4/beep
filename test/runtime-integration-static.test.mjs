@@ -57,3 +57,33 @@ test("agent request records LCM before Hindsight retain", () => {
   assert.ok(retainIndex > 0, "Hindsight retain call should exist");
   assert.ok(lcmIndex < retainIndex, "LCM ingest must happen before Hindsight retain");
 });
+
+test("Pi spawn can load control-plane tools extension independently from LCM context extension", () => {
+  const lcmPathIndex = apiSource.indexOf("const LCM_CONTEXT_EXTENSION_PATH");
+  const toolsPathIndex = apiSource.indexOf("const CONTROL_PLANE_TOOLS_EXTENSION_PATH");
+  const lcmLoadedIndex = apiSource.indexOf("const lcmContextExtensionLoaded");
+  const toolsLoadedIndex = apiSource.indexOf("const controlPlaneToolsExtensionLoaded");
+  const lcmPushIndex = apiSource.indexOf('args.push("--extension", LCM_CONTEXT_EXTENSION_PATH)');
+  const toolsPushIndex = apiSource.indexOf('args.push("--extension", CONTROL_PLANE_TOOLS_EXTENSION_PATH)');
+
+  assert.ok(lcmPathIndex > 0, "LCM context extension constant should exist");
+  assert.ok(toolsPathIndex > 0, "control-plane tools extension constant should exist");
+  assert.ok(lcmLoadedIndex > 0, "LCM context extension loaded guard should exist");
+  assert.ok(toolsLoadedIndex > 0, "control-plane tools extension loaded guard should exist");
+  assert.ok(lcmPushIndex > lcmLoadedIndex, "Pi spawn should push LCM context extension after its guard");
+  assert.ok(toolsPushIndex > toolsLoadedIndex, "Pi spawn should push control-plane tools extension after its guard");
+});
+
+test("control-plane tool env is passed to Pi without changing Hindsight memory order", () => {
+  const toolsEnabledEnvIndex = apiSource.indexOf("BEEP_CONTROL_PLANE_TOOLS_ENABLED");
+  const recallIndex = apiSource.indexOf("defaultMemoryCoordinator.recallForContext");
+  const assembleIndex = apiSource.indexOf("defaultLcmService.assembleMessages");
+
+  assert.ok(toolsEnabledEnvIndex > 0, "control-plane tools enabled env should be passed to Pi");
+  assert.ok(apiSource.includes("BEEP_CONTROL_PLANE_TOOLS_EXTENSION_PATH"), "control-plane tools path env should be passed to Pi");
+  assert.ok(apiSource.includes("BEEP_CONTROL_PLANE_URL"), "control-plane URL env should be passed to Pi");
+  assert.ok(apiSource.includes("BEEP_CONTROL_PLANE_RUNTIME_TOKEN"), "control-plane runtime token env should be passed to Pi");
+  assert.ok(recallIndex > 0, "Hindsight recall should still exist");
+  assert.ok(assembleIndex > 0, "LCM assemble should still exist");
+  assert.ok(recallIndex < assembleIndex, "Hindsight recall must still happen before LCM assemble");
+});

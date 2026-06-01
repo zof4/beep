@@ -44,6 +44,14 @@ const LCM_CONTEXT_URL = process.env.BEEP_LCM_CONTEXT_URL || `http://127.0.0.1:${
 const LCM_CONTEXT_TOKEN = process.env.BEEP_LCM_CONTEXT_TOKEN || randomUUID();
 const LCM_CONTEXT_TOKEN_BUDGET = process.env.BEEP_LCM_CONTEXT_TOKEN_BUDGET || "128000";
 const LCM_CONTEXT_TIMEOUT_MS = process.env.BEEP_LCM_CONTEXT_TIMEOUT_MS || "15000";
+const CONTROL_PLANE_TOOLS_ENABLED =
+  !["0", "false", "no", "off"].includes(String(process.env.BEEP_CONTROL_PLANE_TOOLS_ENABLED || "1").toLowerCase());
+const CONTROL_PLANE_TOOLS_EXTENSION_PATH =
+  process.env.BEEP_CONTROL_PLANE_TOOLS_EXTENSION_PATH || "/runtime/pi-extensions/control-plane-tools-extension.mjs";
+const CONTROL_PLANE_URL = process.env.BEEP_CONTROL_PLANE_URL || "";
+const CONTROL_PLANE_RUNTIME_ID = process.env.BEEP_CONTROL_PLANE_RUNTIME_ID || "local";
+const CONTROL_PLANE_RUNTIME_TOKEN = process.env.BEEP_CONTROL_PLANE_RUNTIME_TOKEN || "";
+const CONTROL_PLANE_TOOL_TIMEOUT_MS = process.env.BEEP_CONTROL_PLANE_TOOL_TIMEOUT_MS || "15000";
 const DEFAULT_PROMPT_TIMEOUT_MS = 10 * 60 * 1000;
 const DEFAULT_RPC_TIMEOUT_MS = 60 * 1000;
 const MAX_REQUEST_BYTES = Number.parseInt(process.env.BEEP_MAX_REQUEST_BYTES || `${8 * 1024 * 1024}`, 10);
@@ -375,6 +383,14 @@ class PiRpcSession {
     if (lcmContextExtensionLoaded) {
       args.push("--extension", LCM_CONTEXT_EXTENSION_PATH);
     }
+    const controlPlaneToolsExtensionLoaded =
+      CONTROL_PLANE_TOOLS_ENABLED &&
+      Boolean(CONTROL_PLANE_URL) &&
+      Boolean(CONTROL_PLANE_RUNTIME_TOKEN) &&
+      existsSync(CONTROL_PLANE_TOOLS_EXTENSION_PATH);
+    if (controlPlaneToolsExtensionLoaded) {
+      args.push("--extension", CONTROL_PLANE_TOOLS_EXTENSION_PATH);
+    }
 
     writeJsonFile(join(this.rootDir, "run-config.json"), {
       schemaVersion: 1,
@@ -396,6 +412,15 @@ class PiRpcSession {
         tokenBudget: Number(LCM_CONTEXT_TOKEN_BUDGET),
         timeoutMs: Number(LCM_CONTEXT_TIMEOUT_MS),
       },
+      controlPlaneTools: {
+        enabled: CONTROL_PLANE_TOOLS_ENABLED,
+        extensionPath: CONTROL_PLANE_TOOLS_EXTENSION_PATH,
+        extensionLoaded: controlPlaneToolsExtensionLoaded,
+        url: CONTROL_PLANE_URL || null,
+        runtimeId: CONTROL_PLANE_RUNTIME_ID,
+        runtimeTokenConfigured: Boolean(CONTROL_PLANE_RUNTIME_TOKEN),
+        timeoutMs: Number(CONTROL_PLANE_TOOL_TIMEOUT_MS),
+      },
       createdAt: this.createdAt,
     });
 
@@ -410,6 +435,12 @@ class PiRpcSession {
       BEEP_LCM_RUNTIME_SESSION_ID: this.id,
       BEEP_LCM_CONTEXT_TOKEN_BUDGET: LCM_CONTEXT_TOKEN_BUDGET,
       BEEP_LCM_CONTEXT_TIMEOUT_MS: LCM_CONTEXT_TIMEOUT_MS,
+      BEEP_CONTROL_PLANE_TOOLS_ENABLED: controlPlaneToolsExtensionLoaded ? "1" : "0",
+      BEEP_CONTROL_PLANE_TOOLS_EXTENSION_PATH: CONTROL_PLANE_TOOLS_EXTENSION_PATH,
+      BEEP_CONTROL_PLANE_URL: CONTROL_PLANE_URL,
+      BEEP_CONTROL_PLANE_RUNTIME_ID: CONTROL_PLANE_RUNTIME_ID,
+      BEEP_CONTROL_PLANE_RUNTIME_TOKEN: CONTROL_PLANE_RUNTIME_TOKEN,
+      BEEP_CONTROL_PLANE_TOOL_TIMEOUT_MS: CONTROL_PLANE_TOOL_TIMEOUT_MS,
     };
 
     this.stdoutStream = createWriteStream(this.stdoutPath, { flags: "a" });
@@ -1332,6 +1363,15 @@ async function handleCapabilities(_req, res) {
       tokenBudget: Number(LCM_CONTEXT_TOKEN_BUDGET),
       timeoutMs: Number(LCM_CONTEXT_TIMEOUT_MS),
       route: "POST /internal/lcm/context",
+    },
+    controlPlaneTools: {
+      enabled: CONTROL_PLANE_TOOLS_ENABLED,
+      extensionPath: CONTROL_PLANE_TOOLS_EXTENSION_PATH,
+      url: CONTROL_PLANE_URL || null,
+      runtimeId: CONTROL_PLANE_RUNTIME_ID,
+      runtimeTokenConfigured: Boolean(CONTROL_PLANE_RUNTIME_TOKEN),
+      timeoutMs: Number(CONTROL_PLANE_TOOL_TIMEOUT_MS),
+      route: "POST /internal/tools/call",
     },
     current: runtimeConfig,
     paths: {
