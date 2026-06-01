@@ -257,6 +257,52 @@ test("static site evidence rejects real trees that exceed the directory count li
   }
 });
 
+test("static site evidence rejects real trees that exceed the file count limit", () => {
+  const workspaceRoot = join(ROOT_DIR, ".beep-dev", "workspace");
+  const sourceName = `evidence-files-${process.pid}-${Date.now()}`;
+  const source = join(workspaceRoot, sourceName);
+  try {
+    mkdirSync(source, { recursive: true });
+    writeFileSync(join(source, "index.html"), "<h1>demo</h1>\n");
+    writeFileSync(join(source, "app.css"), "body { color: black; }\n");
+
+    const evidence = collectStaticSiteEvidence({
+      sourcePath: `/workspace/${sourceName}`,
+      maxFiles: 1,
+    });
+
+    assert.equal(evidence.limitExceeded, "files");
+    assert.match(staticSiteExecutionRejectionReason(evidence), /file count limit/iu);
+  } finally {
+    rmSync(source, { recursive: true, force: true });
+  }
+});
+
+test("static site snapshot rejects real trees that exceed the file count limit", () => {
+  const { dir, cleanup } = tempDir();
+  try {
+    const source = join(dir, "workspace-site");
+    const snapshotRoot = join(dir, "snapshots");
+    mkdirSync(source, { recursive: true });
+    writeFileSync(join(source, "index.html"), "<h1>demo</h1>\n");
+    writeFileSync(join(source, "app.css"), "body { color: black; }\n");
+
+    assert.throws(
+      () =>
+        createStaticSiteSnapshot({
+          sourceHostPath: source,
+          siteId: "demo-site",
+          snapshotRoot,
+          maxFiles: 1,
+        }),
+      /file count exceeds configured limit/iu,
+    );
+    assert.equal(existsSync(join(snapshotRoot, "demo-site")), false);
+  } finally {
+    cleanup();
+  }
+});
+
 test("static site snapshot rejects excessive directory depth", () => {
   const { dir, cleanup } = tempDir();
   try {
