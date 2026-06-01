@@ -53,8 +53,18 @@ test("readJsonBody preserves UTF-8 characters split across chunks", async () => 
   assert.deepEqual(parsed, { message: "hello 🙂" });
 });
 
+test("readJsonBody rejects malformed UTF-8 with a 400 status", async () => {
+  await assert.rejects(readJsonBody(requestChunks(Buffer.from([0xff, 0xfe, 0xfd]))), {
+    status: 400,
+    message: /invalid UTF-8 body/,
+  });
+});
+
 test("statusFromError returns only valid HTTP error statuses", () => {
   assert.equal(statusFromError({ status: 404 }), 404);
   assert.equal(statusFromError({ status: 200 }, 500), 500);
   assert.equal(statusFromError({ status: 999 }, 500), 500);
+  assert.equal(statusFromError({}, 418), 418);
+  assert.equal(statusFromError({}, 200), 500);
+  assert.equal(statusFromError({}, 999), 500);
 });

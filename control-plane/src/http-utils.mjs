@@ -1,5 +1,7 @@
 import { HOST, PORT, PUBLIC_BASE_URL } from "./config.mjs";
 
+const utf8Decoder = new TextDecoder("utf-8", { fatal: true });
+
 function corsOrigin() {
   try {
     return new URL(process.env.BEEP_CONTROL_PLANE_CORS_ORIGIN || PUBLIC_BASE_URL).origin;
@@ -40,7 +42,14 @@ export async function readJsonBody(request, limitBytes = 1024 * 1024) {
     }
     chunks.push(buffer);
   }
-  const body = Buffer.concat(chunks, totalBytes).toString("utf8");
+  let body = "";
+  try {
+    body = utf8Decoder.decode(Buffer.concat(chunks, totalBytes));
+  } catch (error) {
+    const decodeError = new Error(`invalid UTF-8 body: ${error instanceof Error ? error.message : String(error)}`);
+    decodeError.status = 400;
+    throw decodeError;
+  }
   if (!body.trim()) return {};
   try {
     return JSON.parse(body);
@@ -53,5 +62,6 @@ export async function readJsonBody(request, limitBytes = 1024 * 1024) {
 
 export function statusFromError(error, fallback = 500) {
   const status = error?.status;
-  return Number.isInteger(status) && status >= 400 && status <= 599 ? status : fallback;
+  if (Number.isInteger(status) && status >= 400 && status <= 599) return status;
+  return Number.isInteger(fallback) && fallback >= 400 && fallback <= 599 ? fallback : 500;
 }
