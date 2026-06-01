@@ -194,6 +194,69 @@ test("static site evidence rejects excessive directory depth", () => {
   }
 });
 
+test("static site evidence rejects source directory identity changes during readdir", async () => {
+  const workspaceRoot = join(ROOT_DIR, ".beep-dev", "workspace");
+  const sourceName = `evidence-race-${process.pid}-${Date.now()}`;
+  const source = join(workspaceRoot, sourceName);
+  const { dir, cleanup } = tempDir();
+  const outside = join(dir, "outside");
+  const originalReaddirSync = fs.readdirSync;
+  let swapped = false;
+  try {
+    mkdirSync(source, { recursive: true });
+    mkdirSync(outside, { recursive: true });
+    writeFileSync(join(source, "index.html"), "<h1>safe</h1>\n");
+    writeFileSync(join(outside, "outside-secret.txt"), "secret\n");
+
+    fs.readdirSync = function readdirSyncWithDirectorySwap(path, ...args) {
+      if (path === source && !swapped) {
+        swapped = true;
+        rmSync(source, { recursive: true, force: true });
+        symlinkSync(outside, source);
+      }
+      return originalReaddirSync.call(this, path, ...args);
+    };
+    syncBuiltinESMExports();
+
+    const { collectStaticSiteEvidence: checkedCollectStaticSiteEvidence } = await import(
+      `../src/gatekeeper/evidence.mjs?readdir-race=${Date.now()}`
+    );
+    const evidence = checkedCollectStaticSiteEvidence({
+      sourcePath: `/workspace/${sourceName}`,
+    });
+
+    assert.equal(evidence.ok, false);
+    assert.match(evidence.error, /changed|symlink|safe directory/iu);
+    assert.notEqual(evidence.fileCount, 1);
+    assert.deepEqual(evidence.suspiciousFiles, undefined);
+  } finally {
+    fs.readdirSync = originalReaddirSync;
+    syncBuiltinESMExports();
+    rmSync(source, { recursive: true, force: true });
+    cleanup();
+  }
+});
+
+test("static site evidence rejects real trees that exceed the directory count limit", () => {
+  const workspaceRoot = join(ROOT_DIR, ".beep-dev", "workspace");
+  const sourceName = `evidence-dirs-${process.pid}-${Date.now()}`;
+  const source = join(workspaceRoot, sourceName);
+  try {
+    mkdirSync(join(source, "assets"), { recursive: true });
+    writeFileSync(join(source, "index.html"), "<h1>demo</h1>\n");
+
+    const evidence = collectStaticSiteEvidence({
+      sourcePath: `/workspace/${sourceName}`,
+      maxDirs: 1,
+    });
+
+    assert.equal(evidence.limitExceeded, "dirs");
+    assert.match(staticSiteExecutionRejectionReason(evidence), /directory count limit/iu);
+  } finally {
+    rmSync(source, { recursive: true, force: true });
+  }
+});
+
 test("static site snapshot rejects excessive directory depth", () => {
   const { dir, cleanup } = tempDir();
   try {
