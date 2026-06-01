@@ -147,6 +147,15 @@ test("runtime compose publishes preview host port range for direct preview URLs"
   );
 });
 
+test("runtime compose uses the published Hindsight image tag", () => {
+  const compose = readFileSync(join(process.cwd(), "docker/compose.runtime-dev.yml"), "utf8");
+  const imageEnv = readFileSync(join(process.cwd(), "docker/hindsight-image.env"), "utf8");
+
+  assert.match(imageEnv, /^BEEP_HINDSIGHT_IMAGE=ghcr\.io\/vectorize-io\/hindsight:0\.7\.1$/mu);
+  assert.match(compose, /ghcr\.io\/vectorize-io\/hindsight:0\.7\.1/u);
+  assert.doesNotMatch(imageEnv, /hindsight:v\d/u, "Hindsight image tags are not v-prefixed on GHCR");
+});
+
 test("control-plane README does not reference missing agent runtime boundaries doc", () => {
   const readme = readFileSync(join(process.cwd(), "control-plane/README.md"), "utf8");
 
