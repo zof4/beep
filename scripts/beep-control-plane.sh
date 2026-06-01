@@ -5,7 +5,13 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STATE_DIR="${BEEP_CONTROL_PLANE_STATE_DIR:-$ROOT_DIR/.beep-dev/control-plane}"
 PID_FILE="$STATE_DIR/control-plane.pid"
 LOG_FILE="$STATE_DIR/control-plane.log"
-URL="http://${BEEP_CONTROL_PLANE_HOST:-127.0.0.1}:${BEEP_CONTROL_PLANE_PORT:-8788}"
+CONTROL_PLANE_HOST="${BEEP_CONTROL_PLANE_HOST:-127.0.0.1}"
+CONTROL_PLANE_PORT="${BEEP_CONTROL_PLANE_PORT:-8788}"
+if [ "$CONTROL_PLANE_HOST" = "::1" ]; then
+  URL="http://[::1]:$CONTROL_PLANE_PORT"
+else
+  URL="http://$CONTROL_PLANE_HOST:$CONTROL_PLANE_PORT"
+fi
 RUNTIME_ID="${BEEP_CONTROL_PLANE_RUNTIME_ID:-local}"
 COMMAND="${1:-foreground}"
 
@@ -42,6 +48,36 @@ wait_for_health() {
     sleep 1
   done
   return 1
+}
+
+is_loopback_control_plane_host() {
+  case "$CONTROL_PLANE_HOST" in
+    127.0.0.1|localhost|::1)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+health_matches_runtime() {
+  local health_payload="$1"
+  node --input-type=module - "$RUNTIME_ID" "$health_payload" <<'NODE'
+const [runtimeId, healthPayload] = process.argv.slice(2);
+let health;
+try {
+  health = JSON.parse(healthPayload);
+} catch {
+  process.exit(1);
+}
+
+if (health?.service === "beep-control-plane" && health?.runtimeId === runtimeId) {
+  process.exit(0);
+}
+
+process.exit(1);
+NODE
 }
 
 start() {
@@ -87,7 +123,17 @@ status() {
   else
     echo "process: stopped"
   fi
-  if curl -fsS "$URL/health"; then
+  local health_payload
+  if health_payload="$(curl -fsS "$URL/health")"; then
+    printf '%s\n' "$health_payload"
+    if ! is_loopback_control_plane_host; then
+      echo "status: refusing authenticated runtime status for non-loopback BEEP_CONTROL_PLANE_HOST=$CONTROL_PLANE_HOST" >&2
+      return 0
+    fi
+    if ! health_matches_runtime "$health_payload"; then
+      echo "status: refusing authenticated runtime status because /health is not beep-control-plane for runtimeId=$RUNTIME_ID" >&2
+      return 0
+    fi
     local operator_token
     operator_token="$(state_store_token ensureOperatorToken)"
     curl -fsS \
