@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readJsonBody, sendJson } from "../src/http-utils.mjs";
+import { readJsonBody, sendJson, statusFromError } from "../src/http-utils.mjs";
 
 async function* requestChunks(...chunks) {
   for (const chunk of chunks) {
@@ -51,4 +51,10 @@ test("readJsonBody preserves UTF-8 characters split across chunks", async () => 
   const parsed = await readJsonBody(requestChunks(payload.subarray(0, splitAt), payload.subarray(splitAt)));
 
   assert.deepEqual(parsed, { message: "hello 🙂" });
+});
+
+test("statusFromError returns only valid HTTP error statuses", () => {
+  assert.equal(statusFromError({ status: 404 }), 404);
+  assert.equal(statusFromError({ status: 200 }, 500), 500);
+  assert.equal(statusFromError({ status: 999 }, 500), 500);
 });

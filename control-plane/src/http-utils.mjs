@@ -52,5 +52,6 @@ export async function readJsonBody(request, limitBytes = 1024 * 1024) {
 }
 
 export function statusFromError(error, fallback = 500) {
-  return Number.isInteger(error?.status) ? error.status : fallback;
+  const status = error?.status;
+  return Number.isInteger(status) && status >= 400 && status <= 599 ? status : fallback;
 }

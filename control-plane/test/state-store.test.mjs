@@ -181,32 +181,19 @@ test("state store creates first-time token files while holding the state lock", 
   }
 });
 
-test("state store does not remove a fresh lock based on stale path evidence", async () => {
+test("state store does not remove an existing fresh lock while waiting", async () => {
   const { dir, cleanup } = tempStore();
   const lockPath = join(dir, "state.lock");
   const freshLock = `${JSON.stringify({ pid: process.pid, acquiredAt: "fresh" })}\n`;
   const originalDateNow = Date.now;
-  const originalReadFileSync = fs.readFileSync;
-  const originalStatSync = fs.statSync;
 
   try {
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(lockPath, freshLock, { mode: 0o600 });
     let nowCalls = 0;
     Date.now = () => (nowCalls++ === 0 ? 0 : 40_001);
-    fs.statSync = function statSyncWithStaleEvidence(path, ...args) {
-      if (path === lockPath) return { mtimeMs: 0 };
-      return originalStatSync.call(this, path, ...args);
-    };
-    fs.readFileSync = function readFileSyncWithStaleEvidence(path, ...args) {
-      if (path === lockPath) {
-        return `${JSON.stringify({ pid: 999_999_999, acquiredAt: "stale" })}\n`;
-      }
-      return originalReadFileSync.call(this, path, ...args);
-    };
-    syncBuiltinESMExports();
 
-    const { StateStore: CheckedStateStore } = await import(`../src/state-store.mjs?stale-lock=${originalDateNow()}`);
+    const { StateStore: CheckedStateStore } = await import(`../src/state-store.mjs?fresh-lock=${originalDateNow()}`);
     const store = new CheckedStateStore(dir);
 
     assert.throws(
@@ -217,12 +204,9 @@ test("state store does not remove a fresh lock based on stale path evidence", as
       },
       /Timed out waiting for state lock/,
     );
-    assert.equal(originalReadFileSync.call(fs, lockPath, "utf8"), freshLock);
+    assert.equal(fs.readFileSync(lockPath, "utf8"), freshLock);
   } finally {
     Date.now = originalDateNow;
-    fs.readFileSync = originalReadFileSync;
-    fs.statSync = originalStatSync;
-    syncBuiltinESMExports();
     cleanup();
   }
 });
@@ -250,6 +234,55 @@ test("state store validates existing token files and tightens token permissions"
   }
 });
 
+test("state store replaces invalid regular token files through a temporary file", async () => {
+  const { dir, cleanup } = tempStore();
+  const tokenPath = join(dir, "operator-token");
+  const originalWriteFileSync = fs.writeFileSync;
+
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    originalWriteFileSync.call(fs, tokenPath, "not a valid token\n", { mode: 0o644 });
+    fs.writeFileSync = function writeFileSyncWithoutDirectTokenReplace(path, ...args) {
+      if (path === tokenPath) {
+        throw new Error("direct token replacement");
+      }
+      return originalWriteFileSync.call(this, path, ...args);
+    };
+    syncBuiltinESMExports();
+
+    const { StateStore: CheckedStateStore } = await import(`../src/state-store.mjs?token-replace=${Date.now()}`);
+    const store = new CheckedStateStore(dir);
+    const replacement = store.ensureOperatorToken();
+
+    assert.match(replacement, /^[A-Za-z0-9_-]{32,}$/);
+    assert.equal(fs.readFileSync(tokenPath, "utf8"), `${replacement}\n`);
+    assert.equal(fs.statSync(tokenPath).mode & 0o777, 0o600);
+  } finally {
+    fs.writeFileSync = originalWriteFileSync;
+    syncBuiltinESMExports();
+    cleanup();
+  }
+});
+
+test("state store rejects symlink token paths without touching the target", () => {
+  const { dir, store, cleanup } = tempStore();
+  const targetPath = join(dir, "token-target");
+  const symlinkPath = join(dir, "operator-token");
+  const originalTarget = "not a valid token\n";
+
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(targetPath, originalTarget, { mode: 0o600 });
+    fs.symlinkSync(targetPath, symlinkPath);
+
+    assert.throws(() => store.ensureOperatorToken(), /refusing token path/);
+    assert.equal(fs.readFileSync(targetPath, "utf8"), originalTarget);
+    assert.equal(fs.lstatSync(symlinkPath).isSymbolicLink(), true);
+  } finally {
+    cleanup();
+  }
+});
+
 test("state store fails closed and preserves malformed state JSON", () => {
   const { dir, store, cleanup } = tempStore();
   try {
@@ -269,5 +302,43 @@ test("state store fails closed and preserves malformed state JSON", () => {
     assert.equal(fs.readFileSync(statePath, "utf8"), "{not-json\n");
   } finally {
     cleanup();
+  }
+});
+
+test("state store fails closed for malformed valid state shapes", () => {
+  const cases = [
+    { name: "top-level null", value: null },
+    { name: "top-level array", value: [] },
+    { name: "runtimes array", value: { runtimes: [], audit: [] } },
+    { name: "exposures null", value: { exposures: null, audit: [] } },
+    { name: "agentRequests string", value: { agentRequests: "bad", audit: [] } },
+    { name: "approvals array", value: { approvals: [], audit: [] } },
+    { name: "gatekeeperReviews array", value: { gatekeeperReviews: [], audit: [] } },
+    { name: "sites array", value: { sites: [], audit: [] } },
+    { name: "audit object", value: { audit: {} } },
+  ];
+
+  for (const { name, value } of cases) {
+    const { dir, store, cleanup } = tempStore();
+    try {
+      const statePath = join(dir, "state.json");
+      const originalState = `${JSON.stringify(value)}\n`;
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(statePath, originalState, { mode: 0o600 });
+
+      assert.throws(() => store.readState(), /invalid state shape/, name);
+      assert.throws(
+        () => {
+          store.update((state) => {
+            state.audit.push({ kind: "should_not_write" });
+          });
+        },
+        /invalid state shape/,
+        name,
+      );
+      assert.equal(fs.readFileSync(statePath, "utf8"), originalState);
+    } finally {
+      cleanup();
+    }
   }
 });

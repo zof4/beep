@@ -3,6 +3,7 @@ import {
   chmodSync,
   closeSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   openSync,
   readFileSync,
@@ -16,6 +17,14 @@ import { STATE_DIR } from "./config.mjs";
 const LOCK_WAIT_MS = 25;
 const LOCK_TIMEOUT_MS = 10_000;
 const TOKEN_PATTERN = /^[A-Za-z0-9_-]{32,}$/;
+const STATE_OBJECT_MAP_FIELDS = [
+  "runtimes",
+  "exposures",
+  "agentRequests",
+  "approvals",
+  "gatekeeperReviews",
+  "sites",
+];
 const sleepArray = new Int32Array(new SharedArrayBuffer(4));
 
 function nowIso() {
@@ -81,6 +90,77 @@ function isValidToken(token) {
   return TOKEN_PATTERN.test(token);
 }
 
+function isPlainObject(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function invalidStateShape(path, message) {
+  throw new Error(`invalid state shape: ${path}: ${message}`);
+}
+
+function normalizeStateShape(state, path) {
+  if (!isPlainObject(state)) {
+    invalidStateShape(path, "top-level state must be an object");
+  }
+  for (const field of STATE_OBJECT_MAP_FIELDS) {
+    if (state[field] === undefined) {
+      state[field] = {};
+    } else if (!isPlainObject(state[field])) {
+      invalidStateShape(path, `${field} must be an object map`);
+    }
+  }
+  if (state.audit === undefined) {
+    state.audit = [];
+  } else if (!Array.isArray(state.audit)) {
+    invalidStateShape(path, "audit must be an array");
+  }
+  return state;
+}
+
+function tokenPathStats(path) {
+  try {
+    return lstatSync(path);
+  } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+function assertRegularTokenPath(path, stats) {
+  if (stats.isSymbolicLink() || !stats.isFile()) {
+    throw new Error(`refusing token path that is not a regular file: ${path}`);
+  }
+}
+
+function replaceTokenFile(path, token) {
+  ensureDir(dirname(path));
+  const tmpPath = `${path}.${process.pid}.${Date.now()}.${randomBytes(6).toString("base64url")}.tmp`;
+  let tmpFd = null;
+  try {
+    tmpFd = openSync(tmpPath, "wx", 0o600);
+    writeFileSync(tmpFd, `${token}\n`);
+    closeSync(tmpFd);
+    tmpFd = null;
+    chmodSync(tmpPath, 0o600);
+    renameSync(tmpPath, path);
+    chmodSync(path, 0o600);
+  } catch (error) {
+    if (tmpFd !== null) {
+      try {
+        closeSync(tmpFd);
+      } catch {
+        // Preserve the primary token write error.
+      }
+    }
+    try {
+      unlinkSync(tmpPath);
+    } catch {
+      // Preserve the primary token replacement error.
+    }
+    throw error;
+  }
+}
+
 export class StateStore {
   constructor(stateDir = STATE_DIR) {
     this.stateDir = stateDir;
@@ -107,15 +187,7 @@ export class StateStore {
 
   readStateUnlocked() {
     this.ensureUnlocked();
-    const state = readJson(this.statePath, initialState());
-    state.runtimes ||= {};
-    state.exposures ||= {};
-    state.agentRequests ||= {};
-    state.approvals ||= {};
-    state.gatekeeperReviews ||= {};
-    state.sites ||= {};
-    state.audit ||= [];
-    return state;
+    return normalizeStateShape(readJson(this.statePath, initialState()), this.statePath);
   }
 
   readState() {
@@ -191,7 +263,9 @@ export class StateStore {
   ensureTokenFile(path) {
     return this.withLock(() => {
       this.ensureUnlocked();
-      if (existsSync(path)) {
+      const stats = tokenPathStats(path);
+      if (stats) {
+        assertRegularTokenPath(path, stats);
         const token = readFileSync(path, "utf8").trim();
         if (isValidToken(token)) {
           chmodSync(path, 0o600);
@@ -199,8 +273,7 @@ export class StateStore {
         }
       }
       const token = randomBytes(32).toString("base64url");
-      writeFileSync(path, `${token}\n`, { mode: 0o600 });
-      chmodSync(path, 0o600);
+      replaceTokenFile(path, token);
       return token;
     });
   }
