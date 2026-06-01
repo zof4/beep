@@ -26,7 +26,12 @@ export function sendNotFound(response) {
 }
 
 export function parseRequestUrl(request) {
-  return new URL(request.url || "/", `http://${request.headers.host || `${HOST}:${PORT}`}`);
+  const url = request.url || "/";
+  try {
+    return new URL(url, `http://${request.headers.host || `${HOST}:${PORT}`}`);
+  } catch {
+    return new URL(url, `http://${HOST}:${PORT}`);
+  }
 }
 
 export async function readJsonBody(request, limitBytes = 1024 * 1024) {

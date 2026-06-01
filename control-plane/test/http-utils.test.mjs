@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readJsonBody, sendJson, statusFromError } from "../src/http-utils.mjs";
+import { parseRequestUrl, readJsonBody, sendJson, statusFromError } from "../src/http-utils.mjs";
 
 async function* requestChunks(...chunks) {
   for (const chunk of chunks) {
@@ -27,6 +27,13 @@ test("control-plane JSON responses do not allow wildcard CORS by default", () =>
 test("readJsonBody returns an empty object for empty bodies", async () => {
   assert.deepEqual(await readJsonBody(requestChunks()), {});
   assert.deepEqual(await readJsonBody(requestChunks(Buffer.from("   \n\t"))), {});
+});
+
+test("parseRequestUrl falls back when Host is malformed", () => {
+  const url = parseRequestUrl({ url: "/health", headers: { host: "bad host" } });
+
+  assert.equal(url.origin, "http://127.0.0.1:8788");
+  assert.equal(url.pathname, "/health");
 });
 
 test("readJsonBody rejects invalid JSON with a 400 status", async () => {

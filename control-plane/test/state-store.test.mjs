@@ -305,6 +305,47 @@ test("state store fails closed and preserves malformed state JSON", () => {
   }
 });
 
+test("state store validates helper mutations before persisting", () => {
+  const { dir, store, cleanup } = tempStore();
+  try {
+    store.ensure();
+    const statePath = join(dir, "state.json");
+    const originalState = fs.readFileSync(statePath, "utf8");
+
+    assert.throws(() => store.upsertSite({ status: "running" }), /invalid state shape/);
+    assert.equal(fs.readFileSync(statePath, "utf8"), originalState);
+    assert.deepEqual(store.readState().sites, {});
+
+    assert.throws(() => store.upsertExposure({ containerPort: 3000 }), /invalid state shape/);
+    assert.equal(fs.readFileSync(statePath, "utf8"), originalState);
+    assert.deepEqual(store.readState().exposures, {});
+
+    assert.throws(() => store.upsertExposure({ runtimeId: "local", containerPort: "03000" }), /invalid state shape/);
+    assert.equal(fs.readFileSync(statePath, "utf8"), originalState);
+    assert.deepEqual(store.readState().exposures, {});
+  } finally {
+    cleanup();
+  }
+});
+
+test("state store rejects unsafe dynamic map keys before mutation or persistence", () => {
+  const { dir, store, cleanup } = tempStore();
+  try {
+    store.ensure();
+    const statePath = join(dir, "state.json");
+    const originalState = fs.readFileSync(statePath, "utf8");
+
+    assert.throws(() => store.upsertRuntime("__proto__", {}), /unsafe state map key/);
+    assert.throws(() => store.upsertRuntime("prototype", {}), /unsafe state map key/);
+    assert.throws(() => store.upsertSite({ siteId: "constructor", status: "running" }), /unsafe state map key/);
+    assert.equal(fs.readFileSync(statePath, "utf8"), originalState);
+    assert.equal(Object.hasOwn(store.readState().runtimes, "__proto__"), false);
+    assert.equal(Object.hasOwn(store.readState().sites, "constructor"), false);
+  } finally {
+    cleanup();
+  }
+});
+
 test("state store fails closed for malformed valid state shapes", () => {
   const cases = [
     { name: "top-level null", value: null },
@@ -354,6 +395,17 @@ test("state store fails closed for malformed nested map records", () => {
     { name: "gatekeeper review missing id", value: { gatekeeperReviews: { gk_bad: {} }, audit: [] } },
     { name: "site missing id", value: { sites: { site_bad: {} }, audit: [] } },
     { name: "runtime id mismatch", value: { runtimes: { local: { runtimeId: "other" } }, audit: [] } },
+    {
+      name: "unsafe runtime key",
+      value: { runtimes: { constructor: { runtimeId: "constructor" } }, audit: [] },
+    },
+    {
+      name: "unsafe exposure key",
+      value: {
+        exposures: { ["__proto__"]: { runtimeId: "__proto__", containerPort: 3000 } },
+        audit: [],
+      },
+    },
     {
       name: "approval id mismatch",
       value: { approvals: { appr_bad: { approvalId: "appr_other" } }, audit: [] },

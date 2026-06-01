@@ -32,6 +32,7 @@ const STATE_MAP_ID_FIELDS = {
   runtimes: "runtimeId",
   sites: "siteId",
 };
+const UNSAFE_STATE_MAP_KEYS = new Set(["__proto__", "prototype", "constructor"]);
 const sleepArray = new Int32Array(new SharedArrayBuffer(4));
 
 function nowIso() {
@@ -98,7 +99,19 @@ function isValidToken(token) {
 }
 
 function isPlainObject(value) {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function isUnsafeStateMapKey(key) {
+  return UNSAFE_STATE_MAP_KEYS.has(String(key));
+}
+
+function assertSafeStateMapKey(key) {
+  if (isUnsafeStateMapKey(key)) {
+    throw new Error(`unsafe state map key: ${key}`);
+  }
 }
 
 function invalidStateShape(path, message) {
@@ -108,6 +121,9 @@ function invalidStateShape(path, message) {
 function validateStateMapRecords(state, field, path) {
   const idField = STATE_MAP_ID_FIELDS[field];
   for (const [key, record] of Object.entries(state[field])) {
+    if (isUnsafeStateMapKey(key)) {
+      invalidStateShape(path, `unsafe state map key: ${field}.${key}`);
+    }
     if (!isPlainObject(record)) {
       invalidStateShape(path, `${field}.${key} must be an object`);
     }
@@ -241,6 +257,7 @@ export class StateStore {
 
   writeStateUnlocked(state) {
     state.updatedAt = nowIso();
+    normalizeStateShape(state, this.statePath);
     writeJson(this.statePath, state);
   }
 
@@ -340,6 +357,7 @@ export class StateStore {
   }
 
   upsertRuntime(runtimeId, patch) {
+    assertSafeStateMapKey(runtimeId);
     this.update((state) => {
       state.runtimes[runtimeId] = {
         ...(state.runtimes[runtimeId] || {}),
@@ -351,8 +369,10 @@ export class StateStore {
   }
 
   upsertExposure(exposure) {
+    const exposureKey = `${exposure.runtimeId}:${exposure.containerPort}`;
+    assertSafeStateMapKey(exposureKey);
     this.update((state) => {
-      state.exposures[`${exposure.runtimeId}:${exposure.containerPort}`] = {
+      state.exposures[exposureKey] = {
         ...exposure,
         updatedAt: nowIso(),
       };
@@ -386,6 +406,7 @@ export class StateStore {
   }
 
   updateAgentRequest(requestId, patch) {
+    assertSafeStateMapKey(requestId);
     let next = null;
     this.update((state) => {
       const current = state.agentRequests[requestId];
@@ -417,6 +438,7 @@ export class StateStore {
   }
 
   upsertSite(site, auditEvent = null) {
+    assertSafeStateMapKey(site.siteId);
     this.update((state) => {
       state.sites[site.siteId] = {
         ...(state.sites[site.siteId] || {}),
@@ -478,6 +500,7 @@ export class StateStore {
   }
 
   updateApproval(approvalId, patch) {
+    assertSafeStateMapKey(approvalId);
     let next = null;
     this.update((state) => {
       const current = state.approvals[approvalId];
@@ -505,6 +528,7 @@ export class StateStore {
   }
 
   transitionApproval(approvalId, expectedStatus, patch) {
+    assertSafeStateMapKey(approvalId);
     let result = null;
     this.update((state) => {
       const current = state.approvals[approvalId];
@@ -566,6 +590,7 @@ export class StateStore {
   }
 
   updateGatekeeperReview(reviewId, patch) {
+    assertSafeStateMapKey(reviewId);
     let next = null;
     this.update((state) => {
       const current = state.gatekeeperReviews[reviewId];
