@@ -6,6 +6,7 @@ STATE_DIR="${BEEP_CONTROL_PLANE_STATE_DIR:-$ROOT_DIR/.beep-dev/control-plane}"
 PID_FILE="$STATE_DIR/control-plane.pid"
 LOG_FILE="$STATE_DIR/control-plane.log"
 URL="http://${BEEP_CONTROL_PLANE_HOST:-127.0.0.1}:${BEEP_CONTROL_PLANE_PORT:-8788}"
+RUNTIME_ID="${BEEP_CONTROL_PLANE_RUNTIME_ID:-local}"
 COMMAND="${1:-foreground}"
 
 usage() {
@@ -87,7 +88,11 @@ status() {
     echo "process: stopped"
   fi
   if curl -fsS "$URL/health"; then
-    curl -fsS "$URL/api/runtimes/local" || true
+    local operator_token
+    operator_token="$(state_store_token ensureOperatorToken)"
+    curl -fsS \
+      -H "authorization: Bearer $operator_token" \
+      "$URL/api/runtimes/$RUNTIME_ID" || true
   else
     echo "health: unavailable"
   fi

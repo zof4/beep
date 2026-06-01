@@ -7,6 +7,7 @@ fi
 mkdir -p \
   "$ROOT_DIR/.beep-dev/workspace" \
   "$ROOT_DIR/.beep-dev/lcm" \
+  "$ROOT_DIR/.beep-dev/hindsight" \
   "$ROOT_DIR/.beep-dev/history" \
   "$ROOT_DIR/.beep-dev/codex-empty" \
   "$ROOT_DIR/.beep-dev/state" \
@@ -27,7 +28,13 @@ fi
 
 update_env="$ROOT_DIR/.beep-dev/update-state/runtime-update.env"
 if [ -f "$update_env" ]; then
-  # shellcheck source=/dev/null
-  source "$update_env"
+  BEEP_RUNTIME_UPDATE_EPOCH="$(
+    awk -F= '$1 == "BEEP_RUNTIME_UPDATE_EPOCH" {
+      value = substr($0, index($0, "=") + 1)
+      gsub(/^"|"$/, "", value)
+      print value
+      exit
+    }' "$update_env"
+  )"
   export BEEP_RUNTIME_UPDATE_EPOCH
 fi
