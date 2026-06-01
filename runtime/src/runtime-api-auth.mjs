@@ -15,11 +15,16 @@ export function runtimeApiAuthRequired(pathname) {
 }
 
 export function authorizeRuntimeApiRequest({ pathname, authorization, runtimeApiToken }) {
-  if (typeof runtimeApiToken !== "string" || runtimeApiToken.length === 0) {
-    return { ok: true, required: false };
-  }
   if (!runtimeApiAuthRequired(pathname)) {
     return { ok: true, required: false };
+  }
+  if (!nonEmptyString(runtimeApiToken)) {
+    return {
+      ok: false,
+      required: true,
+      status: 503,
+      error: "Runtime API bearer token is not configured.",
+    };
   }
   if (String(authorization || "") === `Bearer ${runtimeApiToken}`) {
     return { ok: true, required: true };

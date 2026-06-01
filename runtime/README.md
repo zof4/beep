@@ -106,12 +106,18 @@ starts additional Pi RPC sessions and stores each under
 
 ```bash
 curl http://127.0.0.1:8787/capabilities
-curl -X POST http://127.0.0.1:8787/sessions -d '{}'
+runtime_api_token="$(./scripts/beep-control-plane.sh runtime-api-token)"
+curl -X POST http://127.0.0.1:8787/sessions \
+  -H "authorization: Bearer $runtime_api_token" \
+  -d '{}'
 curl -X POST http://127.0.0.1:8787/sessions/<id>/prompt \
+  -H "authorization: Bearer $runtime_api_token" \
   -H 'content-type: application/json' \
   -d '{"message":"Work in the current directory and create proof.txt","waitForCompletion":true}'
-curl http://127.0.0.1:8787/sessions/<id>/events
-curl http://127.0.0.1:8787/sessions/<id>/summary
+curl http://127.0.0.1:8787/sessions/<id>/events \
+  -H "authorization: Bearer $runtime_api_token"
+curl http://127.0.0.1:8787/sessions/<id>/summary \
+  -H "authorization: Bearer $runtime_api_token"
 ```
 
 `POST /runs` is the convenience endpoint for a complete autonomous task. It
@@ -133,16 +139,23 @@ the LCM memory substrate.
 The control plane can inspect and operate LCM through private agent endpoints:
 
 ```bash
-curl http://127.0.0.1:8787/agent/lcm/status
+runtime_api_token="$(./scripts/beep-control-plane.sh runtime-api-token)"
+curl http://127.0.0.1:8787/agent/lcm/status \
+  -H "authorization: Bearer $runtime_api_token"
 curl -X POST http://127.0.0.1:8787/agent/lcm/compact \
+  -H "authorization: Bearer $runtime_api_token" \
   -H 'content-type: application/json' \
   -d '{"force":true,"tokenBudget":2048,"currentTokenCount":2400}'
 curl -X POST http://127.0.0.1:8787/agent/lcm/assemble-preview \
+  -H "authorization: Bearer $runtime_api_token" \
   -H 'content-type: application/json' \
   -d '{"tokenBudget":2048}'
-curl -X POST http://127.0.0.1:8787/agent/lcm/maintain
-curl -X POST http://127.0.0.1:8787/agent/lcm/backup
-curl http://127.0.0.1:8787/agent/lcm/doctor
+curl -X POST http://127.0.0.1:8787/agent/lcm/maintain \
+  -H "authorization: Bearer $runtime_api_token"
+curl -X POST http://127.0.0.1:8787/agent/lcm/backup \
+  -H "authorization: Bearer $runtime_api_token"
+curl http://127.0.0.1:8787/agent/lcm/doctor \
+  -H "authorization: Bearer $runtime_api_token"
 ```
 
 ### Updating Hindsight And LCM

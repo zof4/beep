@@ -9,6 +9,7 @@ import { Gatekeeper } from "../src/gatekeeper/index.mjs";
 import { StateStore } from "../src/state-store.mjs";
 import { ToolBroker } from "../src/tool-broker.mjs";
 import { TOOL_MANIFEST } from "../src/tool-manifest.mjs";
+import { createRuntimeHealthProof } from "../../runtime/src/runtime-api-auth.mjs";
 
 function tempStore() {
   const dir = mkdtempSync(join(tmpdir(), "beep-gatekeeper-test-"));
@@ -44,18 +45,39 @@ function validStaticSiteEvidence(overrides = {}) {
   };
 }
 
-function installRuntimeFetchMock(t, onFetch = null) {
+function installRuntimeFetchMock(t, { store = null, onFetch = null, proveHealth = true } = {}) {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (url, options = {}) => {
     onFetch?.(url, options);
-    const path = String(url);
-    if (path.endsWith("/agent/requests")) {
+    const requestUrl = new URL(String(url));
+    if (requestUrl.pathname === "/health") {
+      const challenge = requestUrl.searchParams.get("challenge");
+      const runtimeApiToken =
+        proveHealth && store && challenge ? store.ensureRuntimeApiToken() : null;
+      return {
+        ok: true,
+        json: async () => ({
+          ok: true,
+          service: "beep-agentd",
+          runtimeId: "local",
+          ...(runtimeApiToken
+            ? {
+                managedProof: createRuntimeHealthProof({
+                  challenge,
+                  runtimeApiToken,
+                }),
+              }
+            : {}),
+        }),
+      };
+    }
+    if (requestUrl.pathname === "/agent/requests") {
       return { ok: true, json: async () => ({ requests: [] }) };
     }
-    if (path.includes("/agent/events")) {
+    if (requestUrl.pathname === "/agent/events") {
       return { ok: true, json: async () => ({ events: [] }) };
     }
-    if (path.endsWith("/agent/summary")) {
+    if (requestUrl.pathname === "/agent/summary") {
       return { ok: true, json: async () => ({ summary: "" }) };
     }
     return { ok: false, status: 404, statusText: "not found", json: async () => ({}) };
@@ -552,8 +574,8 @@ for (const limitExceeded of ["dirs", "depth"]) {
 }
 
 test("gatekeeper context excludes stale unrelated control-plane requests from authorization text", async (t) => {
-  installRuntimeFetchMock(t);
   const { store, cleanup } = tempStore();
+  installRuntimeFetchMock(t, { store });
   try {
     store.createAgentRequest({
       runtimeId: "local",
@@ -575,8 +597,8 @@ test("gatekeeper context excludes stale unrelated control-plane requests from au
 });
 
 test("gatekeeper context includes control-plane authorization scoped to the current tool call", async (t) => {
-  installRuntimeFetchMock(t);
   const { store, cleanup } = tempStore();
+  installRuntimeFetchMock(t, { store });
   try {
     store.createAgentRequest({
       runtimeId: "local",
@@ -598,25 +620,66 @@ test("gatekeeper context includes control-plane authorization scoped to the curr
   }
 });
 
-test("gatekeeper context sends runtime API token to runtime agent endpoints", async (t) => {
+test("gatekeeper context proves managed runtime before sending runtime API token", async (t) => {
   const { store, cleanup } = tempStore();
   try {
     const token = store.ensureRuntimeApiToken();
     const seen = [];
-    installRuntimeFetchMock(t, (url, options) => {
-      seen.push({ url: String(url), authorization: options.headers?.authorization });
+    installRuntimeFetchMock(t, {
+      store,
+      onFetch(url, options) {
+        seen.push({ url: String(url), authorization: options.headers?.authorization });
+      },
     });
 
     await collectGatekeeperContext({ store, runtimeId: "local", toolCallId: "call_auth" });
 
-    assert.deepEqual(
-      seen.map((request) => request.url.replace(/^http:\/\/127\.0\.0\.1:8787/u, "")),
-      ["/agent/requests", "/agent/events?limit=80", "/agent/summary"],
+    const paths = seen.map((request) => new URL(request.url).pathname);
+    const firstTokenIndex = seen.findIndex((request) => request.authorization === `Bearer ${token}`);
+    assert.notEqual(firstTokenIndex, -1, "verified runtime context requests should include the runtime API token");
+    assert.equal(
+      seen.slice(0, firstTokenIndex).some((request) => new URL(request.url).pathname === "/health"),
+      true,
+      "runtime health proof must be checked before any token-bearing runtime request",
     );
     assert.deepEqual(
-      seen.map((request) => request.authorization),
-      [`Bearer ${token}`, `Bearer ${token}`, `Bearer ${token}`],
+      paths.filter((path) => path.startsWith("/agent")),
+      ["/agent/requests", "/agent/events", "/agent/summary"],
     );
+  } finally {
+    cleanup();
+  }
+});
+
+test("gatekeeper context does not send runtime API token when managed health proof is missing", async (t) => {
+  const { store, cleanup } = tempStore();
+  try {
+    const token = store.ensureRuntimeApiToken();
+    const seen = [];
+    installRuntimeFetchMock(t, {
+      store,
+      proveHealth: false,
+      onFetch(url, options) {
+        seen.push({ url: String(url), authorization: options.headers?.authorization });
+      },
+    });
+
+    const context = await collectGatekeeperContext({ store, runtimeId: "local", toolCallId: "call_auth" });
+
+    assert.equal(
+      seen.some((request) => new URL(request.url).pathname === "/health"),
+      true,
+      "gatekeeper context should attempt managed-runtime proof",
+    );
+    assert.equal(
+      seen.some(
+        (request) =>
+          new URL(request.url).pathname.startsWith("/agent") && request.authorization === `Bearer ${token}`,
+      ),
+      false,
+      "runtime API token must not be sent to an unproven listener",
+    );
+    assert.match(context.errors.join("\n"), /managed runtime identity/iu);
   } finally {
     cleanup();
   }

@@ -109,4 +109,5 @@ container, records audit, and returns URLs. Managed preview containers are
 stopped through `POST /api/sites/<siteId>/stop`; the runtime cannot stop or
 remove containers directly.
 
-Task 7 is expected to add the pure reconciliation smoke for this local slice.
+The pure reconciliation smoke for this local slice lives at
+`scripts/smoke-test-control-plane-reconciliation.sh`.

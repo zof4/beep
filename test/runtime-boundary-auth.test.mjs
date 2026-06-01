@@ -67,14 +67,19 @@ test("runtime API token protects control routes while health and capabilities st
   );
 });
 
-test("runtime API auth is disabled when no runtime API token is configured", () => {
+test("runtime API protected routes fail closed when no runtime API token is configured", () => {
   assert.deepEqual(
     authorizeRuntimeApiRequest({
       pathname: "/agent",
       authorization: "",
       runtimeApiToken: "",
     }),
-    { ok: true, required: false },
+    {
+      ok: false,
+      required: true,
+      status: 503,
+      error: "Runtime API bearer token is not configured.",
+    },
   );
 });
 
