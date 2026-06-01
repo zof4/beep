@@ -1,6 +1,8 @@
+import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { verifyRuntimeHealthProof } from "../../runtime/src/runtime-api-auth.mjs";
 import {
   COMPOSE_FILE,
   CONTAINER_BASE_URL,
@@ -82,15 +84,45 @@ async function fetchRuntime(path, options = {}) {
   return payload;
 }
 
+function runtimeHealthPath(challenge) {
+  return `/health?challenge=${encodeURIComponent(challenge)}`;
+}
+
+function assertManagedRuntimeHealth(health, { challenge, runtimeApiToken }) {
+  if (health?.service !== "beep-agentd") {
+    throw new Error("Runtime health did not match the expected managed runtime identity.");
+  }
+  if (health?.runtimeId !== RUNTIME_ID) {
+    throw new Error("Runtime health did not match the expected managed runtime identity.");
+  }
+  if (
+    !verifyRuntimeHealthProof({
+      challenge,
+      runtimeApiToken,
+      proof: health?.managedProof,
+    })
+  ) {
+    throw new Error("Runtime health did not prove the expected managed runtime identity.");
+  }
+}
+
 export class RuntimeManager {
   constructor({ store }) {
     this.store = store;
   }
 
+  async verifiedHealth() {
+    const runtimeApiToken = this.store.ensureRuntimeApiToken();
+    const challenge = randomUUID();
+    const health = await fetchRuntime(runtimeHealthPath(challenge));
+    assertManagedRuntimeHealth(health, { challenge, runtimeApiToken });
+    return health;
+  }
+
   async status() {
     const state = this.store.readState();
     try {
-      const health = await fetchRuntime("/health");
+      const health = await this.verifiedHealth();
       return {
         runtimeId: RUNTIME_ID,
         running: true,
@@ -165,7 +197,7 @@ export class RuntimeManager {
     let lastError = null;
     while (Date.now() - started < timeoutMs) {
       try {
-        await fetchRuntime("/health");
+        await this.verifiedHealth();
         return;
       } catch (error) {
         lastError = error;
@@ -176,6 +208,7 @@ export class RuntimeManager {
   }
 
   async proxyToRuntime(path, options = {}) {
+    await this.verifiedHealth();
     const headers = {
       ...(options.headers || {}),
       authorization: `Bearer ${this.store.ensureRuntimeApiToken()}`,

@@ -11,6 +11,23 @@ function positiveIntegerEnv(name, fallback) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function readControlPlaneConfig() {
+  const config = {
+    enabled: boolEnv("BEEP_CONTROL_PLANE_TOOLS_ENABLED", false),
+    controlPlaneUrl: process.env.BEEP_CONTROL_PLANE_URL,
+    token: process.env.BEEP_CONTROL_PLANE_RUNTIME_TOKEN,
+    runtimeId: process.env.BEEP_CONTROL_PLANE_RUNTIME_ID || "local",
+    timeoutMs: positiveIntegerEnv("BEEP_CONTROL_PLANE_TOOL_TIMEOUT_MS", 15_000),
+  };
+
+  delete process.env.BEEP_CONTROL_PLANE_RUNTIME_TOKEN;
+  delete process.env.BEEP_CONTROL_PLANE_OPERATOR_TOKEN;
+  delete process.env.BEEP_MODEL_GATEWAY_CAPABILITY_TOKEN;
+  delete process.env.BEEP_MODEL_GATEWAY_CREDENTIAL_URL;
+
+  return config;
+}
+
 async function postJson(url, body, { token, timeoutMs }) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -38,10 +55,8 @@ function textResult(text, details = {}) {
   };
 }
 
-async function callControlPlaneTool(action, args, toolCallId) {
-  const controlPlaneUrl = process.env.BEEP_CONTROL_PLANE_URL;
-  const token = process.env.BEEP_CONTROL_PLANE_RUNTIME_TOKEN;
-  const runtimeId = process.env.BEEP_CONTROL_PLANE_RUNTIME_ID || "local";
+async function callControlPlaneTool(config, action, args, toolCallId) {
+  const { controlPlaneUrl, token, runtimeId, timeoutMs } = config;
   if (!controlPlaneUrl || !token) {
     return {
       response: null,
@@ -64,7 +79,7 @@ async function callControlPlaneTool(action, args, toolCallId) {
       },
       {
         token,
-        timeoutMs: positiveIntegerEnv("BEEP_CONTROL_PLANE_TOOL_TIMEOUT_MS", 15_000),
+        timeoutMs,
       },
     );
     return { response, payload };
@@ -103,7 +118,8 @@ function resultFromToolPayload(toolName, response, payload, successText) {
 }
 
 export default function beepControlPlaneToolsExtension(pi) {
-  if (!boolEnv("BEEP_CONTROL_PLANE_TOOLS_ENABLED", false)) return;
+  const config = readControlPlaneConfig();
+  if (!config.enabled) return;
 
   pi.registerTool({
     name: "preview_port_expose",
@@ -126,7 +142,7 @@ export default function beepControlPlaneToolsExtension(pi) {
       label: Type.Optional(Type.String({ description: "Optional short label for the preview." })),
     }),
     async execute(toolCallId, params) {
-      const { response, payload } = await callControlPlaneTool("preview.port.expose", params, toolCallId);
+      const { response, payload } = await callControlPlaneTool(config, "preview.port.expose", params, toolCallId);
       return resultFromToolPayload("preview_port_expose", response, payload, (result) =>
         [
           `Preview exposed: ${result.url}`,
@@ -158,6 +174,7 @@ export default function beepControlPlaneToolsExtension(pi) {
     }),
     async execute(toolCallId, params) {
       const { response, payload } = await callControlPlaneTool(
+        config,
         "preview.container.createStaticSite",
         params,
         toolCallId,

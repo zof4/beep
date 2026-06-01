@@ -114,6 +114,11 @@ test("preview_port_expose posts to internal tools call with runtime token and re
       const tools = await registeredTools();
       const tool = tools.find((candidate) => candidate.name === "preview_port_expose");
       assert.ok(tool, "preview_port_expose should be registered");
+      assert.equal(
+        process.env.BEEP_CONTROL_PLANE_RUNTIME_TOKEN,
+        undefined,
+        "extension should remove the runtime tool token from shell-visible process.env after capture",
+      );
 
       const result = await tool.execute("tool-call-1", { port: 3000, path: "/", label: "site" });
 

@@ -55,22 +55,32 @@ mount.
 `beep-agentd` is the long-running runtime process. It starts inside the Docker
 container and stays up. On boot, it autostarts the canonical Beep session
 `agent_beep` unless `BEEP_AGENT_AUTOSTART=0` is set. That session is a Pi
-`--mode rpc` process using the refreshed Codex ChatGPT OAuth access token. Its
-workspace is `/workspace/api-sessions/agent_beep`, and its event/session state
-is under `/state/api/sessions/agent_beep`.
+`--mode rpc` process using a short-lived model credential. When the control
+plane starts the runtime, durable Codex auth stays host-side and the runtime
+gets the short-lived credential through the control plane model-credential
+endpoint. The active Pi provider still receives that credential inside the Pi
+process until the future model-gateway provider adapter replaces Pi's current
+`--api-key` provider path, so this local slice is not production process-level
+secret isolation.
 
 The daemon keeps a durable request queue under `/state/api/agents/beep`. The
 control plane should use the `/agent` endpoints for normal Beep work:
 
 ```bash
 curl http://127.0.0.1:8787/health
-curl http://127.0.0.1:8787/agent
+runtime_api_token="$(./scripts/beep-control-plane.sh runtime-api-token)"
+curl http://127.0.0.1:8787/agent \
+  -H "authorization: Bearer $runtime_api_token"
 curl -X POST http://127.0.0.1:8787/agent/submit \
+  -H "authorization: Bearer $runtime_api_token" \
   -H 'content-type: application/json' \
   -d '{"message":"Work in the current directory and create proof.txt"}'
-curl http://127.0.0.1:8787/agent/requests
-curl http://127.0.0.1:8787/agent/events?limit=20
-curl http://127.0.0.1:8787/agent/summary
+curl http://127.0.0.1:8787/agent/requests \
+  -H "authorization: Bearer $runtime_api_token"
+curl 'http://127.0.0.1:8787/agent/events?limit=20' \
+  -H "authorization: Bearer $runtime_api_token"
+curl http://127.0.0.1:8787/agent/summary \
+  -H "authorization: Bearer $runtime_api_token"
 ```
 
 `beep-agentd` is not the future trust boundary for external tools. It owns the

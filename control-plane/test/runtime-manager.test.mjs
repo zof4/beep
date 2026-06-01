@@ -51,13 +51,53 @@ test("runtime manager reports stopped when runtime health is unavailable", async
   }
 });
 
+test("runtime manager rejects unproven health before sending runtime API token", async () => {
+  const originalFetch = globalThis.fetch;
+  const { store, manager, cleanup } = tempManager();
+  try {
+    const token = store.ensureRuntimeApiToken();
+    const calls = [];
+    globalThis.fetch = async (url, options = {}) => {
+      calls.push({ url: String(url), authorization: options.headers?.authorization || null });
+      return {
+        ok: true,
+        json: async () => ({ ok: true, service: "beep-agentd", runtimeId: "local" }),
+      };
+    };
+
+    const status = await manager.status();
+    assert.equal(status.running, false);
+    assert.match(status.error, /managed runtime identity/i);
+
+    await assert.rejects(() => manager.proxyToRuntime("/agent"), /managed runtime identity/i);
+    assert.equal(calls.some((call) => call.authorization === `Bearer ${token}`), false);
+  } finally {
+    globalThis.fetch = originalFetch;
+    cleanup();
+  }
+});
+
 test("runtime manager proxies to runtime with runtime API token", async () => {
   const originalFetch = globalThis.fetch;
   const { store, manager, cleanup } = tempManager();
   try {
     const token = store.ensureRuntimeApiToken();
     let seenAuthorization = null;
-    globalThis.fetch = async (_url, options = {}) => {
+    globalThis.fetch = async (url, options = {}) => {
+      const requestUrl = new URL(String(url));
+      if (requestUrl.pathname === "/health") {
+        const challenge = requestUrl.searchParams.get("challenge");
+        const { createRuntimeHealthProof } = await import("../../runtime/src/runtime-api-auth.mjs");
+        return {
+          ok: true,
+          json: async () => ({
+            ok: true,
+            service: "beep-agentd",
+            runtimeId: "local",
+            managedProof: createRuntimeHealthProof({ challenge, runtimeApiToken: token }),
+          }),
+        };
+      }
       seenAuthorization = options.headers.authorization;
       return {
         ok: true,

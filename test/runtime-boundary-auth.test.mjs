@@ -1,6 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { authorizeRuntimeApiRequest } from "../runtime/src/runtime-api-auth.mjs";
+import {
+  authorizeRuntimeApiRequest,
+  createRuntimeHealthProof,
+  verifyRuntimeHealthProof,
+} from "../runtime/src/runtime-api-auth.mjs";
 
 test("runtime API token protects control routes while health and capabilities stay public", () => {
   for (const pathname of ["/health", "/capabilities", "/internal/lcm/context", "/unknown"]) {
@@ -72,4 +76,30 @@ test("runtime API auth is disabled when no runtime API token is configured", () 
     }),
     { ok: true, required: false },
   );
+});
+
+test("runtime health proof validates a challenge without revealing the bearer token", () => {
+  const proof = createRuntimeHealthProof({
+    challenge: "managed-runtime-check",
+    runtimeApiToken: "runtime-api-secret",
+  });
+
+  assert.match(proof, /^[a-f0-9]{64}$/u);
+  assert.equal(
+    verifyRuntimeHealthProof({
+      challenge: "managed-runtime-check",
+      runtimeApiToken: "runtime-api-secret",
+      proof,
+    }),
+    true,
+  );
+  assert.equal(
+    verifyRuntimeHealthProof({
+      challenge: "managed-runtime-check",
+      runtimeApiToken: "wrong-secret",
+      proof,
+    }),
+    false,
+  );
+  assert.equal(proof.includes("runtime-api-secret"), false);
 });

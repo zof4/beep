@@ -13,7 +13,7 @@ import {
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { resolveCodexAccessToken } from "./codex-auth-for-pi.mjs";
-import { authorizeRuntimeApiRequest } from "./runtime-api-auth.mjs";
+import { authorizeRuntimeApiRequest, createRuntimeHealthProof } from "./runtime-api-auth.mjs";
 import {
   defaultLcmService,
   lcmSessionIdForRuntimeSession,
@@ -1352,11 +1352,19 @@ function listSessionStatuses() {
   return [...active, ...inactive].sort((left, right) => String(right.createdAt).localeCompare(String(left.createdAt)));
 }
 
-async function handleHealth(_req, res) {
+async function handleHealth(req, res) {
+  const url = new URL(req.url || "/", `http://${req.headers.host || `${API_HOST}:${API_PORT}`}`);
+  const challenge = url.searchParams.get("challenge");
   const agent = agentSupervisor.status();
+  const managedProof =
+    challenge && RUNTIME_API_TOKEN
+      ? createRuntimeHealthProof({ challenge, runtimeApiToken: RUNTIME_API_TOKEN })
+      : null;
   jsonResponse(res, 200, {
     ok: true,
     service: "beep-agentd",
+    runtimeId: CONTROL_PLANE_RUNTIME_ID,
+    ...(managedProof ? { managedProof } : {}),
     time: nowIso(),
     agent: {
       id: agent.id,
