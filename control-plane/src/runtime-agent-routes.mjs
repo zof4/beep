@@ -12,7 +12,34 @@ const POST_ROUTES = new Map([
   ["/api/agent/lcm/compact", "/agent/lcm/compact"],
   ["/api/agent/lcm/maintain", "/agent/lcm/maintain"],
   ["/api/agent/lcm/backup", "/agent/lcm/backup"],
+  ["/api/agent/lcm/assemble-preview", "/agent/lcm/assemble-preview"],
+  ["/api/agent/lcm/rotate", "/agent/lcm/rotate"],
 ]);
+
+function rawPathFromRequestTarget(requestTarget = "") {
+  const rawTarget = String(requestTarget || "/");
+  const withoutOrigin = rawTarget.replace(/^[A-Za-z][A-Za-z0-9+.-]*:\/\/[^/?#]*/u, "") || "/";
+  return withoutOrigin.split("?", 1)[0] || "/";
+}
+
+function unsafeEncodedPathError(requestTarget) {
+  const rawPath = rawPathFromRequestTarget(requestTarget);
+  for (const rawComponent of rawPath.split("/")) {
+    let decodedComponent = "";
+    try {
+      decodedComponent = decodeURIComponent(rawComponent);
+    } catch {
+      return "unsafe encoded path component";
+    }
+    if (decodedComponent === "." || decodedComponent === "..") {
+      return "unsafe encoded path component";
+    }
+    if (decodedComponent.includes("/") || decodedComponent.includes("\\")) {
+      return "unsafe encoded path component";
+    }
+  }
+  return null;
+}
 
 function routeFor(pathname, url) {
   if (pathname === "/api/agent/events") {
@@ -42,6 +69,12 @@ export async function handleRuntimeAgentRoute({
   forwardRuntimeRequest,
 }) {
   requireOperatorAuth(request);
+
+  const unsafePathError = unsafeEncodedPathError(request.url);
+  if (unsafePathError) {
+    sendJson(response, 400, { ok: false, error: unsafePathError });
+    return;
+  }
 
   const route = routeFor(pathname, url);
   if (!route) {

@@ -138,6 +138,31 @@ test("LCM compact POST parses JSON and passes body object to forwardRuntimeReque
   assert.equal(result.statusCode, 200);
 });
 
+test("LCM assemble-preview and rotate POST parse JSON and pass body objects", async () => {
+  const assemblePreview = await callRoute({
+    method: "POST",
+    target: "/api/agent/lcm/assemble-preview",
+    body: { requestId: "request-123", dryRun: true },
+  });
+  assert.deepEqual(assemblePreview.calls, [
+    {
+      path: "/agent/lcm/assemble-preview",
+      options: { method: "POST", body: { requestId: "request-123", dryRun: true } },
+    },
+  ]);
+  assert.equal(assemblePreview.statusCode, 200);
+
+  const rotate = await callRoute({
+    method: "POST",
+    target: "/api/agent/lcm/rotate",
+    body: { keep: 4 },
+  });
+  assert.deepEqual(rotate.calls, [
+    { path: "/agent/lcm/rotate", options: { method: "POST", body: { keep: 4 } } },
+  ]);
+  assert.equal(rotate.statusCode, 200);
+});
+
 test("missing operator auth rejects before forwarding", async () => {
   await assert.rejects(
     () => callRoute({ target: "/api/agent/summary", authOk: false }),
@@ -164,6 +189,18 @@ test("unsupported methods on known route return 405", async () => {
   assert.deepEqual(result.payload, { ok: false, error: "method not allowed" });
 });
 
+test("unsupported methods on assemble-preview and rotate return 405", async () => {
+  const assemblePreview = await callRoute({ method: "GET", target: "/api/agent/lcm/assemble-preview" });
+  assert.deepEqual(assemblePreview.calls, []);
+  assert.equal(assemblePreview.statusCode, 405);
+  assert.deepEqual(assemblePreview.payload, { ok: false, error: "method not allowed" });
+
+  const rotate = await callRoute({ method: "GET", target: "/api/agent/lcm/rotate" });
+  assert.deepEqual(rotate.calls, []);
+  assert.equal(rotate.statusCode, 405);
+  assert.deepEqual(rotate.payload, { ok: false, error: "method not allowed" });
+});
+
 test("unknown agent paths return 404", async () => {
   const result = await callRoute({ target: "/api/agent/lcm/nope" });
 
@@ -171,6 +208,16 @@ test("unknown agent paths return 404", async () => {
   assert.deepEqual(result.calls, []);
   assert.equal(result.statusCode, 404);
   assert.deepEqual(result.payload, { ok: false, error: "not found" });
+});
+
+test("encoded dot segments and separators return 400 without forwarding", async () => {
+  for (const target of ["/api/agent/requests/%2e%2e", "/api/agent/requests/%2E%2E", "/api/agent/requests/a%2fb"]) {
+    const result = await callRoute({ target });
+    assert.equal(result.authCalls, 1);
+    assert.deepEqual(result.calls, []);
+    assert.equal(result.statusCode, 400);
+    assert.match(result.payload.error, /unsafe encoded path/u);
+  }
 });
 
 test("createControlPlaneHandler delegates agent routes through managed runtime proxy", async () => {
@@ -222,6 +269,36 @@ test("createControlPlaneHandler delegates agent routes through managed runtime p
         },
       },
     ]);
+  } finally {
+    cleanup();
+  }
+});
+
+test("createControlPlaneHandler rejects encoded-dot agent paths before proxying", async () => {
+  const { store, cleanup } = tempStore();
+  try {
+    const proxyCalls = [];
+    const handler = handlerFor({
+      store,
+      runtimeManager: {
+        status: async () => ({ runtimeId: "local", running: false }),
+        ensureRuntime: async () => ({ runtimeId: "local", running: true }),
+        proxyToRuntime: async (path, options) => {
+          proxyCalls.push({ path, options });
+          return { ok: true };
+        },
+      },
+    });
+
+    const response = captureResponse();
+    await handler(
+      request("GET", "/api/agent/requests/%2e%2e", operatorHeaders(store)),
+      response.response,
+    );
+
+    assert.equal(response.json().statusCode, 400);
+    assert.match(response.json().payload.error, /unsafe encoded path/u);
+    assert.deepEqual(proxyCalls, []);
   } finally {
     cleanup();
   }
