@@ -1,4 +1,40 @@
 const RUNTIME_STOPPED_ERROR = "runtime is not running";
+const UNSAFE_RUNTIME_STATUS_KEYS = new Set([
+  "cwd",
+  "events",
+  "lastassistanttext",
+  "finalassistanttext",
+  "assistantfinaltext",
+  "assistanttext",
+  "assistantmessage",
+  "finaltext",
+  "transcript",
+  "transcripttext",
+  "rawprompt",
+  "messages",
+  "promptresult",
+  "stderrtail",
+  "stdouttail",
+  "workspace",
+]);
+const UNSAFE_RUNTIME_STATUS_SUFFIXES = [
+  "path",
+  "paths",
+  "root",
+  "roots",
+  "dir",
+  "dirs",
+  "directory",
+  "directories",
+  "file",
+  "files",
+  "log",
+  "logs",
+  "tail",
+  "tails",
+];
+const UNSAFE_RUNTIME_STATUS_SUFFIX_PATTERN =
+  /(?:^|[_-])(path|paths|root|roots|dir|dirs|directory|directories|file|files|log|logs|tail|tails)$|(?:Path|Paths|Root|Roots|Dir|Dirs|Directory|Directories|File|Files|Log|Logs|Tail|Tails)$/u;
 
 function errorString(error) {
   return error instanceof Error ? error.message : String(error);
@@ -55,26 +91,9 @@ function isUnsafeStatusKey(key) {
     .toLowerCase()
     .replace(/[^a-z0-9]/gu, "");
   return (
-    /path$/iu.test(key) ||
-    /paths$/iu.test(key) ||
-    key === "path" ||
-    key === "workspace" ||
-    key === "events" ||
-    [
-      "lastassistanttext",
-      "finalassistanttext",
-      "assistantfinaltext",
-      "assistanttext",
-      "assistantmessage",
-      "finaltext",
-      "transcript",
-      "transcripttext",
-      "rawprompt",
-      "messages",
-      "promptresult",
-      "stderrtail",
-      "stdouttail",
-    ].includes(compact)
+    UNSAFE_RUNTIME_STATUS_KEYS.has(compact) ||
+    UNSAFE_RUNTIME_STATUS_SUFFIXES.includes(compact) ||
+    UNSAFE_RUNTIME_STATUS_SUFFIX_PATTERN.test(String(key))
   );
 }
 

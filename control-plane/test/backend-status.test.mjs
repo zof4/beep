@@ -117,8 +117,17 @@ function agentSummaryFixture() {
         available: true,
         backend: "lossless-claw",
         status: "ready",
+        compactedCount: 5,
+        rowCounts: { atoms: 12, bonds: 7 },
+        messageCount: 19,
+        lcmRoot: "/lcm/runtime-summary-root",
         assistantFinalText: "LCM final assistant text must not leave this API",
         assistantMessage: "LCM assistant message must not leave this API",
+        config: {
+          largeFilesDir: "/lcm/runtime-summary-large-files",
+          status: "loaded",
+          rowCounts: { configRows: 2 },
+        },
         workspacePath: "/workspace/hidden",
       },
       lcmContextInjection: {
@@ -168,6 +177,11 @@ test("buildBackendStatus aggregates running runtime, memory, control-plane state
               available: true,
               status: "ready",
               compactedCount: 3,
+              rowCounts: { atoms: 8, bonds: 4 },
+              messageCount: 11,
+              lcmRoot: "/lcm/status-root",
+              lcmLogTail: "raw LCM status log tail must not leave this API",
+              cwd: "/workspace/status-cwd",
             },
           };
         }
@@ -188,6 +202,19 @@ test("buildBackendStatus aggregates running runtime, memory, control-plane state
       byType: { session: 1, response: 2 },
       agentEndCount: 1,
     });
+    assert.deepEqual(status.agent.summary.lcm, {
+      ok: true,
+      available: true,
+      backend: "lossless-claw",
+      status: "ready",
+      compactedCount: 5,
+      rowCounts: { atoms: 12, bonds: 7 },
+      messageCount: 19,
+      config: {
+        status: "loaded",
+        rowCounts: { configRows: 2 },
+      },
+    });
     assert.equal(status.memory.lcm.available, true);
     assert.equal(status.memory.lcm.error, null);
     assert.deepEqual(status.memory.lcm.status, {
@@ -195,6 +222,8 @@ test("buildBackendStatus aggregates running runtime, memory, control-plane state
       available: true,
       status: "ready",
       compactedCount: 3,
+      rowCounts: { atoms: 8, bonds: 4 },
+      messageCount: 11,
     });
     assert.deepEqual(status.memory.lcm.latestContextInjection, {
       kind: "assemble",
@@ -226,6 +255,7 @@ test("buildBackendStatus aggregates running runtime, memory, control-plane state
     ]);
     assert.equal(status.controlPlane.recentRequests[0].requestId, requestRecord.requestId);
     assert.equal(status.controlPlane.recentRequests[0].runtimeRequestId, "runtime-request-1");
+    assert.equal(status.controlPlane.recentRequests[0].message, "Create the first usable loop");
     assert.equal(status.controlPlane.pendingApprovals.length, 1);
     assert.equal(status.controlPlane.pendingApprovals[0].approvalId, approval.approvalId);
     assert.deepEqual(Object.keys(status.controlPlane.pendingApprovals[0]).sort(), [
@@ -239,6 +269,7 @@ test("buildBackendStatus aggregates running runtime, memory, control-plane state
       "toolCallId",
       "updatedAt",
     ]);
+    assert.equal(status.controlPlane.pendingApprovals[0].prompt, "Approve static preview?");
     assert.ok(status.controlPlane.recentAudit.some((event) => event.kind === "manual_status_probe"));
     assert.deepEqual(status.controlPlane.tools, { tools: [{ name: "preview.container.createStaticSite" }] });
     assert.deepEqual(calls, ["/agent/summary", "/agent/lcm/status"]);
@@ -316,7 +347,21 @@ test("buildBackendStatus sanitizes agent summary while exposing memory telemetry
       toolBroker: { manifest: () => ({ tools: [] }) },
       forwardRuntimeRequest: async (path) => {
         if (path === "/agent/summary") return agentSummaryFixture();
-        if (path === "/agent/lcm/status") return { ok: true, lcm: { ok: true, status: "ready" } };
+        if (path === "/agent/lcm/status") {
+          return {
+            ok: true,
+            lcm: {
+              ok: true,
+              status: "ready",
+              compactedCount: 3,
+              rowCounts: { atoms: 8, bonds: 4 },
+              messageCount: 11,
+              lcmRoot: "/lcm/status-root",
+              lcmLogTail: "raw LCM status log tail must not leave this API",
+              cwd: "/workspace/status-cwd",
+            },
+          };
+        }
         return { ok: false };
       },
       now: () => "2026-06-02T12:00:00.000Z",
@@ -328,8 +373,17 @@ test("buildBackendStatus sanitizes agent summary while exposing memory telemetry
     assert.equal(status.agent.summary.events.finalAssistantText, undefined);
     assert.equal(status.agent.summary.events.transcript, undefined);
     assert.equal(status.agent.summary.lcm.workspacePath, undefined);
+    assert.equal(status.agent.summary.lcm.lcmRoot, undefined);
+    assert.equal(status.agent.summary.lcm.config.largeFilesDir, undefined);
     assert.equal(status.agent.summary.lcm.assistantFinalText, undefined);
     assert.equal(status.agent.summary.lcm.assistantMessage, undefined);
+    assert.deepEqual(status.agent.summary.lcm.rowCounts, { atoms: 12, bonds: 7 });
+    assert.deepEqual(status.agent.summary.lcm.config.rowCounts, { configRows: 2 });
+    assert.equal(status.memory.lcm.status.lcmRoot, undefined);
+    assert.equal(status.memory.lcm.status.lcmLogTail, undefined);
+    assert.equal(status.memory.lcm.status.cwd, undefined);
+    assert.deepEqual(status.memory.lcm.status.rowCounts, { atoms: 8, bonds: 4 });
+    assert.equal(status.memory.lcm.status.messageCount, 11);
     assert.deepEqual(status.memory.lcm.latestContextInjection, {
       kind: "assemble",
       at: "2026-06-02T10:04:00.000Z",
@@ -345,6 +399,11 @@ test("buildBackendStatus sanitizes agent summary while exposing memory telemetry
     assert.doesNotMatch(serialized, /events transcript/u);
     assert.doesNotMatch(serialized, /LCM final assistant text/u);
     assert.doesNotMatch(serialized, /LCM assistant message/u);
+    assert.doesNotMatch(serialized, /\/lcm\/runtime-summary-root/u);
+    assert.doesNotMatch(serialized, /\/lcm\/runtime-summary-large-files/u);
+    assert.doesNotMatch(serialized, /\/lcm\/status-root/u);
+    assert.doesNotMatch(serialized, /raw LCM status log tail/u);
+    assert.doesNotMatch(serialized, /\/workspace\/status-cwd/u);
     assert.doesNotMatch(serialized, /hidden memory transcript/u);
   } finally {
     cleanup();
