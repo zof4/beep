@@ -314,6 +314,8 @@ test("createControlPlaneHandler rejects unsafe raw agent paths before normalized
     for (const target of [
       "/api/agent/%2e%2e/requests",
       "/api/agent/requests/a%2fb",
+      "/api/agent/requests/%2e%2e#frag",
+      "/x/%2e%2e/api/agent/summary",
       "http://control.test/api/agent/%2e%2e/requests",
     ]) {
       const response = captureResponse();
@@ -322,6 +324,33 @@ test("createControlPlaneHandler rejects unsafe raw agent paths before normalized
       assert.equal(response.json().statusCode, 400);
       assert.match(response.json().payload.error, /unsafe encoded path/u);
     }
+    assert.deepEqual(proxyCalls, []);
+  } finally {
+    cleanup();
+  }
+});
+
+test("createControlPlaneHandler rejects unsafe raw agent-looking paths before auth", async () => {
+  const { store, cleanup } = tempStore();
+  try {
+    const proxyCalls = [];
+    const handler = handlerFor({
+      store,
+      runtimeManager: {
+        status: async () => ({ runtimeId: "local", running: false }),
+        ensureRuntime: async () => ({ runtimeId: "local", running: true }),
+        proxyToRuntime: async (path, options) => {
+          proxyCalls.push({ path, options });
+          return { ok: true };
+        },
+      },
+    });
+
+    const response = captureResponse();
+    await handler(request("GET", "/api/agent/%2e%2e/requests"), response.response);
+
+    assert.equal(response.json().statusCode, 400);
+    assert.match(response.json().payload.error, /unsafe encoded path/u);
     assert.deepEqual(proxyCalls, []);
   } finally {
     cleanup();

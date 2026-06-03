@@ -19,11 +19,11 @@ const POST_ROUTES = new Map([
 function rawPathFromRequestTarget(requestTarget = "") {
   const rawTarget = String(requestTarget || "/");
   const withoutOrigin = rawTarget.replace(/^[A-Za-z][A-Za-z0-9+.-]*:\/\/[^/?#]*/u, "") || "/";
-  return withoutOrigin.split("?", 1)[0] || "/";
+  return withoutOrigin.split(/[?#]/u, 1)[0] || "/";
 }
 
-function isRawRuntimeAgentPath(rawPath) {
-  return rawPath === "/api/agent" || rawPath.startsWith("/api/agent/");
+function isRuntimeAgentPath(pathname) {
+  return pathname === "/api/agent" || pathname?.startsWith("/api/agent/");
 }
 
 function unsafeEncodedPathError(requestTarget) {
@@ -45,9 +45,10 @@ function unsafeEncodedPathError(requestTarget) {
   return null;
 }
 
-export function unsafeRuntimeAgentRequestTargetError(requestTarget) {
+export function unsafeRuntimeAgentRequestTargetError(requestTarget, normalizedPathname = null) {
   const rawPath = rawPathFromRequestTarget(requestTarget);
-  return isRawRuntimeAgentPath(rawPath) ? unsafeEncodedPathError(requestTarget) : null;
+  const needsValidation = isRuntimeAgentPath(rawPath) || isRuntimeAgentPath(normalizedPathname);
+  return needsValidation ? unsafeEncodedPathError(requestTarget) : null;
 }
 
 function routeFor(pathname, url) {
@@ -79,7 +80,7 @@ export async function handleRuntimeAgentRoute({
 }) {
   requireOperatorAuth(request);
 
-  const unsafePathError = unsafeRuntimeAgentRequestTargetError(request.url);
+  const unsafePathError = unsafeRuntimeAgentRequestTargetError(request.url, pathname);
   if (unsafePathError) {
     sendJson(response, 400, { ok: false, error: unsafePathError });
     return;

@@ -109,7 +109,7 @@ export function createControlPlaneHandler({ store, runtimeManager, toolBroker, l
 
     const url = parseRequestUrl(request);
     const pathname = url.pathname.replace(/\/+$/u, "") || "/";
-    const unsafeAgentPathError = unsafeRuntimeAgentRequestTargetError(request.url);
+    const unsafeAgentPathError = unsafeRuntimeAgentRequestTargetError(request.url, pathname);
     if (unsafeAgentPathError) {
       sendJson(response, 400, { ok: false, error: unsafeAgentPathError });
       return;
