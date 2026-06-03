@@ -269,12 +269,33 @@ test("createControlPlaneHandler delegates agent routes through managed runtime p
         },
       },
     ]);
+
+    const events = captureResponse();
+    await handler(
+      request("GET", "/api/agent/events?limit=10", operatorHeaders(store)),
+      events.response,
+    );
+
+    assert.equal(events.json().statusCode, 200);
+    assert.deepEqual(events.json().payload, {
+      ok: true,
+      path: "/agent/events?limit=10",
+      body: null,
+    });
+    assert.deepEqual(proxyCalls[1], {
+      path: "/agent/events?limit=10",
+      options: {
+        method: "GET",
+        headers: {},
+        body: undefined,
+      },
+    });
   } finally {
     cleanup();
   }
 });
 
-test("createControlPlaneHandler rejects encoded-dot agent paths before proxying", async () => {
+test("createControlPlaneHandler rejects unsafe raw agent paths before normalized dispatch or proxying", async () => {
   const { store, cleanup } = tempStore();
   try {
     const proxyCalls = [];
@@ -290,14 +311,17 @@ test("createControlPlaneHandler rejects encoded-dot agent paths before proxying"
       },
     });
 
-    const response = captureResponse();
-    await handler(
-      request("GET", "/api/agent/requests/%2e%2e", operatorHeaders(store)),
-      response.response,
-    );
+    for (const target of [
+      "/api/agent/%2e%2e/requests",
+      "/api/agent/requests/a%2fb",
+      "http://control.test/api/agent/%2e%2e/requests",
+    ]) {
+      const response = captureResponse();
+      await handler(request("GET", target, operatorHeaders(store)), response.response);
 
-    assert.equal(response.json().statusCode, 400);
-    assert.match(response.json().payload.error, /unsafe encoded path/u);
+      assert.equal(response.json().statusCode, 400);
+      assert.match(response.json().payload.error, /unsafe encoded path/u);
+    }
     assert.deepEqual(proxyCalls, []);
   } finally {
     cleanup();

@@ -7,7 +7,7 @@ import { resolveCodexCredentialFromAuthPath } from "./codex-token.mjs";
 import { parseRequestUrl, readJsonBody, sendJson, sendNotFound, statusFromError } from "./http-utils.mjs";
 import { buildLocalProxyOptions } from "./proxy-utils.mjs";
 import { handleRequestRoute } from "./request-routes.mjs";
-import { handleRuntimeAgentRoute } from "./runtime-agent-routes.mjs";
+import { handleRuntimeAgentRoute, unsafeRuntimeAgentRequestTargetError } from "./runtime-agent-routes.mjs";
 import { RuntimeManager } from "./runtime-manager.mjs";
 import { handleSiteRoute } from "./site-routes.mjs";
 import { StateStore } from "./state-store.mjs";
@@ -109,6 +109,11 @@ export function createControlPlaneHandler({ store, runtimeManager, toolBroker, l
 
     const url = parseRequestUrl(request);
     const pathname = url.pathname.replace(/\/+$/u, "") || "/";
+    const unsafeAgentPathError = unsafeRuntimeAgentRequestTargetError(request.url);
+    if (unsafeAgentPathError) {
+      sendJson(response, 400, { ok: false, error: unsafeAgentPathError });
+      return;
+    }
 
     if (request.method === "GET" && pathname === "/health") {
       sendJson(response, 200, {

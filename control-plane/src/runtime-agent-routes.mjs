@@ -22,6 +22,10 @@ function rawPathFromRequestTarget(requestTarget = "") {
   return withoutOrigin.split("?", 1)[0] || "/";
 }
 
+function isRawRuntimeAgentPath(rawPath) {
+  return rawPath === "/api/agent" || rawPath.startsWith("/api/agent/");
+}
+
 function unsafeEncodedPathError(requestTarget) {
   const rawPath = rawPathFromRequestTarget(requestTarget);
   for (const rawComponent of rawPath.split("/")) {
@@ -39,6 +43,11 @@ function unsafeEncodedPathError(requestTarget) {
     }
   }
   return null;
+}
+
+export function unsafeRuntimeAgentRequestTargetError(requestTarget) {
+  const rawPath = rawPathFromRequestTarget(requestTarget);
+  return isRawRuntimeAgentPath(rawPath) ? unsafeEncodedPathError(requestTarget) : null;
 }
 
 function routeFor(pathname, url) {
@@ -70,7 +79,7 @@ export async function handleRuntimeAgentRoute({
 }) {
   requireOperatorAuth(request);
 
-  const unsafePathError = unsafeEncodedPathError(request.url);
+  const unsafePathError = unsafeRuntimeAgentRequestTargetError(request.url);
   if (unsafePathError) {
     sendJson(response, 400, { ok: false, error: unsafePathError });
     return;
