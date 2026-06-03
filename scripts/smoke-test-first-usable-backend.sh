@@ -15,6 +15,7 @@ else
 fi
 
 OUTPUT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/beep-first-usable-backend.XXXXXX")"
+printf 'Smoke output directory: %s\n' "$OUTPUT_DIR"
 STATUS_BEFORE_FILE="$OUTPUT_DIR/backend-status-before.json"
 SEED_BODY_FILE="$OUTPUT_DIR/seed-request.json"
 SEED_OUTPUT_FILE="$OUTPUT_DIR/seed-response.json"
@@ -195,6 +196,7 @@ auth_post "/api/requests" "$RECALL_BODY_FILE" "$RECALL_OUTPUT_FILE"
 auth_get "/api/backend/status" "$STATUS_AFTER_FILE"
 
 node --input-type=module - \
+  "$STATUS_BEFORE_FILE" \
   "$STATUS_AFTER_FILE" \
   "$SEED_OUTPUT_FILE" \
   "$RECALL_OUTPUT_FILE" \
@@ -202,15 +204,17 @@ node --input-type=module - \
   "$RUNTIME_START_FILE" <<'NODE'
 import { readFileSync } from "node:fs";
 
-const [statusPath, seedResponsePath, recallResponsePath, stopResponsePath, startResponsePath] = process.argv.slice(2);
-if (!statusPath || !seedResponsePath || !recallResponsePath || !stopResponsePath || !startResponsePath) {
+const [beforeStatusPath, statusPath, seedResponsePath, recallResponsePath, stopResponsePath, startResponsePath] =
+  process.argv.slice(2);
+if (!beforeStatusPath || !statusPath || !seedResponsePath || !recallResponsePath || !stopResponsePath || !startResponsePath) {
   console.error(
-    "usage: validator <final-status.json> <seed-response.json> <recall-response.json> <runtime-stop.json> <runtime-start.json>",
+    "usage: validator <before-status.json> <final-status.json> <seed-response.json> <recall-response.json> <runtime-stop.json> <runtime-start.json>",
   );
   process.exit(2);
 }
 
 const readJson = (path) => JSON.parse(readFileSync(path, "utf8"));
+const beforeStatus = readJson(beforeStatusPath);
 const status = readJson(statusPath);
 const seedResponse = readJson(seedResponsePath);
 const recallResponse = readJson(recallResponsePath);
@@ -238,91 +242,139 @@ const runtimeRunningFrom = (value) =>
 const runtimeStoppedFrom = (value) =>
   isObject(value) && (value.running === false || value.state?.status === "stopped");
 const positiveNumber = (value) => typeof value === "number" && Number.isFinite(value) && value > 0;
+const numberOrZero = (value) => (typeof value === "number" && Number.isFinite(value) ? value : 0);
 const positiveContextCounter = (value) =>
   positiveNumber(value?.inputMessageCount) ||
   positiveNumber(value?.outputMessageCount) ||
   positiveNumber(value?.estimatedTokens) ||
   positiveNumber(value?.injectedMessageCount);
 const positiveAssembleCounter = (value) => positiveNumber(value?.messageCount) || positiveNumber(value?.estimatedTokens);
-const lcmProofDetailFrom = ({ lcm, agentSummary }) => {
-  const latestContextInjection = isObject(lcm?.latestContextInjection) ? lcm.latestContextInjection : null;
-  if (latestContextInjection?.kind === "assemble") {
-    return {
-      source: "memory.lcm.latestContextInjection",
-      kind: latestContextInjection.kind,
-      counters: {
-        inputMessageCount: latestContextInjection.inputMessageCount ?? null,
-        outputMessageCount: latestContextInjection.outputMessageCount ?? null,
-        estimatedTokens: latestContextInjection.estimatedTokens ?? null,
-        injectedMessageCount: latestContextInjection.injectedMessageCount ?? null,
-      },
-    };
-  }
-  if (positiveContextCounter(latestContextInjection)) {
-    return {
-      source: "memory.lcm.latestContextInjection",
-      kind: latestContextInjection?.kind || null,
-      counters: {
-        inputMessageCount: latestContextInjection.inputMessageCount ?? null,
-        outputMessageCount: latestContextInjection.outputMessageCount ?? null,
-        estimatedTokens: latestContextInjection.estimatedTokens ?? null,
-        injectedMessageCount: latestContextInjection.injectedMessageCount ?? null,
-      },
-    };
-  }
+const requestFromResponse = (response) =>
+  isObject(response?.result?.request) ? response.result.request : null;
+const lcmRequestProofFrom = (label, response) => {
+  const request = requestFromResponse(response);
+  const lcm = isObject(request?.lcm) ? request.lcm : null;
+  if (!lcm || lcm.ok !== true || hasErrorValue(lcm)) return null;
 
-  const agentLcm = isObject(agentSummary?.lcm) ? agentSummary.lcm : null;
-  const agentLcmAssemble = isObject(agentLcm?.assemble) ? agentLcm.assemble : null;
-  if (positiveAssembleCounter(agentLcmAssemble)) {
+  const rowDelta = isObject(lcm.rowCounts?.delta) ? lcm.rowCounts.delta : null;
+  const hasPositiveRowDelta = rowDelta && Object.values(rowDelta).some(positiveNumber);
+  const hasPositiveIngest = positiveNumber(lcm.ingest?.ingestedMessages);
+  const hasPositiveAssemble = positiveAssembleCounter(lcm.assemble);
+  if (!hasPositiveRowDelta && !hasPositiveIngest && !hasPositiveAssemble) return null;
+
+  return {
+    source: `${label}.result.request.lcm`,
+    ok: lcm.ok,
+    ingest: {
+      ingestedMessages: lcm.ingest?.ingestedMessages ?? null,
+    },
+    rowDelta: rowDelta || null,
+    assemble: isObject(lcm.assemble)
+      ? {
+          messageCount: lcm.assemble.messageCount ?? null,
+          estimatedTokens: lcm.assemble.estimatedTokens ?? null,
+        }
+      : null,
+  };
+};
+const lcmAggregateProofFrom = (beforeStatus, finalStatus) => {
+  const beforeLatest = isObject(beforeStatus?.memory?.lcm?.latestContextInjection)
+    ? beforeStatus.memory.lcm.latestContextInjection
+    : null;
+  const latestContextInjection = isObject(finalStatus?.memory?.lcm?.latestContextInjection)
+    ? finalStatus.memory.lcm.latestContextInjection
+    : null;
+  if (!latestContextInjection) return null;
+  if (latestContextInjection.kind !== "assemble") return null;
+  if (latestContextInjection.ok !== true) return null;
+  if (hasErrorValue(latestContextInjection)) return null;
+  const changed = JSON.stringify(latestContextInjection) !== JSON.stringify(beforeLatest);
+  if (!changed && !positiveContextCounter(latestContextInjection)) return null;
+
+  return {
+    source: "memory.lcm.latestContextInjection",
+    changedSinceInitialStatus: changed,
+    kind: latestContextInjection.kind,
+    ok: latestContextInjection.ok,
+    counters: {
+      inputMessageCount: latestContextInjection.inputMessageCount ?? null,
+      outputMessageCount: latestContextInjection.outputMessageCount ?? null,
+      estimatedTokens: latestContextInjection.estimatedTokens ?? null,
+      injectedMessageCount: latestContextInjection.injectedMessageCount ?? null,
+    },
+  };
+};
+const lcmProofDetailFrom = ({ beforeStatus, status, seedResponse, recallResponse }) => {
+  const seedRequestProof = lcmRequestProofFrom("seed", seedResponse);
+  const recallRequestProof = lcmRequestProofFrom("recall", recallResponse);
+  const aggregateProof = lcmAggregateProofFrom(beforeStatus, status);
+  if (aggregateProof && (seedRequestProof || recallRequestProof)) {
     return {
-      source: "agent.summary.lcm.assemble",
-      counters: {
-        messageCount: agentLcmAssemble.messageCount ?? null,
-        estimatedTokens: agentLcmAssemble.estimatedTokens ?? null,
-      },
+      aggregate: aggregateProof,
+      seedRequest: seedRequestProof,
+      recallRequest: recallRequestProof,
     };
   }
-
   return null;
 };
-const hindsightProofDetailFrom = (hindsight) => {
+const hindsightRequestProofFrom = (label, response) => {
+  const request = requestFromResponse(response);
+  const hindsight = isObject(request?.hindsight) ? request.hindsight : null;
+  if (!hindsight || hindsight.ok !== true || hindsight.enabled !== true || hasErrorValue(hindsight)) return null;
+  if (hindsight.retained !== true && !nonEmptyString(hindsight.documentId)) return null;
+
+  return {
+    source: `${label}.result.request.hindsight`,
+    ok: hindsight.ok,
+    enabled: hindsight.enabled,
+    retained: hindsight.retained ?? null,
+    queued: hindsight.queued ?? null,
+    bankId: hindsight.bankId || null,
+    documentId: hindsight.documentId || null,
+  };
+};
+const hindsightProofDetailFrom = ({ beforeStatus, status, seedResponse, recallResponse }) => {
+  const beforeTelemetry = isObject(beforeStatus?.memory?.hindsight?.telemetry)
+    ? beforeStatus.memory.hindsight.telemetry
+    : null;
+  const hindsight = isObject(status?.memory?.hindsight) ? status.memory.hindsight : null;
   const latest = isObject(hindsight?.latest) ? hindsight.latest : null;
   const telemetry = isObject(hindsight?.telemetry) ? hindsight.telemetry : null;
+  if (telemetry?.enabled !== true) return null;
+
+  const beforeByKind = isObject(beforeTelemetry?.byKind) ? beforeTelemetry.byKind : null;
   const byKind = isObject(telemetry?.byKind) ? telemetry.byKind : null;
   const latestKind = typeof latest?.kind === "string" ? latest.kind : null;
   const recallCount = Number(byKind?.hindsight_recall || 0);
   const retainCount = Number(byKind?.hindsight_retain || 0);
+  const beforeRecallCount = Number(beforeByKind?.hindsight_recall || 0);
+  const beforeRetainCount = Number(beforeByKind?.hindsight_retain || 0);
+  const recallDelta = numberOrZero(recallCount) - numberOrZero(beforeRecallCount);
+  const retainDelta = numberOrZero(retainCount) - numberOrZero(beforeRetainCount);
+  const failureDelta = numberOrZero(telemetry?.failures) - numberOrZero(beforeTelemetry?.failures);
+  const seedRequestProof = hindsightRequestProofFrom("seed", seedResponse);
+  const recallRequestProof = hindsightRequestProofFrom("recall", recallResponse);
+  const latestOk = latest?.ok === true || latestKind === "hindsight_retain";
 
-  if (latestKind === "hindsight_recall" || latestKind === "hindsight_retain") {
+  if (
+    recallDelta > 0 &&
+    retainDelta > 0 &&
+    failureDelta <= 0 &&
+    latestOk &&
+    (seedRequestProof || recallRequestProof)
+  ) {
     return {
-      source: "memory.hindsight.latest",
-      latestKind,
-      telemetry: {
-        total: telemetry?.total ?? null,
-        hindsightRecall: Number.isFinite(recallCount) ? recallCount : null,
-        hindsightRetain: Number.isFinite(retainCount) ? retainCount : null,
+      aggregate: {
+        source: "memory.hindsight.telemetry.byKind",
+        enabled: telemetry.enabled,
+        latestKind,
+        recallDelta,
+        retainDelta,
+        failureDelta,
+        total: telemetry.total ?? null,
       },
-    };
-  }
-  if (Number.isFinite(recallCount) && recallCount > 0) {
-    return {
-      source: "memory.hindsight.telemetry.byKind.hindsight_recall",
-      latestKind,
-      count: recallCount,
-    };
-  }
-  if (Number.isFinite(retainCount) && retainCount > 0) {
-    return {
-      source: "memory.hindsight.telemetry.byKind.hindsight_retain",
-      latestKind,
-      count: retainCount,
-    };
-  }
-  if (positiveNumber(telemetry?.total) && nonEmptyString(latestKind)) {
-    return {
-      source: "memory.hindsight.telemetry.total",
-      latestKind,
-      total: telemetry.total,
+      seedRequest: seedRequestProof,
+      recallRequest: recallRequestProof,
     };
   }
 
@@ -409,8 +461,8 @@ const recentRequests = Array.isArray(status.controlPlane?.recentRequests)
   : [];
 const lcm = isObject(status.memory?.lcm) ? status.memory.lcm : null;
 const hindsight = isObject(status.memory?.hindsight) ? status.memory.hindsight : null;
-const lcmProof = lcmProofDetailFrom({ lcm, agentSummary: status.agent?.summary });
-const hindsightProof = hindsightProofDetailFrom(hindsight);
+const lcmProof = lcmProofDetailFrom({ beforeStatus, status, seedResponse, recallResponse });
+const hindsightProof = hindsightProofDetailFrom({ beforeStatus, status, seedResponse, recallResponse });
 const recentRequestById = new Map(
   recentRequests
     .filter((request) => isObject(request) && nonEmptyString(request.requestId))
