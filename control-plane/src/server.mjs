@@ -3,6 +3,7 @@ import { request as httpRequest } from "node:http";
 import { pathToFileURL } from "node:url";
 import { DEFAULT_REQUEST_TIMEOUT_MS, HOST, PORT, RUNTIME_AUTH_PATH, RUNTIME_ID } from "./config.mjs";
 import { handleApprovalRoute } from "./approval-routes.mjs";
+import { buildBackendStatus } from "./backend-status.mjs";
 import { resolveCodexCredentialFromAuthPath } from "./codex-token.mjs";
 import { parseRequestUrl, readJsonBody, sendJson, sendNotFound, statusFromError } from "./http-utils.mjs";
 import { buildLocalProxyOptions } from "./proxy-utils.mjs";
@@ -133,6 +134,21 @@ export function createControlPlaneHandler({ store, runtimeManager, toolBroker, l
       requireOperatorAuth(request);
       const limit = Math.min(Number.parseInt(url.searchParams.get("limit") || "100", 10) || 100, 1000);
       sendJson(response, 200, { ok: true, audit: store.listAudit(limit) });
+      return;
+    }
+
+    if (request.method === "GET" && pathname === "/api/backend/status") {
+      requireOperatorAuth(request);
+      sendJson(
+        response,
+        200,
+        await buildBackendStatus({
+          store,
+          runtimeManager,
+          toolBroker,
+          forwardRuntimeRequest,
+        }),
+      );
       return;
     }
 
