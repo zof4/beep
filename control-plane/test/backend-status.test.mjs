@@ -643,9 +643,29 @@ test("buildBackendStatus treats ok false runtime LCM status payload as unavailab
       },
       toolBroker: { manifest: () => ({ tools: [] }) },
       forwardRuntimeRequest: async (path) => {
-        if (path === "/agent/summary") return agentSummaryFixture();
+        if (path === "/agent/summary") {
+          return {
+            ok: true,
+            summary: {
+              sessionId: "agent_beep",
+              lcmContextInjection: {
+                latest: {
+                  kind: "assemble",
+                  at: "2026-06-02T10:04:00.000Z",
+                  injectedMessageCount: 2,
+                },
+              },
+              hindsightMemory: {
+                enabled: true,
+                total: 1,
+                failures: 0,
+                latest: { kind: "hindsight_recall", items: 1 },
+              },
+            },
+          };
+        }
         if (path === "/agent/lcm/status") {
-          return { ok: false, error: "LCM status failed at file:///workspace/private/session.json" };
+          return { ok: false, error: "LCM status failed at file:///opt/lossless-claw/src/db/connection.ts" };
         }
         return { ok: false };
       },
@@ -665,8 +685,41 @@ test("buildBackendStatus treats ok false runtime LCM status payload as unavailab
     assert.equal(status.memory.hindsight.available, true);
 
     const serialized = JSON.stringify(status);
-    assert.doesNotMatch(serialized, /file:\/\/\/workspace/u);
-    assert.doesNotMatch(serialized, /private\/session\.json/u);
+    assert.doesNotMatch(serialized, /file:\/\/\/opt/u);
+    assert.doesNotMatch(serialized, /lossless-claw/u);
+    assert.doesNotMatch(serialized, /connection\.ts/u);
+  } finally {
+    cleanup();
+  }
+});
+
+test("buildBackendStatus treats malformed ok true runtime LCM status payload as unavailable", async () => {
+  const { store, cleanup } = tempStore();
+  try {
+    const status = await buildBackendStatus({
+      store,
+      runtimeManager: {
+        status: async () => ({ runtimeId: "local", running: true }),
+      },
+      toolBroker: { manifest: () => ({ tools: [] }) },
+      forwardRuntimeRequest: async (path) => {
+        if (path === "/agent/summary") return agentSummaryFixture();
+        if (path === "/agent/lcm/status") return { ok: true, lcm: null };
+        return { ok: false };
+      },
+      now: () => "2026-06-02T12:00:00.000Z",
+    });
+
+    assert.equal(status.ok, true);
+    assert.equal(status.agent.available, true);
+    assert.equal(status.memory.lcm.available, false);
+    assert.equal(status.memory.lcm.error, "runtime LCM status unavailable");
+    assert.equal(status.memory.lcm.status, null);
+    assert.deepEqual(status.memory.lcm.latestContextInjection, {
+      kind: "assemble",
+      at: "2026-06-02T10:04:00.000Z",
+      injectedMessageCount: 2,
+    });
   } finally {
     cleanup();
   }

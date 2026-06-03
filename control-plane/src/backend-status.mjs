@@ -40,8 +40,7 @@ const UNSAFE_RUNTIME_STATUS_SUFFIX_PATTERN =
   /(?:^|[_-])(path|paths|root|roots|dir|dirs|directory|directories|file|files|log|logs|tail|tails)$|(?:Path|Paths|Root|Roots|Dir|Dirs|Directory|Directories|File|Files|Log|Logs|Tail|Tails)$/u;
 const COMMON_ABSOLUTE_PATH_PATTERN =
   /(?<![:/])\/(?:workspace|state|lcm|runtime|history|tmp|var|private|Users)(?:\/(?:[A-Z][A-Za-z0-9._~@%+=:-]*(?: [A-Z][A-Za-z0-9._~@%+=:-]*)+|[A-Za-z0-9._~@%+=:-]+))+/gu;
-const FILE_URL_ABSOLUTE_PATH_PATTERN =
-  /file:\/\/\/(?:workspace|state|lcm|runtime|history|tmp|var|private|Users)(?:\/(?:[A-Z][A-Za-z0-9._~@%+=:-]*(?: [A-Z][A-Za-z0-9._~@%+=:-]*)+|[A-Za-z0-9._~@%+=:-]+))+/gu;
+const FILE_URL_ABSOLUTE_PATH_PATTERN = /file:\/\/\/[^\s"'`<>{}|\\^$[\];,]+/gu;
 const UNIX_ABSOLUTE_PATH_PATTERN = /(?<![:/])\/[^\s"'`<>{}|\\^$[\];,]+/gu;
 
 function errorString(error) {
@@ -170,8 +169,13 @@ function agentSummaryPayload(agentSummaryResponse) {
 }
 
 function lcmStatusFromResponse(response) {
-  if (isPlainObject(response?.lcm)) return sanitizeOperationalObject(response.lcm);
-  if (isPlainObject(response?.status)) return sanitizeOperationalObject(response.status);
+  if (isPlainObject(response) && Object.hasOwn(response, "lcm")) {
+    return isPlainObject(response.lcm) ? sanitizeOperationalObject(response.lcm) : null;
+  }
+  if (isPlainObject(response) && Object.hasOwn(response, "status")) {
+    return isPlainObject(response.status) ? sanitizeOperationalObject(response.status) : null;
+  }
+  if (isPlainObject(response) && response.ok === true) return null;
   if (isPlainObject(response)) return sanitizeOperationalObject(response);
   return null;
 }
@@ -295,7 +299,11 @@ export async function buildBackendStatus({
       memory.lcm.error = runtimePayloadError(lcmResponse, "runtime LCM status unavailable");
     } else {
       memory.lcm.status = lcmStatusFromResponse(lcmResponse);
-      memory.lcm.available = true;
+      if (memory.lcm.status) {
+        memory.lcm.available = true;
+      } else {
+        memory.lcm.error = "runtime LCM status unavailable";
+      }
     }
   } catch (error) {
     memory.lcm.error = runtimeErrorString(error);
