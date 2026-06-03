@@ -123,14 +123,73 @@ auth_post "/api/runtimes/$RUNTIME_ID/start" /dev/null "$RUNTIME_START_FILE"
 auth_post "/api/requests" "$RECALL_BODY_FILE" "$RECALL_OUTPUT_FILE"
 auth_get "/api/backend/status" "$STATUS_AFTER_FILE"
 
-node --input-type=module - "$STATUS_AFTER_FILE" <<'NODE'
+node --input-type=module - "$STATUS_AFTER_FILE" "$SEED_OUTPUT_FILE" "$RECALL_OUTPUT_FILE" <<'NODE'
 import { readFileSync } from "node:fs";
 
-const [statusPath] = process.argv.slice(2);
-const status = JSON.parse(readFileSync(statusPath, "utf8"));
+const [statusPath, seedResponsePath, recallResponsePath] = process.argv.slice(2);
+if (!statusPath || !seedResponsePath || !recallResponsePath) {
+  console.error("usage: validator <final-status.json> <seed-response.json> <recall-response.json>");
+  process.exit(2);
+}
+
+const readJson = (path) => JSON.parse(readFileSync(path, "utf8"));
+const status = readJson(statusPath);
+const seedResponse = readJson(seedResponsePath);
+const recallResponse = readJson(recallResponsePath);
 const failures = [];
 
 const isObject = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+const nonEmptyString = (value) => typeof value === "string" && value.length > 0;
+const failedStatuses = new Set(["failed", "error", "errored", "cancelled", "canceled", "timeout", "timed_out"]);
+const isFailureStatus = (value) => failedStatuses.has(String(value || "").toLowerCase());
+const runtimeResultSummary = (response) => ({
+  ok: isObject(response?.result) && Object.hasOwn(response.result, "ok") ? response.result.ok : null,
+  status: isObject(response?.result?.request) ? response.result.request.status || null : null,
+  runtimeRequestId: isObject(response?.result?.request) ? response.result.request.id || null : null,
+});
+const validateControlPlaneRequestResponse = (label, response) => {
+  if (!isObject(response)) {
+    failures.push(`${label} response must be a JSON object`);
+    return null;
+  }
+  if (response.ok !== true) {
+    failures.push(`${label} response ok must be true`);
+  }
+  if (!nonEmptyString(response.requestId)) {
+    failures.push(`${label} response must include a non-empty top-level requestId`);
+  }
+
+  if (response.result !== undefined) {
+    if (!isObject(response.result)) {
+      failures.push(`${label} response result must be an object when present`);
+    } else {
+      if (Object.hasOwn(response.result, "ok") && response.result.ok !== true) {
+        failures.push(`${label} runtime result ok must be true when present`);
+      }
+      if (nonEmptyString(response.result.error)) {
+        failures.push(`${label} runtime result must not include an error`);
+      }
+
+      const runtimeRequest = isObject(response.result.request) ? response.result.request : null;
+      if (runtimeRequest) {
+        if (Object.hasOwn(runtimeRequest, "status") && runtimeRequest.status !== "completed") {
+          failures.push(`${label} runtime request status must be completed when present`);
+        }
+        if (isFailureStatus(runtimeRequest.status)) {
+          failures.push(`${label} runtime request status must not indicate failure`);
+        }
+        if (nonEmptyString(runtimeRequest.error)) {
+          failures.push(`${label} runtime request must not include an error`);
+        }
+      }
+    }
+  }
+
+  return nonEmptyString(response.requestId) ? response.requestId : null;
+};
+
+const seedRequestId = validateControlPlaneRequestResponse("seed", seedResponse);
+const recallRequestId = validateControlPlaneRequestResponse("recall", recallResponse);
 const runtime = isObject(status.runtime) ? status.runtime : null;
 const runtimeRunning =
   runtime?.running === true ||
@@ -148,13 +207,36 @@ const hasLcmProof = Boolean(
 const hasHindsightProof = Boolean(
   hindsight && (hindsight.available === true || isObject(hindsight.latest) || isObject(hindsight.telemetry)),
 );
+const recentRequestById = new Map(
+  recentRequests
+    .filter((request) => isObject(request) && nonEmptyString(request.requestId))
+    .map((request) => [request.requestId, request]),
+);
+const requireFinalStatusRequest = (label, requestId) => {
+  if (!requestId) return null;
+  const request = recentRequestById.get(requestId) || null;
+  if (!request) {
+    failures.push(`final backend status must include ${label} request ${requestId} in controlPlane.recentRequests`);
+    return null;
+  }
+  if (isFailureStatus(request.status)) {
+    failures.push(`final backend status ${label} request ${requestId} must not be failed`);
+  }
+  if (nonEmptyString(request.error)) {
+    failures.push(`final backend status ${label} request ${requestId} must not include an error`);
+  }
+  return request;
+};
+const finalSeedRequest = requireFinalStatusRequest("seed", seedRequestId);
+const finalRecallRequest = requireFinalStatusRequest("recall", recallRequestId);
 
 if (status.ok !== true) failures.push("backend status ok must be true");
 if (status.schemaVersion !== 1) failures.push("backend status schemaVersion must be 1");
 if (!runtime) failures.push("backend status must include a runtime object");
-if (recentRequests.length < 1) failures.push("controlPlane.recentRequests must include at least one request");
 if (!hasLcmProof && !hasHindsightProof) {
-  failures.push("memory status must include LCM or Hindsight telemetry/status proof");
+  failures.push(
+    "final backend status after seed/compact/restart/recall must include LCM or Hindsight telemetry/status proof",
+  );
 }
 
 const requestStatuses = recentRequests.map((request) => ({
@@ -162,7 +244,21 @@ const requestStatuses = recentRequests.map((request) => ({
   status: request.status || null,
   runtimeRequestId: request.runtimeRequestId || null,
 }));
+const statusSummary = (request) =>
+  request
+    ? {
+        requestId: request.requestId || null,
+        status: request.status || null,
+        runtimeRequestId: request.runtimeRequestId || null,
+      }
+    : null;
 const summary = {
+  seedRequestId,
+  recallRequestId,
+  seedRuntimeResult: runtimeResultSummary(seedResponse),
+  recallRuntimeResult: runtimeResultSummary(recallResponse),
+  finalSeedRequest: statusSummary(finalSeedRequest),
+  finalRecallRequest: statusSummary(finalRecallRequest),
   runtimeRunning,
   runtimeStatus: runtime?.state?.status || runtime?.status || null,
   agentAvailable: status.agent?.available === true,
