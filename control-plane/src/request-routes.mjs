@@ -15,6 +15,7 @@ const PUBLIC_REQUEST_FIELDS = [
   "createdAt",
   "updatedAt",
 ];
+const UNSAFE_REQUEST_IDS = new Set(["__proto__", "prototype", "constructor"]);
 
 function parseLimit(value) {
   if (!value) return DEFAULT_LIMIT;
@@ -23,12 +24,48 @@ function parseLimit(value) {
   return Math.min(parsed, MAX_LIMIT);
 }
 
+function isPlainObject(value) {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function stableString(value) {
+  if (value === undefined || value === null) return null;
+  return typeof value === "string" ? value : String(value);
+}
+
+function publicRuntimeRequest(request) {
+  if (!isPlainObject(request)) return null;
+  return {
+    id: stableString(request.id),
+    status: stableString(request.status),
+    createdAt: stableString(request.createdAt),
+    startedAt: stableString(request.startedAt),
+    completedAt: stableString(request.completedAt),
+    error: stableString(request.error),
+  };
+}
+
+function publicRuntimeResult(runtimeResult) {
+  if (!isPlainObject(runtimeResult)) return null;
+  return {
+    ok: typeof runtimeResult.ok === "boolean" ? runtimeResult.ok : null,
+    error: stableString(runtimeResult.error),
+    request: publicRuntimeRequest(runtimeResult.request),
+  };
+}
+
 function publicRequest(record) {
   const response = {};
   for (const field of PUBLIC_REQUEST_FIELDS) {
-    response[field] = record[field] ?? null;
+    response[field] = field === "runtimeResult" ? publicRuntimeResult(record[field]) : (record[field] ?? null);
   }
   return response;
+}
+
+function isValidRequestId(requestId) {
+  return typeof requestId === "string" && requestId.trim() !== "" && !UNSAFE_REQUEST_IDS.has(requestId);
 }
 
 function sendMethodNotAllowed(response) {
@@ -49,6 +86,10 @@ export async function handleRequestRoute({ request, response, pathname, url, sto
   }
 
   if (request.method === "GET" && parts.length === 3 && requestId) {
+    if (!isValidRequestId(requestId)) {
+      sendJson(response, 400, { ok: false, error: `Invalid requestId: ${requestId}` });
+      return;
+    }
     const agentRequest = store.getAgentRequest(requestId);
     if (!agentRequest) {
       sendJson(response, 404, { ok: false, error: `Unknown requestId: ${requestId}` });

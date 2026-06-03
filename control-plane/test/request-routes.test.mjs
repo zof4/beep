@@ -96,7 +96,23 @@ test("request list returns stable persisted request records", async () => {
     store.updateAgentRequest(first.requestId, {
       status: "submitted",
       runtimeRequestId: "runtime-1",
-      runtimeResult: { ok: true, request: { id: "runtime-1" } },
+      runtimeResult: {
+        ok: true,
+        request: {
+          id: "runtime-1",
+          status: "queued",
+          createdAt: "2026-06-02T01:00:00.000Z",
+          startedAt: null,
+          completedAt: null,
+          error: null,
+          agent: { sessionId: "internal" },
+        },
+        promptResult: { finalAssistantText: "hidden answer" },
+        stderrTail: "hidden stderr",
+        stdoutTail: "hidden stdout",
+        lcm: { loopCount: 4 },
+        extra: { nested: true },
+      },
     });
 
     const response = captureResponse();
@@ -121,7 +137,24 @@ test("request list returns stable persisted request records", async () => {
     ]);
     assert.equal(payload.requests[0].requestId, first.requestId);
     assert.equal(payload.requests[0].runtimeRequestId, "runtime-1");
-    assert.deepEqual(payload.requests[0].runtimeResult, { ok: true, request: { id: "runtime-1" } });
+    assert.deepEqual(payload.requests[0].runtimeResult, {
+      ok: true,
+      error: null,
+      request: {
+        id: "runtime-1",
+        status: "queued",
+        createdAt: "2026-06-02T01:00:00.000Z",
+        startedAt: null,
+        completedAt: null,
+        error: null,
+      },
+    });
+    assert.equal(payload.requests[0].runtimeResult.request.agent, undefined);
+    assert.equal(payload.requests[0].runtimeResult.promptResult, undefined);
+    assert.equal(payload.requests[0].runtimeResult.stderrTail, undefined);
+    assert.equal(payload.requests[0].runtimeResult.stdoutTail, undefined);
+    assert.equal(payload.requests[0].runtimeResult.lcm, undefined);
+    assert.equal(payload.requests[0].runtimeResult.extra, undefined);
     assert.equal(payload.requests[0].internalNote, undefined);
   } finally {
     cleanup();
@@ -135,6 +168,9 @@ test("request list passes runtimeId filter and clamps limit", async () => {
     store.createAgentRequest({ runtimeId: "other", message: "other" });
     store.createAgentRequest({ runtimeId: "local", message: "local-a" });
     store.createAgentRequest({ runtimeId: "local", message: "local-b" });
+    for (let index = 0; index < 205; index += 1) {
+      store.createAgentRequest({ runtimeId: "bulk", message: `bulk-${index}` });
+    }
 
     const response = captureResponse();
     await handler(request("GET", "/api/requests?runtimeId=local&limit=1", operatorHeaders(store)), response.response);
@@ -154,6 +190,13 @@ test("request list passes runtimeId filter and clamps limit", async () => {
       new Set(fallback.payload.requests.map((entry) => entry.runtimeId)),
       new Set(["local"]),
     );
+
+    const maxResponse = captureResponse();
+    await handler(request("GET", "/api/requests?runtimeId=bulk&limit=999", operatorHeaders(store)), maxResponse.response);
+
+    const maxLimited = maxResponse.json();
+    assert.equal(maxLimited.statusCode, 200);
+    assert.equal(maxLimited.payload.requests.length, 200);
   } finally {
     cleanup();
   }
@@ -172,7 +215,21 @@ test("single request route returns one stable persisted request record", async (
     store.updateAgentRequest(created.requestId, {
       status: "completed",
       runtimeRequestId: "runtime-2",
-      runtimeResult: { ok: true, result: "done" },
+      runtimeResult: {
+        ok: false,
+        error: "top-level runtime error",
+        request: {
+          id: "runtime-2",
+          status: "failed",
+          createdAt: "2026-06-02T01:00:00.000Z",
+          startedAt: "2026-06-02T01:01:00.000Z",
+          completedAt: "2026-06-02T01:02:00.000Z",
+          error: "request error",
+          promptResult: { finalAssistantText: "hidden final text" },
+        },
+        agent: { workspacePath: "/hidden/workspace" },
+        arbitrary: "hidden",
+      },
     });
 
     const response = captureResponse();
@@ -183,8 +240,37 @@ test("single request route returns one stable persisted request record", async (
     assert.equal(payload.ok, true);
     assert.equal(payload.request.requestId, created.requestId);
     assert.equal(payload.request.runtimeRequestId, "runtime-2");
-    assert.deepEqual(payload.request.runtimeResult, { ok: true, result: "done" });
+    assert.deepEqual(payload.request.runtimeResult, {
+      ok: false,
+      error: "top-level runtime error",
+      request: {
+        id: "runtime-2",
+        status: "failed",
+        createdAt: "2026-06-02T01:00:00.000Z",
+        startedAt: "2026-06-02T01:01:00.000Z",
+        completedAt: "2026-06-02T01:02:00.000Z",
+        error: "request error",
+      },
+    });
+    assert.equal(payload.request.runtimeResult.agent, undefined);
+    assert.equal(payload.request.runtimeResult.arbitrary, undefined);
+    assert.equal(payload.request.runtimeResult.request.promptResult, undefined);
     assert.equal(payload.request.internalNote, undefined);
+  } finally {
+    cleanup();
+  }
+});
+
+test("single request route requires operator auth", async () => {
+  const { store, cleanup } = tempStore();
+  try {
+    const handler = handlerFor({ store });
+    const created = store.createAgentRequest({ runtimeId: "local", message: "run this" });
+    const response = captureResponse();
+
+    await handler(request("GET", `/api/requests/${created.requestId}`), response.response);
+
+    assert.equal(response.json().statusCode, 401);
   } finally {
     cleanup();
   }
@@ -202,6 +288,23 @@ test("single request route returns 404 for a missing request", async () => {
     assert.equal(statusCode, 404);
     assert.equal(payload.ok, false);
     assert.match(payload.error, /Unknown requestId/);
+  } finally {
+    cleanup();
+  }
+});
+
+test("single request route returns 400 for unsafe request identities", async () => {
+  const { store, cleanup } = tempStore();
+  try {
+    const handler = handlerFor({ store });
+    const response = captureResponse();
+
+    await handler(request("GET", "/api/requests/constructor", operatorHeaders(store)), response.response);
+
+    const { statusCode, payload } = response.json();
+    assert.equal(statusCode, 400);
+    assert.equal(payload.ok, false);
+    assert.match(payload.error, /unsafe|invalid/i);
   } finally {
     cleanup();
   }
