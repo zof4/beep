@@ -58,7 +58,7 @@ function seedStatusState(store) {
   store.updateAgentRequest(requestRecord.requestId, {
     status: "submitted",
     runtimeRequestId: "runtime-request-1",
-    error: null,
+    error: "runtime failed at file:///opt/lossless-claw/src/db/connection.ts and /workspace/private/session.json",
     runtimeResult: { promptResult: { finalAssistantText: "hidden answer" } },
   });
 
@@ -296,6 +296,7 @@ test("buildBackendStatus aggregates running runtime, memory, control-plane state
     assert.equal(status.controlPlane.recentRequests[0].requestId, requestRecord.requestId);
     assert.equal(status.controlPlane.recentRequests[0].runtimeRequestId, "runtime-request-1");
     assert.equal(status.controlPlane.recentRequests[0].message, "Create the first usable loop");
+    assert.equal(status.controlPlane.recentRequests[0].error, "runtime failed at [redacted-path] and [redacted-path]");
     assert.equal(status.controlPlane.pendingApprovals.length, 1);
     assert.equal(status.controlPlane.pendingApprovals[0].approvalId, approval.approvalId);
     assert.deepEqual(Object.keys(status.controlPlane.pendingApprovals[0]).sort(), [
@@ -317,6 +318,10 @@ test("buildBackendStatus aggregates running runtime, memory, control-plane state
     );
     assert.deepEqual(status.controlPlane.tools, { tools: [{ name: "preview.container.createStaticSite" }] });
     assert.deepEqual(calls, ["/agent/summary", "/agent/lcm/status"]);
+    const serializedRequests = JSON.stringify(status.controlPlane.recentRequests);
+    assert.doesNotMatch(serializedRequests, /file:\/\/\/opt/u);
+    assert.doesNotMatch(serializedRequests, /src\/db\/connection\.ts/u);
+    assert.doesNotMatch(serializedRequests, /\/workspace\/private/u);
   } finally {
     cleanup();
   }

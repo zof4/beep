@@ -73,7 +73,7 @@ function projectFields(record, fields) {
 }
 
 function projectAgentRequest(request) {
-  return projectFields(request, [
+  const projected = projectFields(request, [
     "requestId",
     "runtimeId",
     "runtimeRequestId",
@@ -83,6 +83,8 @@ function projectAgentRequest(request) {
     "createdAt",
     "updatedAt",
   ]);
+  if (projected.error !== null) projected.error = redactRuntimeString(projected.error);
+  return projected;
 }
 
 function projectApproval(approval) {
