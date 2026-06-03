@@ -15,8 +15,15 @@ function normalizePath(path = "/") {
 }
 
 function normalizePreviewUrlPath(path = "/") {
-  const relativePath = normalizePath(path).slice(1);
-  if (relativePath.startsWith("/") || /^[A-Za-z][A-Za-z0-9+.-]*:/u.test(relativePath)) {
+  if (typeof path !== "string" || /[\u0000-\u001F\u007F\\]/u.test(path)) {
+    return "";
+  }
+  const trimmedPath = path.trim();
+  if (trimmedPath === "" || trimmedPath.startsWith("//") || /^[A-Za-z][A-Za-z0-9+.-]*:/u.test(trimmedPath)) {
+    return "";
+  }
+  const relativePath = trimmedPath.startsWith("/") ? trimmedPath.slice(1) : trimmedPath;
+  if (relativePath.startsWith("//") || /^[A-Za-z][A-Za-z0-9+.-]*:/u.test(relativePath)) {
     return "";
   }
   return relativePath;
@@ -254,8 +261,8 @@ export class ToolBroker {
       hostPort,
       label: typeof args.label === "string" ? args.label.slice(0, 80) : null,
       baseUrl,
-      url: new URL(path, baseUrl).toString(),
-      directUrl: new URL(path, directUrl).toString(),
+      url: new URL(path ? `./${path}` : "", baseUrl).toString(),
+      directUrl: new URL(path ? `./${path}` : "", directUrl).toString(),
       note: "The dev server inside the runtime must bind 0.0.0.0.",
     };
     this.store.upsertExposure(exposure);

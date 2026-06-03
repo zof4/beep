@@ -25,6 +25,8 @@ test("preview port exposure preserves path-only preview URLs", async () => {
       { path: "/index.html", suffix: "/index.html" },
       { path: "index.html", suffix: "/index.html" },
       { path: "/docs/page.html", suffix: "/docs/page.html" },
+      { path: "/?q=1", suffix: "/?q=1" },
+      { path: "#section", suffix: "/#section" },
     ];
 
     for (const { path, suffix } of cases) {
@@ -37,8 +39,10 @@ test("preview port exposure preserves path-only preview URLs", async () => {
       assert.equal(result.ok, true);
       assert.equal(new URL(result.result.url).origin, new URL(PUBLIC_BASE_URL).origin);
       assert.equal(new URL(result.result.directUrl).origin, `http://127.0.0.1:${PREVIEW_HOST_PORT_BASE}`);
-      assert.equal(new URL(result.result.url).pathname, `/preview/${RUNTIME_ID}/3000${suffix}`);
-      assert.equal(new URL(result.result.directUrl).pathname, suffix);
+      const previewUrl = new URL(result.result.url);
+      const directUrl = new URL(result.result.directUrl);
+      assert.equal(`${previewUrl.pathname}${previewUrl.search}${previewUrl.hash}`, `/preview/${RUNTIME_ID}/3000${suffix}`);
+      assert.equal(`${directUrl.pathname}${directUrl.search}${directUrl.hash}`, suffix);
     }
   } finally {
     cleanup();
@@ -54,6 +58,10 @@ test("preview port exposure cannot return external URLs from scheme-like paths",
       "http://attacker.test/x",
       "//attacker.test/x",
       "javascript:alert(1)",
+      "\\\\attacker.test\\x",
+      " http://attacker.test/x",
+      "\nhttps://attacker.test/x",
+      "/https://attacker.test/x",
     ];
 
     for (const path of poisoningPaths) {
