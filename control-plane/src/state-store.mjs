@@ -439,6 +439,11 @@ export class StateStore {
     return next;
   }
 
+  getAgentRequest(requestId) {
+    assertValidStateIdentity(requestId);
+    return this.readState().agentRequests?.[requestId] || null;
+  }
+
   listAgentRequests({ runtimeId = null, limit = 20 } = {}) {
     const requests = Object.values(this.readState().agentRequests || {});
     return requests

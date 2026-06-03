@@ -6,6 +6,7 @@ import { handleApprovalRoute } from "./approval-routes.mjs";
 import { resolveCodexCredentialFromAuthPath } from "./codex-token.mjs";
 import { parseRequestUrl, readJsonBody, sendJson, sendNotFound, statusFromError } from "./http-utils.mjs";
 import { buildLocalProxyOptions } from "./proxy-utils.mjs";
+import { handleRequestRoute } from "./request-routes.mjs";
 import { RuntimeManager } from "./runtime-manager.mjs";
 import { handleSiteRoute } from "./site-routes.mjs";
 import { StateStore } from "./state-store.mjs";
@@ -160,18 +161,6 @@ export function createControlPlaneHandler({ store, runtimeManager, toolBroker, l
       return;
     }
 
-    if (pathname === "/api/sites" || pathname.startsWith("/api/sites/")) {
-      await handleSiteRoute({
-        request,
-        response,
-        pathname,
-        url,
-        store,
-        requireOperatorAuth,
-      });
-      return;
-    }
-
     if (request.method === "POST" && pathname === "/api/requests") {
       requireOperatorAuth(request);
       const body = await readJsonBody(request);
@@ -203,6 +192,30 @@ export function createControlPlaneHandler({ store, runtimeManager, toolBroker, l
         });
         throw error;
       }
+      return;
+    }
+
+    if (pathname === "/api/requests" || pathname.startsWith("/api/requests/")) {
+      await handleRequestRoute({
+        request,
+        response,
+        pathname,
+        url,
+        store,
+        requireOperatorAuth,
+      });
+      return;
+    }
+
+    if (pathname === "/api/sites" || pathname.startsWith("/api/sites/")) {
+      await handleSiteRoute({
+        request,
+        response,
+        pathname,
+        url,
+        store,
+        requireOperatorAuth,
+      });
       return;
     }
 
