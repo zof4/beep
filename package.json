@@ -3,6 +3,7 @@
   "scripts": {
     "test": "node --test test/*.test.mjs",
     "test:control-plane": "node --test control-plane/test/*.test.mjs",
+    "test:first-usable-backend": "node --test test/*.test.mjs control-plane/test/*.test.mjs && bash -n scripts/smoke-test-first-usable-backend.sh",
     "test:hindsight": "node --test test/hindsight-service.test.mjs test/external-memory-hints.test.mjs test/memory-coordinator.test.mjs",
     "test:lcm": "node --test test/lcm-external-memory.test.mjs",
     "test:proof": "node --test test/proof-memory-lifecycle.test.mjs",
