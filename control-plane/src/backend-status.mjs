@@ -173,8 +173,8 @@ function lcmStatusFromResponse(response) {
   if (isPlainObject(response) && Object.hasOwn(response, "lcm")) {
     return isPlainObject(response.lcm) ? sanitizeOperationalObject(response.lcm) : null;
   }
-  if (isPlainObject(response) && Object.hasOwn(response, "status")) {
-    return isPlainObject(response.status) ? sanitizeOperationalObject(response.status) : null;
+  if (isPlainObject(response) && isPlainObject(response.status)) {
+    return sanitizeOperationalObject(response.status);
   }
   if (isPlainObject(response)) return sanitizeOperationalObject(response);
   return null;

@@ -739,6 +739,7 @@ test("buildBackendStatus accepts real top-level runtime LCM status payload", asy
         if (path === "/agent/lcm/status") {
           return {
             ok: true,
+            status: "ready",
             dbPath: "/lcm/lcm.sqlite",
             lcmRoot: "/lcm",
             dbSizeBytes: 4096,
@@ -762,6 +763,7 @@ test("buildBackendStatus accepts real top-level runtime LCM status payload", asy
     assert.equal(status.memory.lcm.available, true);
     assert.deepEqual(status.memory.lcm.status, {
       ok: true,
+      status: "ready",
       dbSizeBytes: 4096,
       rowCounts: { messages: 3 },
       totals: { messageTokens: 10 },
