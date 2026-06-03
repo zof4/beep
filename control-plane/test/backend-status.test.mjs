@@ -725,6 +725,65 @@ test("buildBackendStatus treats malformed ok true runtime LCM status payload as 
   }
 });
 
+test("buildBackendStatus accepts real top-level runtime LCM status payload", async () => {
+  const { store, cleanup } = tempStore();
+  try {
+    const status = await buildBackendStatus({
+      store,
+      runtimeManager: {
+        status: async () => ({ runtimeId: "local", running: true }),
+      },
+      toolBroker: { manifest: () => ({ tools: [] }) },
+      forwardRuntimeRequest: async (path) => {
+        if (path === "/agent/summary") return agentSummaryFixture();
+        if (path === "/agent/lcm/status") {
+          return {
+            ok: true,
+            dbPath: "/lcm/lcm.sqlite",
+            lcmRoot: "/lcm",
+            dbSizeBytes: 4096,
+            rowCounts: { messages: 3 },
+            totals: { messageTokens: 10 },
+            current: null,
+            conversations: [],
+            config: {
+              databasePath: "/lcm/lcm.sqlite",
+              largeFilesDir: "/lcm/large",
+            },
+            configDiagnostics: { ok: true, warningCount: 0 },
+            lcmLogTail: "raw log",
+          };
+        }
+        return { ok: false };
+      },
+      now: () => "2026-06-02T12:00:00.000Z",
+    });
+
+    assert.equal(status.memory.lcm.available, true);
+    assert.deepEqual(status.memory.lcm.status, {
+      ok: true,
+      dbSizeBytes: 4096,
+      rowCounts: { messages: 3 },
+      totals: { messageTokens: 10 },
+      current: null,
+      config: {},
+      configDiagnostics: { ok: true, warningCount: 0 },
+    });
+    assert.equal(status.memory.lcm.status.dbPath, undefined);
+    assert.equal(status.memory.lcm.status.lcmRoot, undefined);
+    assert.equal(status.memory.lcm.status.config.databasePath, undefined);
+    assert.equal(status.memory.lcm.status.config.largeFilesDir, undefined);
+    assert.equal(status.memory.lcm.status.lcmLogTail, undefined);
+
+    const serialized = JSON.stringify(status);
+    assert.doesNotMatch(serialized, /\/lcm\/lcm\.sqlite/u);
+    assert.doesNotMatch(serialized, /\/lcm\/large/u);
+    assert.doesNotMatch(serialized, /raw log/u);
+  } finally {
+    cleanup();
+  }
+});
+
 test("buildBackendStatus keeps LCM status available when runtime summary fails", async () => {
   const { store, cleanup } = tempStore();
   try {

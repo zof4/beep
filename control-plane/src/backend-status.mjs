@@ -15,6 +15,7 @@ const UNSAFE_RUNTIME_STATUS_KEYS = new Set([
   "rawprompt",
   "history",
   "messages",
+  "conversations",
   "promptresult",
   "stderrtail",
   "stdouttail",
@@ -175,7 +176,6 @@ function lcmStatusFromResponse(response) {
   if (isPlainObject(response) && Object.hasOwn(response, "status")) {
     return isPlainObject(response.status) ? sanitizeOperationalObject(response.status) : null;
   }
-  if (isPlainObject(response) && response.ok === true) return null;
   if (isPlainObject(response)) return sanitizeOperationalObject(response);
   return null;
 }
