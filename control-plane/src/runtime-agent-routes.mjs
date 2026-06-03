@@ -1,0 +1,64 @@
+import { readJsonBody, sendJson } from "./http-utils.mjs";
+
+const GET_ROUTES = new Map([
+  ["/api/agent", "/agent"],
+  ["/api/agent/summary", "/agent/summary"],
+  ["/api/agent/requests", "/agent/requests"],
+  ["/api/agent/lcm/status", "/agent/lcm/status"],
+  ["/api/agent/lcm/doctor", "/agent/lcm/doctor"],
+]);
+
+const POST_ROUTES = new Map([
+  ["/api/agent/lcm/compact", "/agent/lcm/compact"],
+  ["/api/agent/lcm/maintain", "/agent/lcm/maintain"],
+  ["/api/agent/lcm/backup", "/agent/lcm/backup"],
+]);
+
+function routeFor(pathname, url) {
+  if (pathname === "/api/agent/events") {
+    return { method: "GET", runtimePath: `/agent/events${url.search}` };
+  }
+  if (GET_ROUTES.has(pathname)) {
+    return { method: "GET", runtimePath: GET_ROUTES.get(pathname) };
+  }
+  if (POST_ROUTES.has(pathname)) {
+    return { method: "POST", runtimePath: POST_ROUTES.get(pathname) };
+  }
+
+  const requestMatch = pathname.match(/^\/api\/agent\/requests\/([^/]+)$/u);
+  if (requestMatch) {
+    return { method: "GET", runtimePath: `/agent/requests/${requestMatch[1]}` };
+  }
+
+  return null;
+}
+
+export async function handleRuntimeAgentRoute({
+  request,
+  response,
+  pathname,
+  url,
+  requireOperatorAuth,
+  forwardRuntimeRequest,
+}) {
+  requireOperatorAuth(request);
+
+  const route = routeFor(pathname, url);
+  if (!route) {
+    sendJson(response, 404, { ok: false, error: "not found" });
+    return;
+  }
+
+  if (request.method !== route.method) {
+    sendJson(response, 405, { ok: false, error: "method not allowed" });
+    return;
+  }
+
+  const options = { method: route.method };
+  if (route.method === "POST") {
+    options.body = await readJsonBody(request);
+  }
+
+  const result = await forwardRuntimeRequest(route.runtimePath, options);
+  sendJson(response, result?.ok === false ? 502 : 200, result);
+}

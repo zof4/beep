@@ -7,6 +7,7 @@ import { resolveCodexCredentialFromAuthPath } from "./codex-token.mjs";
 import { parseRequestUrl, readJsonBody, sendJson, sendNotFound, statusFromError } from "./http-utils.mjs";
 import { buildLocalProxyOptions } from "./proxy-utils.mjs";
 import { handleRequestRoute } from "./request-routes.mjs";
+import { handleRuntimeAgentRoute } from "./runtime-agent-routes.mjs";
 import { RuntimeManager } from "./runtime-manager.mjs";
 import { handleSiteRoute } from "./site-routes.mjs";
 import { StateStore } from "./state-store.mjs";
@@ -219,21 +220,15 @@ export function createControlPlaneHandler({ store, runtimeManager, toolBroker, l
       return;
     }
 
-    if (request.method === "GET" && pathname === "/api/agent") {
-      requireOperatorAuth(request);
-      sendJson(response, 200, { ok: true, agent: await forwardRuntimeRequest("/agent") });
-      return;
-    }
-
-    if (request.method === "GET" && pathname === "/api/agent/events") {
-      requireOperatorAuth(request);
-      sendJson(response, 200, await forwardRuntimeRequest(`/agent/events${url.search}`));
-      return;
-    }
-
-    if (request.method === "GET" && pathname === "/api/agent/summary") {
-      requireOperatorAuth(request);
-      sendJson(response, 200, await forwardRuntimeRequest("/agent/summary"));
+    if (pathname === "/api/agent" || pathname.startsWith("/api/agent/")) {
+      await handleRuntimeAgentRoute({
+        request,
+        response,
+        pathname,
+        url,
+        requireOperatorAuth,
+        forwardRuntimeRequest,
+      });
       return;
     }
 
