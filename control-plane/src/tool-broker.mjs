@@ -26,6 +26,18 @@ function normalizePreviewUrlPath(path = "/") {
   if (relativePath.startsWith("//") || /^[A-Za-z][A-Za-z0-9+.-]*:/u.test(relativePath)) {
     return "";
   }
+  const pathOnly = relativePath.split(/[?#]/u, 1)[0];
+  for (const component of pathOnly.split("/")) {
+    let decodedComponent;
+    try {
+      decodedComponent = decodeURIComponent(component);
+    } catch {
+      return "";
+    }
+    if (decodedComponent === "." || decodedComponent === "..") {
+      return "";
+    }
+  }
   return relativePath;
 }
 

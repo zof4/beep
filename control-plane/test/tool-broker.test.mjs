@@ -62,6 +62,10 @@ test("preview port exposure cannot return external URLs from scheme-like paths",
       " http://attacker.test/x",
       "\nhttps://attacker.test/x",
       "/https://attacker.test/x",
+      "../x",
+      "../../../api/tools",
+      "%2e%2e/%2e%2e/api/audit",
+      "%2E%2E/api/tools",
     ];
 
     for (const path of poisoningPaths) {
@@ -74,8 +78,11 @@ test("preview port exposure cannot return external URLs from scheme-like paths",
       assert.equal(result.ok, true);
       assert.equal(new URL(result.result.url).origin, new URL(PUBLIC_BASE_URL).origin);
       assert.equal(new URL(result.result.directUrl).origin, `http://127.0.0.1:${PREVIEW_HOST_PORT_BASE}`);
-      assert.notEqual(new URL(result.result.url).hostname, "attacker.test");
-      assert.notEqual(new URL(result.result.directUrl).hostname, "attacker.test");
+      const previewUrl = new URL(result.result.url);
+      const directUrl = new URL(result.result.directUrl);
+      assert.notEqual(previewUrl.hostname, "attacker.test");
+      assert.notEqual(directUrl.hostname, "attacker.test");
+      assert.equal(previewUrl.pathname.startsWith(`/preview/${RUNTIME_ID}/3000/`), true);
 
       const exposure = store.readState().exposures[`${RUNTIME_ID}:3000`];
       assert.equal(new URL(exposure.url).origin, new URL(PUBLIC_BASE_URL).origin);
