@@ -35,9 +35,18 @@ const UNSAFE_RUNTIME_STATUS_SUFFIXES = [
 ];
 const UNSAFE_RUNTIME_STATUS_SUFFIX_PATTERN =
   /(?:^|[_-])(path|paths|root|roots|dir|dirs|directory|directories|file|files|log|logs|tail|tails)$|(?:Path|Paths|Root|Roots|Dir|Dirs|Directory|Directories|File|Files|Log|Logs|Tail|Tails)$/u;
+const UNIX_ABSOLUTE_PATH_PATTERN = /\/[^\s"'`<>{}|\\^$[\];,]+/gu;
 
 function errorString(error) {
   return error instanceof Error ? error.message : String(error);
+}
+
+function redactRuntimeString(value) {
+  return String(value).replace(UNIX_ABSOLUTE_PATH_PATTERN, "[redacted-path]");
+}
+
+function runtimeErrorString(error) {
+  return redactRuntimeString(errorString(error));
 }
 
 function generatedAtFrom(now) {
@@ -97,13 +106,21 @@ function isUnsafeStatusKey(key) {
   );
 }
 
+function isScalarTelemetry(value) {
+  return value === null || typeof value === "number" || typeof value === "boolean";
+}
+
 function sanitizeOperationalObject(value) {
   if (Array.isArray(value)) return value.map((entry) => sanitizeOperationalObject(entry));
+  if (typeof value === "string") return redactRuntimeString(value);
   if (!isPlainObject(value)) return value;
 
   const sanitized = {};
   for (const [key, nested] of Object.entries(value)) {
-    if (isUnsafeStatusKey(key)) continue;
+    if (isUnsafeStatusKey(key)) {
+      if (isScalarTelemetry(nested)) sanitized[key] = nested;
+      continue;
+    }
     sanitized[key] = sanitizeOperationalObject(nested);
   }
   return sanitized;
@@ -191,7 +208,7 @@ export async function buildBackendStatus({
   } catch (error) {
     runtime = {
       running: false,
-      error: errorString(error),
+      error: runtimeErrorString(error),
     };
   }
 
@@ -237,7 +254,7 @@ export async function buildBackendStatus({
     memory.lcm.latestContextInjection = latestContextInjection(rawAgentSummary);
     memory.hindsight = hindsightMemoryStatus(rawAgentSummary);
   } catch (error) {
-    agent.error = errorString(error);
+    agent.error = runtimeErrorString(error);
   }
 
   try {
@@ -245,7 +262,7 @@ export async function buildBackendStatus({
     memory.lcm.status = lcmStatusFromResponse(lcmResponse);
     memory.lcm.available = true;
   } catch (error) {
-    memory.lcm.error = errorString(error);
+    memory.lcm.error = runtimeErrorString(error);
   }
 
   return {

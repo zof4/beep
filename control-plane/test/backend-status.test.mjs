@@ -82,7 +82,7 @@ function seedStatusState(store) {
     status: "approved",
     decision: "approve",
   });
-  store.appendAudit({ kind: "manual_status_probe", runtimeId: "local", detail: "included" });
+  store.appendAudit({ kind: "manual_status_probe", runtimeId: "local", detail: "included /workspace/operator-audit" });
 
   return { requestRecord, approval };
 }
@@ -118,8 +118,11 @@ function agentSummaryFixture() {
         backend: "lossless-claw",
         status: "ready",
         compactedCount: 5,
-        rowCounts: { atoms: 12, bonds: 7 },
+        error: "failed to read /state/api/sessions/agent_beep/session.json",
+        rowCounts: { atoms: 12, bonds: 7, messages: 19, large_files: 2 },
         messageCount: 19,
+        current: { messages: 4, atoms: 9 },
+        messages: [{ role: "assistant", content: "raw LCM message object must not leave this API" }],
         lcmRoot: "/lcm/runtime-summary-root",
         assistantFinalText: "LCM final assistant text must not leave this API",
         assistantMessage: "LCM assistant message must not leave this API",
@@ -177,8 +180,11 @@ test("buildBackendStatus aggregates running runtime, memory, control-plane state
               available: true,
               status: "ready",
               compactedCount: 3,
-              rowCounts: { atoms: 8, bonds: 4 },
+              error: "failed to scan /workspace/status-cwd and /state/api/sessions/agent_beep/lcm.json",
+              rowCounts: { atoms: 8, bonds: 4, messages: 11, large_files: 1 },
               messageCount: 11,
+              current: { messages: 6, bonds: 2 },
+              messages: ["raw message from runtime must not leave this API"],
               lcmRoot: "/lcm/status-root",
               lcmLogTail: "raw LCM status log tail must not leave this API",
               cwd: "/workspace/status-cwd",
@@ -208,8 +214,10 @@ test("buildBackendStatus aggregates running runtime, memory, control-plane state
       backend: "lossless-claw",
       status: "ready",
       compactedCount: 5,
-      rowCounts: { atoms: 12, bonds: 7 },
+      error: "failed to read [redacted-path]",
+      rowCounts: { atoms: 12, bonds: 7, messages: 19, large_files: 2 },
       messageCount: 19,
+      current: { messages: 4, atoms: 9 },
       config: {
         status: "loaded",
         rowCounts: { configRows: 2 },
@@ -222,8 +230,10 @@ test("buildBackendStatus aggregates running runtime, memory, control-plane state
       available: true,
       status: "ready",
       compactedCount: 3,
-      rowCounts: { atoms: 8, bonds: 4 },
+      error: "failed to scan [redacted-path] and [redacted-path]",
+      rowCounts: { atoms: 8, bonds: 4, messages: 11, large_files: 1 },
       messageCount: 11,
+      current: { messages: 6, bonds: 2 },
     });
     assert.deepEqual(status.memory.lcm.latestContextInjection, {
       kind: "assemble",
@@ -270,7 +280,11 @@ test("buildBackendStatus aggregates running runtime, memory, control-plane state
       "updatedAt",
     ]);
     assert.equal(status.controlPlane.pendingApprovals[0].prompt, "Approve static preview?");
-    assert.ok(status.controlPlane.recentAudit.some((event) => event.kind === "manual_status_probe"));
+    assert.ok(
+      status.controlPlane.recentAudit.some(
+        (event) => event.kind === "manual_status_probe" && event.detail === "included /workspace/operator-audit",
+      ),
+    );
     assert.deepEqual(status.controlPlane.tools, { tools: [{ name: "preview.container.createStaticSite" }] });
     assert.deepEqual(calls, ["/agent/summary", "/agent/lcm/status"]);
   } finally {
@@ -354,8 +368,11 @@ test("buildBackendStatus sanitizes agent summary while exposing memory telemetry
               ok: true,
               status: "ready",
               compactedCount: 3,
-              rowCounts: { atoms: 8, bonds: 4 },
+              error: "failed to scan /workspace/status-cwd and /state/api/sessions/agent_beep/lcm.json",
+              rowCounts: { atoms: 8, bonds: 4, messages: 11, large_files: 1 },
               messageCount: 11,
+              current: { messages: 6, bonds: 2 },
+              messages: ["raw message from runtime must not leave this API"],
               lcmRoot: "/lcm/status-root",
               lcmLogTail: "raw LCM status log tail must not leave this API",
               cwd: "/workspace/status-cwd",
@@ -377,12 +394,18 @@ test("buildBackendStatus sanitizes agent summary while exposing memory telemetry
     assert.equal(status.agent.summary.lcm.config.largeFilesDir, undefined);
     assert.equal(status.agent.summary.lcm.assistantFinalText, undefined);
     assert.equal(status.agent.summary.lcm.assistantMessage, undefined);
-    assert.deepEqual(status.agent.summary.lcm.rowCounts, { atoms: 12, bonds: 7 });
+    assert.equal(status.agent.summary.lcm.messages, undefined);
+    assert.equal(status.agent.summary.lcm.error, "failed to read [redacted-path]");
+    assert.deepEqual(status.agent.summary.lcm.rowCounts, { atoms: 12, bonds: 7, messages: 19, large_files: 2 });
+    assert.deepEqual(status.agent.summary.lcm.current, { messages: 4, atoms: 9 });
     assert.deepEqual(status.agent.summary.lcm.config.rowCounts, { configRows: 2 });
     assert.equal(status.memory.lcm.status.lcmRoot, undefined);
     assert.equal(status.memory.lcm.status.lcmLogTail, undefined);
     assert.equal(status.memory.lcm.status.cwd, undefined);
-    assert.deepEqual(status.memory.lcm.status.rowCounts, { atoms: 8, bonds: 4 });
+    assert.equal(status.memory.lcm.status.messages, undefined);
+    assert.equal(status.memory.lcm.status.error, "failed to scan [redacted-path] and [redacted-path]");
+    assert.deepEqual(status.memory.lcm.status.rowCounts, { atoms: 8, bonds: 4, messages: 11, large_files: 1 });
+    assert.deepEqual(status.memory.lcm.status.current, { messages: 6, bonds: 2 });
     assert.equal(status.memory.lcm.status.messageCount, 11);
     assert.deepEqual(status.memory.lcm.latestContextInjection, {
       kind: "assemble",
@@ -404,6 +427,8 @@ test("buildBackendStatus sanitizes agent summary while exposing memory telemetry
     assert.doesNotMatch(serialized, /\/lcm\/status-root/u);
     assert.doesNotMatch(serialized, /raw LCM status log tail/u);
     assert.doesNotMatch(serialized, /\/workspace\/status-cwd/u);
+    assert.doesNotMatch(serialized, /raw LCM message object/u);
+    assert.doesNotMatch(serialized, /raw message from runtime/u);
     assert.doesNotMatch(serialized, /hidden memory transcript/u);
   } finally {
     cleanup();
@@ -420,7 +445,9 @@ test("buildBackendStatus keeps LCM status available when runtime summary fails",
       },
       toolBroker: { manifest: () => ({ tools: [] }) },
       forwardRuntimeRequest: async (path) => {
-        if (path === "/agent/summary") throw new Error("summary unavailable");
+        if (path === "/agent/summary") {
+          throw new Error("summary unavailable at /state/api/sessions/agent_beep/session.json");
+        }
         if (path === "/agent/lcm/status") return { ok: true, lcm: { ok: true, status: "ready" } };
         return { ok: false };
       },
@@ -429,7 +456,7 @@ test("buildBackendStatus keeps LCM status available when runtime summary fails",
 
     assert.equal(status.ok, true);
     assert.equal(status.agent.available, false);
-    assert.equal(status.agent.error, "summary unavailable");
+    assert.equal(status.agent.error, "summary unavailable at [redacted-path]");
     assert.equal(status.agent.summary, null);
     assert.equal(status.memory.lcm.available, true);
     assert.equal(status.memory.lcm.error, null);
@@ -456,7 +483,7 @@ test("buildBackendStatus keeps summary memory available when runtime LCM status 
       toolBroker: { manifest: () => ({ tools: [] }) },
       forwardRuntimeRequest: async (path) => {
         if (path === "/agent/summary") return agentSummaryFixture();
-        if (path === "/agent/lcm/status") throw new Error("LCM unavailable");
+        if (path === "/agent/lcm/status") throw new Error("LCM unavailable at /workspace/status-cwd/lcm.json");
         return { ok: false };
       },
       now: () => "2026-06-02T12:00:00.000Z",
@@ -467,7 +494,7 @@ test("buildBackendStatus keeps summary memory available when runtime LCM status 
     assert.equal(status.agent.error, null);
     assert.equal(status.agent.summary.sessionId, "agent_beep");
     assert.equal(status.memory.lcm.available, false);
-    assert.equal(status.memory.lcm.error, "LCM unavailable");
+    assert.equal(status.memory.lcm.error, "LCM unavailable at [redacted-path]");
     assert.equal(status.memory.lcm.status, null);
     assert.deepEqual(status.memory.lcm.latestContextInjection, {
       kind: "assemble",
