@@ -51,19 +51,30 @@ function isPlainObject(value) {
 }
 
 function isUnsafeStatusKey(key) {
+  const compact = String(key)
+    .toLowerCase()
+    .replace(/[^a-z0-9]/gu, "");
   return (
     /path$/iu.test(key) ||
     /paths$/iu.test(key) ||
     key === "path" ||
     key === "workspace" ||
     key === "events" ||
-    key === "lastAssistantText" ||
-    key === "transcriptText" ||
-    key === "rawPrompt" ||
-    key === "messages" ||
-    key === "promptResult" ||
-    key === "stderrTail" ||
-    key === "stdoutTail"
+    [
+      "lastassistanttext",
+      "finalassistanttext",
+      "assistantfinaltext",
+      "assistanttext",
+      "assistantmessage",
+      "finaltext",
+      "transcript",
+      "transcripttext",
+      "rawprompt",
+      "messages",
+      "promptresult",
+      "stderrtail",
+      "stdouttail",
+    ].includes(compact)
   );
 }
 
@@ -83,7 +94,7 @@ function summarizeAgentEvents(events) {
   if (!isPlainObject(events)) return null;
   const sanitized = {};
   for (const [key, value] of Object.entries(events)) {
-    if (key === "path") continue;
+    if (isUnsafeStatusKey(key)) continue;
     sanitized[key] = sanitizeOperationalObject(value);
   }
   return Object.keys(sanitized).length > 0 ? sanitized : null;

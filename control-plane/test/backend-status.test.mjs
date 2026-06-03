@@ -108,6 +108,8 @@ function agentSummaryFixture() {
         total: 12,
         byType: { session: 1, response: 2 },
         agentEndCount: 1,
+        finalAssistantText: "events final assistant text must not leave this API",
+        transcript: "events transcript must not leave this API",
       },
       lastAssistantText: "raw transcript text must not leave this API",
       lcm: {
@@ -115,6 +117,8 @@ function agentSummaryFixture() {
         available: true,
         backend: "lossless-claw",
         status: "ready",
+        assistantFinalText: "LCM final assistant text must not leave this API",
+        assistantMessage: "LCM assistant message must not leave this API",
         workspacePath: "/workspace/hidden",
       },
       lcmContextInjection: {
@@ -321,7 +325,11 @@ test("buildBackendStatus sanitizes agent summary while exposing memory telemetry
     assert.equal(status.agent.summary.workspace, undefined);
     assert.equal(status.agent.summary.lastAssistantText, undefined);
     assert.equal(status.agent.summary.events.path, undefined);
+    assert.equal(status.agent.summary.events.finalAssistantText, undefined);
+    assert.equal(status.agent.summary.events.transcript, undefined);
     assert.equal(status.agent.summary.lcm.workspacePath, undefined);
+    assert.equal(status.agent.summary.lcm.assistantFinalText, undefined);
+    assert.equal(status.agent.summary.lcm.assistantMessage, undefined);
     assert.deepEqual(status.memory.lcm.latestContextInjection, {
       kind: "assemble",
       at: "2026-06-02T10:04:00.000Z",
@@ -333,7 +341,89 @@ test("buildBackendStatus sanitizes agent summary while exposing memory telemetry
     assert.doesNotMatch(serialized, /\/workspace\/api-sessions/u);
     assert.doesNotMatch(serialized, /\/state\/api\/sessions/u);
     assert.doesNotMatch(serialized, /raw transcript text/u);
+    assert.doesNotMatch(serialized, /events final assistant text/u);
+    assert.doesNotMatch(serialized, /events transcript/u);
+    assert.doesNotMatch(serialized, /LCM final assistant text/u);
+    assert.doesNotMatch(serialized, /LCM assistant message/u);
     assert.doesNotMatch(serialized, /hidden memory transcript/u);
+  } finally {
+    cleanup();
+  }
+});
+
+test("buildBackendStatus keeps LCM status available when runtime summary fails", async () => {
+  const { store, cleanup } = tempStore();
+  try {
+    const status = await buildBackendStatus({
+      store,
+      runtimeManager: {
+        status: async () => ({ runtimeId: "local", running: true }),
+      },
+      toolBroker: { manifest: () => ({ tools: [] }) },
+      forwardRuntimeRequest: async (path) => {
+        if (path === "/agent/summary") throw new Error("summary unavailable");
+        if (path === "/agent/lcm/status") return { ok: true, lcm: { ok: true, status: "ready" } };
+        return { ok: false };
+      },
+      now: () => "2026-06-02T12:00:00.000Z",
+    });
+
+    assert.equal(status.ok, true);
+    assert.equal(status.agent.available, false);
+    assert.equal(status.agent.error, "summary unavailable");
+    assert.equal(status.agent.summary, null);
+    assert.equal(status.memory.lcm.available, true);
+    assert.equal(status.memory.lcm.error, null);
+    assert.deepEqual(status.memory.lcm.status, { ok: true, status: "ready" });
+    assert.equal(status.memory.lcm.latestContextInjection, null);
+    assert.deepEqual(status.memory.hindsight, {
+      available: false,
+      latest: null,
+      telemetry: null,
+    });
+  } finally {
+    cleanup();
+  }
+});
+
+test("buildBackendStatus keeps summary memory available when runtime LCM status fails", async () => {
+  const { store, cleanup } = tempStore();
+  try {
+    const status = await buildBackendStatus({
+      store,
+      runtimeManager: {
+        status: async () => ({ runtimeId: "local", running: true }),
+      },
+      toolBroker: { manifest: () => ({ tools: [] }) },
+      forwardRuntimeRequest: async (path) => {
+        if (path === "/agent/summary") return agentSummaryFixture();
+        if (path === "/agent/lcm/status") throw new Error("LCM unavailable");
+        return { ok: false };
+      },
+      now: () => "2026-06-02T12:00:00.000Z",
+    });
+
+    assert.equal(status.ok, true);
+    assert.equal(status.agent.available, true);
+    assert.equal(status.agent.error, null);
+    assert.equal(status.agent.summary.sessionId, "agent_beep");
+    assert.equal(status.memory.lcm.available, false);
+    assert.equal(status.memory.lcm.error, "LCM unavailable");
+    assert.equal(status.memory.lcm.status, null);
+    assert.deepEqual(status.memory.lcm.latestContextInjection, {
+      kind: "assemble",
+      at: "2026-06-02T10:04:00.000Z",
+      injectedMessageCount: 2,
+    });
+    assert.deepEqual(status.memory.hindsight.latest, {
+      kind: "hindsight_recall",
+      at: "2026-06-02T10:03:00.000Z",
+      items: 4,
+    });
+    assert.deepEqual(status.memory.hindsight.telemetry, {
+      total: 7,
+      failures: 0,
+    });
   } finally {
     cleanup();
   }
