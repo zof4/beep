@@ -26,6 +26,14 @@ Or run it as a local background process:
 ./scripts/beep-control-plane.sh stop
 ```
 
+For the first usable backend operator workflow, see
+[`docs/first-usable-backend-loop.md`](../docs/first-usable-backend-loop.md).
+The short version is: run the stack through the control-plane helper, get an
+operator token, check `GET /api/backend/status`, submit work with
+`POST /api/requests`, read it back with `GET /api/requests` or
+`GET /api/requests/<id>`, and operate runtime memory through proxied routes such
+as `GET /api/agent/lcm/status` and `POST /api/agent/lcm/compact`.
+
 By default `foreground` and `start` run the optional runtime dependency refresh
 helper when it exists and reports stale dependencies, start the control plane on
 `http://127.0.0.1:8788`, and autostart the runtime API container with
@@ -111,3 +119,7 @@ remove containers directly.
 
 The pure reconciliation smoke for this local slice lives at
 `scripts/smoke-test-control-plane-reconciliation.sh`.
+
+The first usable backend smoke lives at
+`scripts/smoke-test-first-usable-backend.sh`; it exercises the backend status,
+request, runtime restart, and LCM control routes through the control plane.

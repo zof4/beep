@@ -64,7 +64,11 @@ process until the future model-gateway provider adapter replaces Pi's current
 secret isolation.
 
 The daemon keeps a durable request queue under `/state/api/agents/beep`. The
-control plane should use the `/agent` endpoints for normal Beep work:
+control plane proxies the `/agent` endpoints for normal Beep work. After
+control-plane adoption, backend operators should start with
+[`docs/first-usable-backend-loop.md`](../docs/first-usable-backend-loop.md) and
+the control-plane routes on `:8788`; direct runtime curls on `:8787` remain
+compatibility and debug paths:
 
 ```bash
 curl http://127.0.0.1:8787/health
@@ -98,6 +102,11 @@ host with `./scripts/beep-control-plane.sh start`, inspected with
 `./scripts/beep-control-plane.sh stop`. It owns host authority and issues scoped
 runtime control-plane tool credentials, while LCM context assembly, transcript
 ingest, and Hindsight ordering stay runtime-owned.
+
+Backend operators should use the control-plane request, backend status, runtime
+lifecycle, and `/api/agent/...` proxy routes first. Use the direct runtime API
+examples below when testing lower-level compatibility or debugging runtime-local
+behavior.
 
 For testing or side sessions, the lower-level session API still exists. It
 starts additional Pi RPC sessions and stores each under
