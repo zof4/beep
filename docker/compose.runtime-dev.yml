@@ -18,6 +18,14 @@ x-beep-runtime-common: &beep-runtime-common
     BEEP_HINDSIGHT_RECALL_BUDGET: high
     BEEP_HINDSIGHT_RECALL_MAX_TOKENS: "4096"
     BEEP_HINDSIGHT_RETAIN_ASYNC: "1"
+    BEEP_RUNTIME_API_TOKEN: "${BEEP_RUNTIME_API_TOKEN:-}"
+    BEEP_MODEL_GATEWAY_CREDENTIAL_URL: "${BEEP_MODEL_GATEWAY_CREDENTIAL_URL:-}"
+    BEEP_MODEL_GATEWAY_CAPABILITY_TOKEN: "${BEEP_MODEL_GATEWAY_CAPABILITY_TOKEN:-}"
+    BEEP_ALLOW_RUNTIME_CODEX_AUTH: "${BEEP_ALLOW_RUNTIME_CODEX_AUTH:-0}"
+    BEEP_CONTROL_PLANE_URL: "${BEEP_CONTROL_PLANE_URL:-}"
+    BEEP_CONTROL_PLANE_RUNTIME_ID: "${BEEP_CONTROL_PLANE_RUNTIME_ID:-local}"
+    BEEP_CONTROL_PLANE_RUNTIME_TOKEN: "${BEEP_CONTROL_PLANE_RUNTIME_TOKEN:-}"
+    BEEP_CONTROL_PLANE_TOOLS_ENABLED: "${BEEP_CONTROL_PLANE_TOOLS_ENABLED:-0}"
     CODEX_HOME: /state/codex
     HOME: /state/home
     XDG_CACHE_HOME: /state/xdg-cache
@@ -37,7 +45,7 @@ x-beep-runtime-common: &beep-runtime-common
 
 services:
   hindsight:
-    image: ${BEEP_HINDSIGHT_IMAGE:-ghcr.io/vectorize-io/hindsight:v0.7.0}
+    image: ${BEEP_HINDSIGHT_IMAGE:-ghcr.io/vectorize-io/hindsight:0.7.1}
     environment:
       HINDSIGHT_API_WORKER_ID: beep-hindsight-local
       HINDSIGHT_API_LLM_PROVIDER: openai-codex
@@ -72,6 +80,7 @@ services:
     restart: unless-stopped
     ports:
       - "127.0.0.1:8787:8787"
+      - "127.0.0.1:13000-13099:3000-3099"
     depends_on:
       hindsight:
         condition: service_healthy

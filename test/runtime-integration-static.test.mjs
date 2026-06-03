@@ -57,3 +57,57 @@ test("agent request records LCM before Hindsight retain", () => {
   assert.ok(retainIndex > 0, "Hindsight retain call should exist");
   assert.ok(lcmIndex < retainIndex, "LCM ingest must happen before Hindsight retain");
 });
+
+test("Pi spawn can load control-plane tools extension independently from LCM context extension", () => {
+  const lcmPathIndex = apiSource.indexOf("const LCM_CONTEXT_EXTENSION_PATH");
+  const toolsPathIndex = apiSource.indexOf("const CONTROL_PLANE_TOOLS_EXTENSION_PATH");
+  const lcmLoadedIndex = apiSource.indexOf("const lcmContextExtensionLoaded");
+  const toolsLoadedIndex = apiSource.indexOf("const controlPlaneToolsExtensionLoaded");
+  const lcmPushIndex = apiSource.indexOf('args.push("--extension", LCM_CONTEXT_EXTENSION_PATH)');
+  const toolsPushIndex = apiSource.indexOf('args.push("--extension", CONTROL_PLANE_TOOLS_EXTENSION_PATH)');
+
+  assert.ok(lcmPathIndex > 0, "LCM context extension constant should exist");
+  assert.ok(toolsPathIndex > 0, "control-plane tools extension constant should exist");
+  assert.ok(lcmLoadedIndex > 0, "LCM context extension loaded guard should exist");
+  assert.ok(toolsLoadedIndex > 0, "control-plane tools extension loaded guard should exist");
+  assert.ok(lcmPushIndex > lcmLoadedIndex, "Pi spawn should push LCM context extension after its guard");
+  assert.ok(toolsPushIndex > toolsLoadedIndex, "Pi spawn should push control-plane tools extension after its guard");
+});
+
+test("control-plane tool env is passed to Pi without changing Hindsight memory order", () => {
+  const toolsEnabledEnvIndex = apiSource.indexOf("BEEP_CONTROL_PLANE_TOOLS_ENABLED");
+  const recallIndex = apiSource.indexOf("defaultMemoryCoordinator.recallForContext");
+  const assembleIndex = apiSource.indexOf("defaultLcmService.assembleMessages");
+
+  assert.ok(toolsEnabledEnvIndex > 0, "control-plane tools enabled env should be passed to Pi");
+  assert.ok(apiSource.includes("BEEP_CONTROL_PLANE_TOOLS_EXTENSION_PATH"), "control-plane tools path env should be passed to Pi");
+  assert.ok(apiSource.includes("BEEP_CONTROL_PLANE_URL"), "control-plane URL env should be passed to Pi");
+  assert.ok(apiSource.includes("BEEP_CONTROL_PLANE_RUNTIME_TOKEN"), "control-plane runtime token env should be passed to Pi");
+  assert.ok(recallIndex > 0, "Hindsight recall should still exist");
+  assert.ok(assembleIndex > 0, "LCM assemble should still exist");
+  assert.ok(recallIndex < assembleIndex, "Hindsight recall must still happen before LCM assemble");
+});
+
+test("control-plane tools are fail closed by default and Pi env is sanitized", () => {
+  assert.match(
+    apiSource,
+    /process\.env\.BEEP_CONTROL_PLANE_TOOLS_ENABLED\s*\|\|\s*"0"/,
+    "runtime control-plane tools should default disabled",
+  );
+  assert.match(apiSource, /function buildPiChildEnv\(/, "Pi child env should be built through a sanitizer");
+  assert.doesNotMatch(apiSource, /\.\.\.process\.env/, "Pi child env must not inherit the full runtime environment");
+  assert.match(apiSource, /delete env\.BEEP_MODEL_GATEWAY_CREDENTIAL_URL/);
+  assert.match(apiSource, /delete env\.BEEP_MODEL_GATEWAY_CAPABILITY_TOKEN/);
+  assert.match(apiSource, /delete env\.BEEP_RUNTIME_API_TOKEN/);
+  assert.match(apiSource, /delete env\.BEEP_CONTROL_PLANE_OPERATOR_TOKEN/);
+  assert.doesNotMatch(
+    apiSource,
+    /BEEP_CONTROL_PLANE_RUNTIME_TOKEN:\s*CONTROL_PLANE_RUNTIME_TOKEN/,
+    "Pi child env should only receive the runtime tool token when the tool extension is loaded",
+  );
+  assert.match(
+    apiSource,
+    /if \(controlPlaneToolsExtensionLoaded\) \{[\s\S]*env\.BEEP_CONTROL_PLANE_RUNTIME_TOKEN = CONTROL_PLANE_RUNTIME_TOKEN/,
+    "runtime tool token should be assigned inside the control-plane tools loaded guard",
+  );
+});

@@ -55,22 +55,32 @@ mount.
 `beep-agentd` is the long-running runtime process. It starts inside the Docker
 container and stays up. On boot, it autostarts the canonical Beep session
 `agent_beep` unless `BEEP_AGENT_AUTOSTART=0` is set. That session is a Pi
-`--mode rpc` process using the refreshed Codex ChatGPT OAuth access token. Its
-workspace is `/workspace/api-sessions/agent_beep`, and its event/session state
-is under `/state/api/sessions/agent_beep`.
+`--mode rpc` process using a short-lived model credential. When the control
+plane starts the runtime, durable Codex auth stays host-side and the runtime
+gets the short-lived credential through the control plane model-credential
+endpoint. The active Pi provider still receives that credential inside the Pi
+process until the future model-gateway provider adapter replaces Pi's current
+`--api-key` provider path, so this local slice is not production process-level
+secret isolation.
 
 The daemon keeps a durable request queue under `/state/api/agents/beep`. The
 control plane should use the `/agent` endpoints for normal Beep work:
 
 ```bash
 curl http://127.0.0.1:8787/health
-curl http://127.0.0.1:8787/agent
+runtime_api_token="$(./scripts/beep-control-plane.sh runtime-api-token)"
+curl http://127.0.0.1:8787/agent \
+  -H "authorization: Bearer $runtime_api_token"
 curl -X POST http://127.0.0.1:8787/agent/submit \
+  -H "authorization: Bearer $runtime_api_token" \
   -H 'content-type: application/json' \
   -d '{"message":"Work in the current directory and create proof.txt"}'
-curl http://127.0.0.1:8787/agent/requests
-curl http://127.0.0.1:8787/agent/events?limit=20
-curl http://127.0.0.1:8787/agent/summary
+curl http://127.0.0.1:8787/agent/requests \
+  -H "authorization: Bearer $runtime_api_token"
+curl 'http://127.0.0.1:8787/agent/events?limit=20' \
+  -H "authorization: Bearer $runtime_api_token"
+curl http://127.0.0.1:8787/agent/summary \
+  -H "authorization: Bearer $runtime_api_token"
 ```
 
 `beep-agentd` is not the future trust boundary for external tools. It owns the
@@ -80,6 +90,15 @@ to the harness as local stubs that submit `ToolIntent` requests to the control
 plane. The control plane owns the durable tool router, gatekeeper, grants,
 audit log, and typed broker execution.
 
+### Local Control Plane
+
+The local control plane lives under `control-plane/` and can be run from the
+host with `./scripts/beep-control-plane.sh start`, inspected with
+`./scripts/beep-control-plane.sh status`, and stopped with
+`./scripts/beep-control-plane.sh stop`. It owns host authority and issues scoped
+runtime control-plane tool credentials, while LCM context assembly, transcript
+ingest, and Hindsight ordering stay runtime-owned.
+
 For testing or side sessions, the lower-level session API still exists. It
 starts additional Pi RPC sessions and stores each under
 `/state/api/sessions/<session-id>` with a matching workspace under
@@ -87,12 +106,18 @@ starts additional Pi RPC sessions and stores each under
 
 ```bash
 curl http://127.0.0.1:8787/capabilities
-curl -X POST http://127.0.0.1:8787/sessions -d '{}'
+runtime_api_token="$(./scripts/beep-control-plane.sh runtime-api-token)"
+curl -X POST http://127.0.0.1:8787/sessions \
+  -H "authorization: Bearer $runtime_api_token" \
+  -d '{}'
 curl -X POST http://127.0.0.1:8787/sessions/<id>/prompt \
+  -H "authorization: Bearer $runtime_api_token" \
   -H 'content-type: application/json' \
   -d '{"message":"Work in the current directory and create proof.txt","waitForCompletion":true}'
-curl http://127.0.0.1:8787/sessions/<id>/events
-curl http://127.0.0.1:8787/sessions/<id>/summary
+curl http://127.0.0.1:8787/sessions/<id>/events \
+  -H "authorization: Bearer $runtime_api_token"
+curl http://127.0.0.1:8787/sessions/<id>/summary \
+  -H "authorization: Bearer $runtime_api_token"
 ```
 
 `POST /runs` is the convenience endpoint for a complete autonomous task. It
@@ -114,16 +139,23 @@ the LCM memory substrate.
 The control plane can inspect and operate LCM through private agent endpoints:
 
 ```bash
-curl http://127.0.0.1:8787/agent/lcm/status
+runtime_api_token="$(./scripts/beep-control-plane.sh runtime-api-token)"
+curl http://127.0.0.1:8787/agent/lcm/status \
+  -H "authorization: Bearer $runtime_api_token"
 curl -X POST http://127.0.0.1:8787/agent/lcm/compact \
+  -H "authorization: Bearer $runtime_api_token" \
   -H 'content-type: application/json' \
   -d '{"force":true,"tokenBudget":2048,"currentTokenCount":2400}'
 curl -X POST http://127.0.0.1:8787/agent/lcm/assemble-preview \
+  -H "authorization: Bearer $runtime_api_token" \
   -H 'content-type: application/json' \
   -d '{"tokenBudget":2048}'
-curl -X POST http://127.0.0.1:8787/agent/lcm/maintain
-curl -X POST http://127.0.0.1:8787/agent/lcm/backup
-curl http://127.0.0.1:8787/agent/lcm/doctor
+curl -X POST http://127.0.0.1:8787/agent/lcm/maintain \
+  -H "authorization: Bearer $runtime_api_token"
+curl -X POST http://127.0.0.1:8787/agent/lcm/backup \
+  -H "authorization: Bearer $runtime_api_token"
+curl http://127.0.0.1:8787/agent/lcm/doctor \
+  -H "authorization: Bearer $runtime_api_token"
 ```
 
 ### Updating Hindsight And LCM

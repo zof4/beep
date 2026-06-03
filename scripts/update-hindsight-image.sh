@@ -12,7 +12,7 @@ fi
 # shellcheck disable=SC1090
 source "$ENV_PATH"
 
-image="${BEEP_HINDSIGHT_IMAGE:-ghcr.io/vectorize-io/hindsight:v0.7.0}"
+image="${BEEP_HINDSIGHT_IMAGE:-ghcr.io/vectorize-io/hindsight:0.7.1}"
 
 docker pull "$image"
 digest="$(docker image inspect --format='{{index .RepoDigests 0}}' "$image")"

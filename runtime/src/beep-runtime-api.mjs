@@ -13,6 +13,7 @@ import {
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { resolveCodexAccessToken } from "./codex-auth-for-pi.mjs";
+import { authorizeRuntimeApiRequest, createRuntimeHealthProof } from "./runtime-api-auth.mjs";
 import {
   defaultLcmService,
   lcmSessionIdForRuntimeSession,
@@ -35,6 +36,7 @@ const RUNTIME_STATE_PATH = process.env.BEEP_RUNTIME_STATE || join(STATE_DIR, "be
 const DEFAULT_MODEL = process.env.BEEP_PI_CODEX_MODEL || "gpt-5.5";
 const DEFAULT_THINKING = process.env.BEEP_PI_THINKING || "low";
 const DEFAULT_AGENT_ID = process.env.BEEP_AGENT_ID || "beep";
+const RUNTIME_API_TOKEN = process.env.BEEP_RUNTIME_API_TOKEN || "";
 const AGENT_AUTOSTART = process.env.BEEP_AGENT_AUTOSTART !== "0" && process.env.BEEP_AGENT_AUTOSTART !== "false";
 const LCM_CONTEXT_ENABLED =
   !["0", "false", "no", "off"].includes(String(process.env.BEEP_LCM_CONTEXT_ENABLED || "1").toLowerCase());
@@ -44,6 +46,14 @@ const LCM_CONTEXT_URL = process.env.BEEP_LCM_CONTEXT_URL || `http://127.0.0.1:${
 const LCM_CONTEXT_TOKEN = process.env.BEEP_LCM_CONTEXT_TOKEN || randomUUID();
 const LCM_CONTEXT_TOKEN_BUDGET = process.env.BEEP_LCM_CONTEXT_TOKEN_BUDGET || "128000";
 const LCM_CONTEXT_TIMEOUT_MS = process.env.BEEP_LCM_CONTEXT_TIMEOUT_MS || "15000";
+const CONTROL_PLANE_TOOLS_ENABLED =
+  !["0", "false", "no", "off"].includes(String(process.env.BEEP_CONTROL_PLANE_TOOLS_ENABLED || "0").toLowerCase());
+const CONTROL_PLANE_TOOLS_EXTENSION_PATH =
+  process.env.BEEP_CONTROL_PLANE_TOOLS_EXTENSION_PATH || "/runtime/pi-extensions/control-plane-tools-extension.mjs";
+const CONTROL_PLANE_URL = process.env.BEEP_CONTROL_PLANE_URL || "";
+const CONTROL_PLANE_RUNTIME_ID = process.env.BEEP_CONTROL_PLANE_RUNTIME_ID || "local";
+const CONTROL_PLANE_RUNTIME_TOKEN = process.env.BEEP_CONTROL_PLANE_RUNTIME_TOKEN || "";
+const CONTROL_PLANE_TOOL_TIMEOUT_MS = process.env.BEEP_CONTROL_PLANE_TOOL_TIMEOUT_MS || "15000";
 const DEFAULT_PROMPT_TIMEOUT_MS = 10 * 60 * 1000;
 const DEFAULT_RPC_TIMEOUT_MS = 60 * 1000;
 const MAX_REQUEST_BYTES = Number.parseInt(process.env.BEEP_MAX_REQUEST_BYTES || `${8 * 1024 * 1024}`, 10);
@@ -283,6 +293,47 @@ function validateThinking(thinking) {
   }
 }
 
+function buildPiChildEnv(session, { lcmContextExtensionLoaded, controlPlaneToolsExtensionLoaded }) {
+  const env = {
+    PATH: process.env.PATH || "",
+    HOME: process.env.HOME || join(STATE_DIR, "home"),
+    TMPDIR: process.env.TMPDIR || "/tmp",
+    CODEX_HOME,
+    BEEP_STATE_DIR: STATE_DIR,
+    BEEP_WORKSPACE_DIR: WORKSPACE_DIR,
+    PI_CODING_AGENT_DIR: join(session.rootDir, "pi-agent"),
+    PI_CODING_AGENT_SESSION_DIR: session.sessionDir,
+    BEEP_LCM_CONTEXT_ENABLED: lcmContextExtensionLoaded ? "1" : "0",
+    BEEP_LCM_CONTEXT_URL: LCM_CONTEXT_URL,
+    BEEP_LCM_CONTEXT_TOKEN: LCM_CONTEXT_TOKEN,
+    BEEP_LCM_RUNTIME_SESSION_ID: session.id,
+    BEEP_LCM_CONTEXT_TOKEN_BUDGET: LCM_CONTEXT_TOKEN_BUDGET,
+    BEEP_LCM_CONTEXT_TIMEOUT_MS: LCM_CONTEXT_TIMEOUT_MS,
+    BEEP_CONTROL_PLANE_TOOLS_ENABLED: controlPlaneToolsExtensionLoaded ? "1" : "0",
+  };
+
+  if (controlPlaneToolsExtensionLoaded) {
+    env.BEEP_CONTROL_PLANE_TOOLS_EXTENSION_PATH = CONTROL_PLANE_TOOLS_EXTENSION_PATH;
+    env.BEEP_CONTROL_PLANE_URL = CONTROL_PLANE_URL;
+    env.BEEP_CONTROL_PLANE_RUNTIME_ID = CONTROL_PLANE_RUNTIME_ID;
+    env.BEEP_CONTROL_PLANE_RUNTIME_TOKEN = CONTROL_PLANE_RUNTIME_TOKEN;
+    env.BEEP_CONTROL_PLANE_TOOL_TIMEOUT_MS = CONTROL_PLANE_TOOL_TIMEOUT_MS;
+  }
+
+  delete env.BEEP_MODEL_GATEWAY_CREDENTIAL_URL;
+  delete env.BEEP_MODEL_GATEWAY_CAPABILITY_TOKEN;
+  delete env.BEEP_RUNTIME_API_TOKEN;
+  delete env.BEEP_CONTROL_PLANE_OPERATOR_TOKEN;
+  delete env.BEEP_OPERATOR_TOKEN;
+  delete env.BEEP_MODEL_CREDENTIAL_TOKEN;
+  delete env.BEEP_MODEL_GATEWAY_TOKEN;
+
+  for (const [key, value] of Object.entries(env)) {
+    if (value === undefined || value === null) delete env[key];
+  }
+  return env;
+}
+
 class PiRpcSession {
   constructor({ id, model, thinking, rootDir, workspace, sessionDir, resumeLatest = false }) {
     this.id = id;
@@ -350,7 +401,11 @@ class PiRpcSession {
   }
 
   async spawn() {
-    const accessToken = await resolveCodexAccessToken(CODEX_HOME);
+    const accessToken = await resolveCodexAccessToken(CODEX_HOME, {
+      provider: "openai-codex",
+      model: this.model,
+      runtimeSessionId: this.id,
+    });
     const { tsxBin, piCli } = commandPath();
     const args = [
       piCli,
@@ -375,6 +430,14 @@ class PiRpcSession {
     if (lcmContextExtensionLoaded) {
       args.push("--extension", LCM_CONTEXT_EXTENSION_PATH);
     }
+    const controlPlaneToolsExtensionLoaded =
+      CONTROL_PLANE_TOOLS_ENABLED &&
+      Boolean(CONTROL_PLANE_URL) &&
+      Boolean(CONTROL_PLANE_RUNTIME_TOKEN) &&
+      existsSync(CONTROL_PLANE_TOOLS_EXTENSION_PATH);
+    if (controlPlaneToolsExtensionLoaded) {
+      args.push("--extension", CONTROL_PLANE_TOOLS_EXTENSION_PATH);
+    }
 
     writeJsonFile(join(this.rootDir, "run-config.json"), {
       schemaVersion: 1,
@@ -396,21 +459,19 @@ class PiRpcSession {
         tokenBudget: Number(LCM_CONTEXT_TOKEN_BUDGET),
         timeoutMs: Number(LCM_CONTEXT_TIMEOUT_MS),
       },
+      controlPlaneTools: {
+        enabled: CONTROL_PLANE_TOOLS_ENABLED,
+        extensionPath: CONTROL_PLANE_TOOLS_EXTENSION_PATH,
+        extensionLoaded: controlPlaneToolsExtensionLoaded,
+        url: CONTROL_PLANE_URL || null,
+        runtimeId: CONTROL_PLANE_RUNTIME_ID,
+        runtimeTokenConfigured: Boolean(CONTROL_PLANE_RUNTIME_TOKEN),
+        timeoutMs: Number(CONTROL_PLANE_TOOL_TIMEOUT_MS),
+      },
       createdAt: this.createdAt,
     });
 
-    const env = {
-      ...process.env,
-      HOME: process.env.HOME || join(STATE_DIR, "home"),
-      PI_CODING_AGENT_DIR: join(this.rootDir, "pi-agent"),
-      PI_CODING_AGENT_SESSION_DIR: this.sessionDir,
-      BEEP_LCM_CONTEXT_ENABLED: lcmContextExtensionLoaded ? "1" : "0",
-      BEEP_LCM_CONTEXT_URL: LCM_CONTEXT_URL,
-      BEEP_LCM_CONTEXT_TOKEN: LCM_CONTEXT_TOKEN,
-      BEEP_LCM_RUNTIME_SESSION_ID: this.id,
-      BEEP_LCM_CONTEXT_TOKEN_BUDGET: LCM_CONTEXT_TOKEN_BUDGET,
-      BEEP_LCM_CONTEXT_TIMEOUT_MS: LCM_CONTEXT_TIMEOUT_MS,
-    };
+    const env = buildPiChildEnv(this, { lcmContextExtensionLoaded, controlPlaneToolsExtensionLoaded });
 
     this.stdoutStream = createWriteStream(this.stdoutPath, { flags: "a" });
     this.stderrStream = createWriteStream(this.stderrPath, { flags: "a" });
@@ -1291,11 +1352,19 @@ function listSessionStatuses() {
   return [...active, ...inactive].sort((left, right) => String(right.createdAt).localeCompare(String(left.createdAt)));
 }
 
-async function handleHealth(_req, res) {
+async function handleHealth(req, res) {
+  const url = new URL(req.url || "/", `http://${req.headers.host || `${API_HOST}:${API_PORT}`}`);
+  const challenge = url.searchParams.get("challenge");
   const agent = agentSupervisor.status();
+  const managedProof =
+    challenge && RUNTIME_API_TOKEN
+      ? createRuntimeHealthProof({ challenge, runtimeApiToken: RUNTIME_API_TOKEN })
+      : null;
   jsonResponse(res, 200, {
     ok: true,
     service: "beep-agentd",
+    runtimeId: CONTROL_PLANE_RUNTIME_ID,
+    ...(managedProof ? { managedProof } : {}),
     time: nowIso(),
     agent: {
       id: agent.id,
@@ -1332,6 +1401,15 @@ async function handleCapabilities(_req, res) {
       tokenBudget: Number(LCM_CONTEXT_TOKEN_BUDGET),
       timeoutMs: Number(LCM_CONTEXT_TIMEOUT_MS),
       route: "POST /internal/lcm/context",
+    },
+    controlPlaneTools: {
+      enabled: CONTROL_PLANE_TOOLS_ENABLED,
+      extensionPath: CONTROL_PLANE_TOOLS_EXTENSION_PATH,
+      url: CONTROL_PLANE_URL || null,
+      runtimeId: CONTROL_PLANE_RUNTIME_ID,
+      runtimeTokenConfigured: Boolean(CONTROL_PLANE_RUNTIME_TOKEN),
+      timeoutMs: Number(CONTROL_PLANE_TOOL_TIMEOUT_MS),
+      route: "POST /internal/tools/call",
     },
     current: runtimeConfig,
     paths: {
@@ -1880,6 +1958,17 @@ async function dispatch(req, res) {
     await handleCapabilities(req, res);
     return;
   }
+
+  const runtimeApiAuth = authorizeRuntimeApiRequest({
+    pathname: url.pathname,
+    authorization: req.headers.authorization,
+    runtimeApiToken: RUNTIME_API_TOKEN,
+  });
+  if (!runtimeApiAuth.ok) {
+    routeError(res, runtimeApiAuth.status, runtimeApiAuth.error);
+    return;
+  }
+
   if (url.pathname === "/sessions" && req.method === "GET") {
     jsonResponse(res, 200, { ok: true, sessions: listSessionStatuses() });
     return;
