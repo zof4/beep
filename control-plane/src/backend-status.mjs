@@ -35,14 +35,18 @@ const UNSAFE_RUNTIME_STATUS_SUFFIXES = [
 ];
 const UNSAFE_RUNTIME_STATUS_SUFFIX_PATTERN =
   /(?:^|[_-])(path|paths|root|roots|dir|dirs|directory|directories|file|files|log|logs|tail|tails)$|(?:Path|Paths|Root|Roots|Dir|Dirs|Directory|Directories|File|Files|Log|Logs|Tail|Tails)$/u;
-const UNIX_ABSOLUTE_PATH_PATTERN = /\/[^\s"'`<>{}|\\^$[\];,]+/gu;
+const COMMON_ABSOLUTE_PATH_PATTERN =
+  /(?<![:/])\/(?:workspace|state|lcm|runtime|history|tmp|var|private|Users)(?:\/(?:[A-Z][A-Za-z0-9._~@%+=:-]*(?: [A-Z][A-Za-z0-9._~@%+=:-]*)+|[A-Za-z0-9._~@%+=:-]+))+/gu;
+const UNIX_ABSOLUTE_PATH_PATTERN = /(?<![:/])\/[^\s"'`<>{}|\\^$[\];,]+/gu;
 
 function errorString(error) {
   return error instanceof Error ? error.message : String(error);
 }
 
 function redactRuntimeString(value) {
-  return String(value).replace(UNIX_ABSOLUTE_PATH_PATTERN, "[redacted-path]");
+  return String(value)
+    .replace(COMMON_ABSOLUTE_PATH_PATTERN, "[redacted-path]")
+    .replace(UNIX_ABSOLUTE_PATH_PATTERN, "[redacted-path]");
 }
 
 function runtimeErrorString(error) {
@@ -183,6 +187,10 @@ function latestContextInjection(agentSummary) {
   return sanitizeOperationalObject(lcmContextInjection.latest);
 }
 
+function publicRuntimeStatus(runtime) {
+  return sanitizeOperationalObject(runtime);
+}
+
 function buildControlPlaneStatus({ store, toolBroker }) {
   return {
     recentRequests: store.listAgentRequests({ limit: 10 }).map(projectAgentRequest),
@@ -204,12 +212,12 @@ export async function buildBackendStatus({
 
   let runtime;
   try {
-    runtime = await runtimeManager.status();
+    runtime = publicRuntimeStatus(await runtimeManager.status());
   } catch (error) {
-    runtime = {
+    runtime = publicRuntimeStatus({
       running: false,
       error: runtimeErrorString(error),
-    };
+    });
   }
 
   const agent = {

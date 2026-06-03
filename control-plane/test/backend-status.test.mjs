@@ -350,6 +350,116 @@ test("buildBackendStatus degrades when runtime is stopped and does not call runt
   }
 });
 
+test("buildBackendStatus sanitizes stopped runtime status errors before returning or reusing them", async () => {
+  const { store, cleanup } = tempStore();
+  try {
+    let forwardCalls = 0;
+    const status = await buildBackendStatus({
+      store,
+      runtimeManager: {
+        status: async () => ({
+          runtimeId: "local",
+          running: false,
+          apiUrl: "http://127.0.0.1:8787",
+          error: "missing /workspace/private/session.json",
+          state: {
+            status: "stopped",
+            updatedAt: "2026-06-02T10:00:00.000Z",
+            workspacePath: "/workspace/private",
+          },
+        }),
+      },
+      toolBroker: { manifest: () => ({ tools: [] }) },
+      forwardRuntimeRequest: async () => {
+        forwardCalls += 1;
+        throw new Error("forwarder should not be called");
+      },
+      now: () => "2026-06-02T12:00:00.000Z",
+    });
+
+    assert.equal(status.ok, true);
+    assert.deepEqual(status.runtime, {
+      runtimeId: "local",
+      running: false,
+      apiUrl: "http://127.0.0.1:8787",
+      error: "missing [redacted-path]",
+      state: {
+        status: "stopped",
+        updatedAt: "2026-06-02T10:00:00.000Z",
+      },
+    });
+    assert.equal(status.agent.error, "missing [redacted-path]");
+    assert.equal(status.memory.lcm.error, "missing [redacted-path]");
+    assert.equal(forwardCalls, 0);
+
+    const serialized = JSON.stringify(status);
+    assert.doesNotMatch(serialized, /\/workspace\/private/u);
+    assert.doesNotMatch(serialized, /session\.json/u);
+  } finally {
+    cleanup();
+  }
+});
+
+test("buildBackendStatus sanitizes running runtime health fields with spaced paths", async () => {
+  const { store, cleanup } = tempStore();
+  try {
+    const status = await buildBackendStatus({
+      store,
+      runtimeManager: {
+        status: async () => ({
+          runtimeId: "local",
+          running: true,
+          apiUrl: "http://127.0.0.1:8787",
+          health: {
+            ok: true,
+            service: "beep-agentd",
+            runtimeId: "local",
+            agent: {
+              running: true,
+              requestCount: 4,
+              lastError: "failed /workspace/My Project/session.json",
+              workspacePath: "/workspace/My Project",
+            },
+          },
+          state: {
+            status: "running",
+            startedAt: "2026-06-02T09:00:00.000Z",
+            apiUrl: "http://127.0.0.1:8787",
+            logTail: "raw runtime state log tail",
+          },
+        }),
+      },
+      toolBroker: { manifest: () => ({ tools: [] }) },
+      forwardRuntimeRequest: async (path) => {
+        if (path === "/agent/summary") return agentSummaryFixture();
+        if (path === "/agent/lcm/status") return { ok: true, lcm: { ok: true, status: "ready" } };
+        return { ok: false };
+      },
+      now: () => "2026-06-02T12:00:00.000Z",
+    });
+
+    assert.equal(status.runtime.health.agent.lastError, "failed [redacted-path]");
+    assert.equal(status.runtime.health.agent.workspacePath, undefined);
+    assert.deepEqual(status.runtime.health.agent, {
+      running: true,
+      requestCount: 4,
+      lastError: "failed [redacted-path]",
+    });
+    assert.deepEqual(status.runtime.state, {
+      status: "running",
+      startedAt: "2026-06-02T09:00:00.000Z",
+      apiUrl: "http://127.0.0.1:8787",
+    });
+
+    const serialized = JSON.stringify(status);
+    assert.doesNotMatch(serialized, /\/workspace\/My Project/u);
+    assert.doesNotMatch(serialized, /Project\/session\.json/u);
+    assert.doesNotMatch(serialized, /raw runtime state log tail/u);
+  } finally {
+    cleanup();
+  }
+});
+
 test("buildBackendStatus sanitizes agent summary while exposing memory telemetry", async () => {
   const { store, cleanup } = tempStore();
   try {
@@ -522,7 +632,18 @@ test("backend status route requires operator auth and returns status for authent
     const handler = createControlPlaneHandler({
       store,
       runtimeManager: {
-        status: async () => ({ runtimeId: "local", running: true }),
+        status: async () => ({
+          runtimeId: "local",
+          running: true,
+          health: {
+            ok: true,
+            service: "beep-agentd",
+            runtimeId: "local",
+            agent: {
+              lastError: "failed /workspace/My Project/session.json",
+            },
+          },
+        }),
         proxyToRuntime: async (path) => {
           calls.push(path);
           if (path === "/agent/summary") return agentSummaryFixture();
@@ -551,10 +672,13 @@ test("backend status route requires operator auth and returns status for authent
     assert.equal(payload.ok, true);
     assert.equal(payload.schemaVersion, 1);
     assert.equal(payload.runtime.running, true);
+    assert.equal(payload.runtime.health.agent.lastError, "failed [redacted-path]");
     assert.equal(payload.agent.available, true);
     assert.equal(payload.memory.lcm.available, true);
     assert.deepEqual(payload.controlPlane.tools, { tools: [{ name: "preview.container.createStaticSite" }] });
     assert.deepEqual(calls, ["/agent/summary", "/agent/lcm/status"]);
+    assert.doesNotMatch(JSON.stringify(payload), /\/workspace\/My Project/u);
+    assert.doesNotMatch(JSON.stringify(payload), /Project\/session\.json/u);
   } finally {
     cleanup();
   }
