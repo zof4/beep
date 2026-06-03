@@ -34,7 +34,7 @@ function normalizePreviewUrlPath(path = "/") {
     } catch {
       return "";
     }
-    if (decodedComponent === "." || decodedComponent === "..") {
+    if (decodedComponent === "." || decodedComponent === ".." || /[\/\\]/u.test(decodedComponent)) {
       return "";
     }
   }
