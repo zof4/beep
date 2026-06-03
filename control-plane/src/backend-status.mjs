@@ -8,9 +8,12 @@ const UNSAFE_RUNTIME_STATUS_KEYS = new Set([
   "assistanttext",
   "assistantmessage",
   "finaltext",
+  "contextprojection",
+  "systempromptaddition",
   "transcript",
   "transcripttext",
   "rawprompt",
+  "history",
   "messages",
   "promptresult",
   "stderrtail",
@@ -37,6 +40,8 @@ const UNSAFE_RUNTIME_STATUS_SUFFIX_PATTERN =
   /(?:^|[_-])(path|paths|root|roots|dir|dirs|directory|directories|file|files|log|logs|tail|tails)$|(?:Path|Paths|Root|Roots|Dir|Dirs|Directory|Directories|File|Files|Log|Logs|Tail|Tails)$/u;
 const COMMON_ABSOLUTE_PATH_PATTERN =
   /(?<![:/])\/(?:workspace|state|lcm|runtime|history|tmp|var|private|Users)(?:\/(?:[A-Z][A-Za-z0-9._~@%+=:-]*(?: [A-Z][A-Za-z0-9._~@%+=:-]*)+|[A-Za-z0-9._~@%+=:-]+))+/gu;
+const FILE_URL_ABSOLUTE_PATH_PATTERN =
+  /file:\/\/\/(?:workspace|state|lcm|runtime|history|tmp|var|private|Users)(?:\/(?:[A-Z][A-Za-z0-9._~@%+=:-]*(?: [A-Z][A-Za-z0-9._~@%+=:-]*)+|[A-Za-z0-9._~@%+=:-]+))+/gu;
 const UNIX_ABSOLUTE_PATH_PATTERN = /(?<![:/])\/[^\s"'`<>{}|\\^$[\];,]+/gu;
 
 function errorString(error) {
@@ -45,6 +50,7 @@ function errorString(error) {
 
 function redactRuntimeString(value) {
   return String(value)
+    .replace(FILE_URL_ABSOLUTE_PATH_PATTERN, "[redacted-path]")
     .replace(COMMON_ABSOLUTE_PATH_PATTERN, "[redacted-path]")
     .replace(UNIX_ABSOLUTE_PATH_PATTERN, "[redacted-path]");
 }
@@ -170,14 +176,28 @@ function lcmStatusFromResponse(response) {
   return null;
 }
 
+function runtimePayloadError(response, fallback) {
+  return redactRuntimeString(response?.error || response?.message || fallback);
+}
+
 function hindsightMemoryStatus(agentSummary) {
   const hindsightMemory = isPlainObject(agentSummary?.hindsightMemory) ? agentSummary.hindsightMemory : null;
   const latest = hindsightMemory?.latest !== undefined ? sanitizeOperationalObject(hindsightMemory.latest) : null;
-  const telemetry = hindsightMemory?.telemetry !== undefined ? sanitizeOperationalObject(hindsightMemory.telemetry) : null;
+  let telemetry = hindsightMemory?.telemetry !== undefined ? sanitizeOperationalObject(hindsightMemory.telemetry) : null;
+  const aggregateTelemetry = {};
+  for (const field of ["enabled", "total", "byKind", "failures"]) {
+    if (hindsightMemory?.[field] !== undefined) aggregateTelemetry[field] = sanitizeOperationalObject(hindsightMemory[field]);
+  }
+  if (Object.keys(aggregateTelemetry).length > 0) {
+    telemetry = {
+      ...(isPlainObject(telemetry) ? telemetry : {}),
+      ...aggregateTelemetry,
+    };
+  }
   return {
     available: Boolean(hindsightMemory && (latest !== null || telemetry !== null)),
     latest,
-    telemetry,
+    telemetry: telemetry && Object.keys(telemetry).length > 0 ? telemetry : null,
   };
 }
 
@@ -256,19 +276,27 @@ export async function buildBackendStatus({
   let rawAgentSummary = null;
   try {
     const agentSummaryResponse = await forwardRuntimeRequest("/agent/summary");
-    rawAgentSummary = agentSummaryPayload(agentSummaryResponse);
-    agent.summary = safeAgentSummary(agentSummaryResponse);
-    agent.available = true;
-    memory.lcm.latestContextInjection = latestContextInjection(rawAgentSummary);
-    memory.hindsight = hindsightMemoryStatus(rawAgentSummary);
+    if (agentSummaryResponse?.ok === false) {
+      agent.error = runtimePayloadError(agentSummaryResponse, "runtime summary unavailable");
+    } else {
+      rawAgentSummary = agentSummaryPayload(agentSummaryResponse);
+      agent.summary = safeAgentSummary(agentSummaryResponse);
+      agent.available = true;
+      memory.lcm.latestContextInjection = latestContextInjection(rawAgentSummary);
+      memory.hindsight = hindsightMemoryStatus(rawAgentSummary);
+    }
   } catch (error) {
     agent.error = runtimeErrorString(error);
   }
 
   try {
     const lcmResponse = await forwardRuntimeRequest("/agent/lcm/status");
-    memory.lcm.status = lcmStatusFromResponse(lcmResponse);
-    memory.lcm.available = true;
+    if (lcmResponse?.ok === false) {
+      memory.lcm.error = runtimePayloadError(lcmResponse, "runtime LCM status unavailable");
+    } else {
+      memory.lcm.status = lcmStatusFromResponse(lcmResponse);
+      memory.lcm.available = true;
+    }
   } catch (error) {
     memory.lcm.error = runtimeErrorString(error);
   }

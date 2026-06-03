@@ -121,6 +121,13 @@ function agentSummaryFixture() {
         error: "failed to read /state/api/sessions/agent_beep/session.json",
         rowCounts: { atoms: 12, bonds: 7, messages: 19, large_files: 2 },
         messageCount: 19,
+        assemble: {
+          messageCount: 3,
+          estimatedTokens: 512,
+          contextProjection: "summary assemble raw context projection must not leave this API",
+          systemPromptAddition: "summary assemble raw system prompt must not leave this API",
+          messages: [{ role: "system", content: "summary assemble raw message must not leave this API" }],
+        },
         current: { messages: 4, atoms: 9 },
         messages: [{ role: "assistant", content: "raw LCM message object must not leave this API" }],
         lcmRoot: "/lcm/runtime-summary-root",
@@ -138,19 +145,32 @@ function agentSummaryFixture() {
           kind: "assemble",
           at: "2026-06-02T10:04:00.000Z",
           injectedMessageCount: 2,
+          contextProjection: "latest LCM context projection must not leave this API",
+          systemPromptAddition: "latest LCM system prompt must not leave this API",
         },
       },
       hindsightMemory: {
+        schemaVersion: 1,
+        enabled: true,
+        total: 7,
+        byKind: {
+          hindsight_recall: 4,
+          hindsight_retain: 3,
+        },
+        failures: 1,
         latest: {
           kind: "hindsight_recall",
           at: "2026-06-02T10:03:00.000Z",
           items: 4,
-        },
-        telemetry: {
-          total: 7,
-          failures: 0,
+          error: "hindsight read failed at file:///workspace/private/session.json",
         },
         transcriptText: "hidden memory transcript",
+        history: [
+          {
+            kind: "hindsight_recall",
+            content: "hindsight raw history must not leave this API",
+          },
+        ],
       },
     },
   };
@@ -217,6 +237,10 @@ test("buildBackendStatus aggregates running runtime, memory, control-plane state
       error: "failed to read [redacted-path]",
       rowCounts: { atoms: 12, bonds: 7, messages: 19, large_files: 2 },
       messageCount: 19,
+      assemble: {
+        messageCount: 3,
+        estimatedTokens: 512,
+      },
       current: { messages: 4, atoms: 9 },
       config: {
         status: "loaded",
@@ -246,10 +270,16 @@ test("buildBackendStatus aggregates running runtime, memory, control-plane state
         kind: "hindsight_recall",
         at: "2026-06-02T10:03:00.000Z",
         items: 4,
+        error: "hindsight read failed at [redacted-path]",
       },
       telemetry: {
+        enabled: true,
         total: 7,
-        failures: 0,
+        byKind: {
+          hindsight_recall: 4,
+          hindsight_retain: 3,
+        },
+        failures: 1,
       },
     });
     assert.equal(status.controlPlane.recentRequests.length, 1);
@@ -505,6 +535,10 @@ test("buildBackendStatus sanitizes agent summary while exposing memory telemetry
     assert.equal(status.agent.summary.lcm.assistantFinalText, undefined);
     assert.equal(status.agent.summary.lcm.assistantMessage, undefined);
     assert.equal(status.agent.summary.lcm.messages, undefined);
+    assert.equal(status.agent.summary.lcm.assemble.contextProjection, undefined);
+    assert.equal(status.agent.summary.lcm.assemble.systemPromptAddition, undefined);
+    assert.equal(status.agent.summary.lcm.assemble.messages, undefined);
+    assert.deepEqual(status.agent.summary.lcm.assemble, { messageCount: 3, estimatedTokens: 512 });
     assert.equal(status.agent.summary.lcm.error, "failed to read [redacted-path]");
     assert.deepEqual(status.agent.summary.lcm.rowCounts, { atoms: 12, bonds: 7, messages: 19, large_files: 2 });
     assert.deepEqual(status.agent.summary.lcm.current, { messages: 4, atoms: 9 });
@@ -522,7 +556,16 @@ test("buildBackendStatus sanitizes agent summary while exposing memory telemetry
       at: "2026-06-02T10:04:00.000Z",
       injectedMessageCount: 2,
     });
-    assert.deepEqual(status.memory.hindsight.telemetry, { total: 7, failures: 0 });
+    assert.deepEqual(status.memory.hindsight.telemetry, {
+      enabled: true,
+      total: 7,
+      byKind: {
+        hindsight_recall: 4,
+        hindsight_retain: 3,
+      },
+      failures: 1,
+    });
+    assert.equal(status.memory.hindsight.latest.error, "hindsight read failed at [redacted-path]");
 
     const serialized = JSON.stringify(status);
     assert.doesNotMatch(serialized, /\/workspace\/api-sessions/u);
@@ -540,6 +583,90 @@ test("buildBackendStatus sanitizes agent summary while exposing memory telemetry
     assert.doesNotMatch(serialized, /raw LCM message object/u);
     assert.doesNotMatch(serialized, /raw message from runtime/u);
     assert.doesNotMatch(serialized, /hidden memory transcript/u);
+    assert.doesNotMatch(serialized, /summary assemble raw context projection/u);
+    assert.doesNotMatch(serialized, /summary assemble raw system prompt/u);
+    assert.doesNotMatch(serialized, /summary assemble raw message/u);
+    assert.doesNotMatch(serialized, /latest LCM context projection/u);
+    assert.doesNotMatch(serialized, /latest LCM system prompt/u);
+    assert.doesNotMatch(serialized, /hindsight raw history/u);
+    assert.doesNotMatch(serialized, /file:\/\/\/workspace/u);
+  } finally {
+    cleanup();
+  }
+});
+
+test("buildBackendStatus treats ok false runtime summary payload as unavailable", async () => {
+  const { store, cleanup } = tempStore();
+  try {
+    const calls = [];
+    const status = await buildBackendStatus({
+      store,
+      runtimeManager: {
+        status: async () => ({ runtimeId: "local", running: true }),
+      },
+      toolBroker: { manifest: () => ({ tools: [] }) },
+      forwardRuntimeRequest: async (path) => {
+        calls.push(path);
+        if (path === "/agent/summary") {
+          return { ok: false, error: "summary failed at /state/api/sessions/agent_beep/session.json" };
+        }
+        if (path === "/agent/lcm/status") return { ok: true, lcm: { ok: true, status: "ready" } };
+        return { ok: false };
+      },
+      now: () => "2026-06-02T12:00:00.000Z",
+    });
+
+    assert.equal(status.ok, true);
+    assert.equal(status.agent.available, false);
+    assert.equal(status.agent.error, "summary failed at [redacted-path]");
+    assert.equal(status.agent.summary, null);
+    assert.equal(status.memory.lcm.available, true);
+    assert.deepEqual(status.memory.lcm.status, { ok: true, status: "ready" });
+    assert.deepEqual(status.memory.hindsight, {
+      available: false,
+      latest: null,
+      telemetry: null,
+    });
+    assert.deepEqual(calls, ["/agent/summary", "/agent/lcm/status"]);
+  } finally {
+    cleanup();
+  }
+});
+
+test("buildBackendStatus treats ok false runtime LCM status payload as unavailable", async () => {
+  const { store, cleanup } = tempStore();
+  try {
+    const status = await buildBackendStatus({
+      store,
+      runtimeManager: {
+        status: async () => ({ runtimeId: "local", running: true }),
+      },
+      toolBroker: { manifest: () => ({ tools: [] }) },
+      forwardRuntimeRequest: async (path) => {
+        if (path === "/agent/summary") return agentSummaryFixture();
+        if (path === "/agent/lcm/status") {
+          return { ok: false, error: "LCM status failed at file:///workspace/private/session.json" };
+        }
+        return { ok: false };
+      },
+      now: () => "2026-06-02T12:00:00.000Z",
+    });
+
+    assert.equal(status.ok, true);
+    assert.equal(status.agent.available, true);
+    assert.equal(status.memory.lcm.available, false);
+    assert.equal(status.memory.lcm.error, "LCM status failed at [redacted-path]");
+    assert.equal(status.memory.lcm.status, null);
+    assert.deepEqual(status.memory.lcm.latestContextInjection, {
+      kind: "assemble",
+      at: "2026-06-02T10:04:00.000Z",
+      injectedMessageCount: 2,
+    });
+    assert.equal(status.memory.hindsight.available, true);
+
+    const serialized = JSON.stringify(status);
+    assert.doesNotMatch(serialized, /file:\/\/\/workspace/u);
+    assert.doesNotMatch(serialized, /private\/session\.json/u);
   } finally {
     cleanup();
   }
@@ -615,10 +742,16 @@ test("buildBackendStatus keeps summary memory available when runtime LCM status 
       kind: "hindsight_recall",
       at: "2026-06-02T10:03:00.000Z",
       items: 4,
+      error: "hindsight read failed at [redacted-path]",
     });
     assert.deepEqual(status.memory.hindsight.telemetry, {
+      enabled: true,
       total: 7,
-      failures: 0,
+      byKind: {
+        hindsight_recall: 4,
+        hindsight_retain: 3,
+      },
+      failures: 1,
     });
   } finally {
     cleanup();
