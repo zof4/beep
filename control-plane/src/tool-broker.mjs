@@ -14,6 +14,14 @@ function normalizePath(path = "/") {
   return path.startsWith("/") ? path : `/${path}`;
 }
 
+function normalizePreviewUrlPath(path = "/") {
+  const relativePath = normalizePath(path).slice(1);
+  if (relativePath.startsWith("/") || /^[A-Za-z][A-Za-z0-9+.-]*:/u.test(relativePath)) {
+    return "";
+  }
+  return relativePath;
+}
+
 export function hostPortForContainerPort(port) {
   return PREVIEW_HOST_PORT_BASE + (port - PREVIEW_CONTAINER_PORT_MIN);
 }
@@ -236,7 +244,7 @@ export class ToolBroker {
     }
     const port = Number(args.port);
     validatePreviewPort(port);
-    const path = normalizePath(args.path);
+    const path = normalizePreviewUrlPath(args.path);
     const hostPort = hostPortForContainerPort(port);
     const baseUrl = `${PUBLIC_BASE_URL}/preview/${runtimeId}/${port}/`;
     const directUrl = `http://127.0.0.1:${hostPort}/`;
@@ -246,8 +254,8 @@ export class ToolBroker {
       hostPort,
       label: typeof args.label === "string" ? args.label.slice(0, 80) : null,
       baseUrl,
-      url: new URL(path.slice(1), baseUrl).toString(),
-      directUrl: new URL(path.slice(1), directUrl).toString(),
+      url: new URL(path, baseUrl).toString(),
+      directUrl: new URL(path, directUrl).toString(),
       note: "The dev server inside the runtime must bind 0.0.0.0.",
     };
     this.store.upsertExposure(exposure);

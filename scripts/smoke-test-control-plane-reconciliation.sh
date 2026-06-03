@@ -9,6 +9,8 @@ node --test "$ROOT_DIR"/control-plane/test/*.test.mjs
 bash -n "$ROOT_DIR/scripts/runtime-dev-env.sh"
 bash -n "$ROOT_DIR/scripts/beep-control-plane.sh"
 
+export BEEP_RUNTIME_AUTO_UPDATE=0
+
 runtime_token="$("$ROOT_DIR/scripts/beep-control-plane.sh" runtime-token)"
 runtime_api_token="$("$ROOT_DIR/scripts/beep-control-plane.sh" runtime-api-token)"
 model_token="$("$ROOT_DIR/scripts/beep-control-plane.sh" model-credential-token)"
