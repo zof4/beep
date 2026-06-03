@@ -289,7 +289,7 @@ const lcmAggregateProofFrom = (beforeStatus, finalStatus) => {
   if (latestContextInjection.ok !== true) return null;
   if (hasErrorValue(latestContextInjection)) return null;
   const changed = JSON.stringify(latestContextInjection) !== JSON.stringify(beforeLatest);
-  if (!changed && !positiveContextCounter(latestContextInjection)) return null;
+  if (!changed || !positiveContextCounter(latestContextInjection)) return null;
 
   return {
     source: "memory.lcm.latestContextInjection",
