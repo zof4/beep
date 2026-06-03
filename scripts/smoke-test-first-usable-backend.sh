@@ -235,6 +235,99 @@ const runtimeRunningFrom = (value) =>
     value.state?.status === "running" ||
     value.health?.ok === true ||
     value.health?.agent?.running === true);
+const runtimeStoppedFrom = (value) =>
+  isObject(value) && (value.running === false || value.state?.status === "stopped");
+const positiveNumber = (value) => typeof value === "number" && Number.isFinite(value) && value > 0;
+const positiveContextCounter = (value) =>
+  positiveNumber(value?.inputMessageCount) ||
+  positiveNumber(value?.outputMessageCount) ||
+  positiveNumber(value?.estimatedTokens) ||
+  positiveNumber(value?.injectedMessageCount);
+const positiveAssembleCounter = (value) => positiveNumber(value?.messageCount) || positiveNumber(value?.estimatedTokens);
+const lcmProofDetailFrom = ({ lcm, agentSummary }) => {
+  const latestContextInjection = isObject(lcm?.latestContextInjection) ? lcm.latestContextInjection : null;
+  if (latestContextInjection?.kind === "assemble") {
+    return {
+      source: "memory.lcm.latestContextInjection",
+      kind: latestContextInjection.kind,
+      counters: {
+        inputMessageCount: latestContextInjection.inputMessageCount ?? null,
+        outputMessageCount: latestContextInjection.outputMessageCount ?? null,
+        estimatedTokens: latestContextInjection.estimatedTokens ?? null,
+        injectedMessageCount: latestContextInjection.injectedMessageCount ?? null,
+      },
+    };
+  }
+  if (positiveContextCounter(latestContextInjection)) {
+    return {
+      source: "memory.lcm.latestContextInjection",
+      kind: latestContextInjection?.kind || null,
+      counters: {
+        inputMessageCount: latestContextInjection.inputMessageCount ?? null,
+        outputMessageCount: latestContextInjection.outputMessageCount ?? null,
+        estimatedTokens: latestContextInjection.estimatedTokens ?? null,
+        injectedMessageCount: latestContextInjection.injectedMessageCount ?? null,
+      },
+    };
+  }
+
+  const agentLcm = isObject(agentSummary?.lcm) ? agentSummary.lcm : null;
+  const agentLcmAssemble = isObject(agentLcm?.assemble) ? agentLcm.assemble : null;
+  if (positiveAssembleCounter(agentLcmAssemble)) {
+    return {
+      source: "agent.summary.lcm.assemble",
+      counters: {
+        messageCount: agentLcmAssemble.messageCount ?? null,
+        estimatedTokens: agentLcmAssemble.estimatedTokens ?? null,
+      },
+    };
+  }
+
+  return null;
+};
+const hindsightProofDetailFrom = (hindsight) => {
+  const latest = isObject(hindsight?.latest) ? hindsight.latest : null;
+  const telemetry = isObject(hindsight?.telemetry) ? hindsight.telemetry : null;
+  const byKind = isObject(telemetry?.byKind) ? telemetry.byKind : null;
+  const latestKind = typeof latest?.kind === "string" ? latest.kind : null;
+  const recallCount = Number(byKind?.hindsight_recall || 0);
+  const retainCount = Number(byKind?.hindsight_retain || 0);
+
+  if (latestKind === "hindsight_recall" || latestKind === "hindsight_retain") {
+    return {
+      source: "memory.hindsight.latest",
+      latestKind,
+      telemetry: {
+        total: telemetry?.total ?? null,
+        hindsightRecall: Number.isFinite(recallCount) ? recallCount : null,
+        hindsightRetain: Number.isFinite(retainCount) ? retainCount : null,
+      },
+    };
+  }
+  if (Number.isFinite(recallCount) && recallCount > 0) {
+    return {
+      source: "memory.hindsight.telemetry.byKind.hindsight_recall",
+      latestKind,
+      count: recallCount,
+    };
+  }
+  if (Number.isFinite(retainCount) && retainCount > 0) {
+    return {
+      source: "memory.hindsight.telemetry.byKind.hindsight_retain",
+      latestKind,
+      count: retainCount,
+    };
+  }
+  if (positiveNumber(telemetry?.total) && nonEmptyString(latestKind)) {
+    return {
+      source: "memory.hindsight.telemetry.total",
+      latestKind,
+      total: telemetry.total,
+    };
+  }
+
+  return null;
+};
 const runtimeResultSummary = (response) => ({
   ok: isObject(response?.result) && Object.hasOwn(response.result, "ok") ? response.result.ok : null,
   status: isObject(response?.result?.request) ? response.result.request.status || null : null,
@@ -309,17 +402,15 @@ const stopRuntime = validateRuntimeLifecycleResponse("runtime stop", stopRespons
 const startRuntime = validateRuntimeLifecycleResponse("runtime start", startResponse);
 const runtime = isObject(status.runtime) ? status.runtime : null;
 const runtimeRunning = runtimeRunningFrom(runtime);
+const stopRuntimeStopped = runtimeStoppedFrom(stopRuntime);
+const startRuntimeRunning = runtimeRunningFrom(startRuntime);
 const recentRequests = Array.isArray(status.controlPlane?.recentRequests)
   ? status.controlPlane.recentRequests
   : [];
 const lcm = isObject(status.memory?.lcm) ? status.memory.lcm : null;
 const hindsight = isObject(status.memory?.hindsight) ? status.memory.hindsight : null;
-const hasLcmProof = Boolean(
-  lcm && (lcm.available === true || isObject(lcm.status) || isObject(lcm.latestContextInjection)),
-);
-const hasHindsightProof = Boolean(
-  hindsight && (hindsight.available === true || isObject(hindsight.latest) || isObject(hindsight.telemetry)),
-);
+const lcmProof = lcmProofDetailFrom({ lcm, agentSummary: status.agent?.summary });
+const hindsightProof = hindsightProofDetailFrom(hindsight);
 const recentRequestById = new Map(
   recentRequests
     .filter((request) => isObject(request) && nonEmptyString(request.requestId))
@@ -350,14 +441,24 @@ const finalRecallRequest = requireFinalStatusRequest("recall", recallRequestId);
 if (status.ok !== true) failures.push("backend status ok must be true");
 if (status.schemaVersion !== 1) failures.push("backend status schemaVersion must be 1");
 if (!runtime) failures.push("backend status must include a runtime object");
+if (!stopRuntimeStopped) {
+  failures.push("runtime stop response must prove the runtime stopped or is not running");
+}
+if (!startRuntimeRunning) {
+  failures.push("runtime start response must prove the runtime is running");
+}
 if (!runtimeRunning) {
   failures.push("final backend runtime must be running after control-plane restart");
 }
-if (!hasLcmProof) {
-  failures.push("final backend status after seed/compact/restart/recall must include LCM telemetry/status proof");
+if (!lcmProof) {
+  failures.push(
+    "final backend status after seed/compact/restart/recall must include operation-specific LCM context handling proof",
+  );
 }
-if (!hasHindsightProof) {
-  failures.push("final backend status after seed/compact/restart/recall must include Hindsight telemetry/status proof");
+if (!hindsightProof) {
+  failures.push(
+    "final backend status after seed/compact/restart/recall must include operation-specific Hindsight recall/retain proof",
+  );
 }
 
 const requestStatuses = recentRequests.map((request) => ({
@@ -381,16 +482,20 @@ const summary = {
   finalSeedRequest: statusSummary(finalSeedRequest),
   finalRecallRequest: statusSummary(finalRecallRequest),
   runtimeStop: runtimeResponseSummary(stopRuntime),
+  runtimeStopStopped: stopRuntimeStopped,
   runtimeStart: runtimeResponseSummary(startRuntime),
+  runtimeStartRunning: startRuntimeRunning,
   runtimeRunning,
   runtimeStatus: runtime?.state?.status || runtime?.status || null,
   agentAvailable: status.agent?.available === true,
   lcmAvailable: lcm?.available === true,
   lcmStatus: lcm?.status?.status || lcm?.status?.ok || null,
   lcmLatestContextKind: lcm?.latestContextInjection?.kind || null,
+  lcmProof,
   hindsightAvailable: hindsight?.available === true,
   hindsightLatestKind: hindsight?.latest?.kind || null,
   hindsightTelemetryTotal: hindsight?.telemetry?.total ?? null,
+  hindsightProof,
   recentRequestStatuses: requestStatuses,
 };
 
