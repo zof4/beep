@@ -52,6 +52,9 @@ curl http://127.0.0.1:8788/api/requests/<id> \
   -H "authorization: Bearer $operator_token"
 ```
 
+Use the top-level `requestId` returned by `POST /api/requests` for
+`GET /api/requests/<id>`, not the nested runtime request ID.
+
 Runtime agent operations are normally reached through the control-plane proxy
 under `/api/agent/...`:
 
@@ -85,6 +88,8 @@ curl -X POST http://127.0.0.1:8788/api/agent/lcm/assemble-preview \
   -d '{"tokenBudget":2048}'
 curl -X POST http://127.0.0.1:8788/api/agent/lcm/rotate \
   -H "authorization: Bearer $operator_token"
+curl http://127.0.0.1:8788/api/agent/lcm/doctor \
+  -H "authorization: Bearer $operator_token"
 ```
 
 Runtime lifecycle also stays behind the control plane:
@@ -103,8 +108,9 @@ curl -X POST "http://127.0.0.1:8788/api/runtimes/$runtime_id/start" \
   transcript after each completed turn.
 - Hindsight remains a local sidecar that feeds LCM ephemeral external-memory
   hints. It is not the canonical transcript store.
-- Backend status exposes sanitized LCM and Hindsight telemetry. It should not
-  expose raw memory files or raw conversation text.
+- The operator-only backend status endpoint exposes sanitized LCM and Hindsight
+  telemetry. It should not expose raw runtime transcripts, raw memory files, or
+  LCM message bodies.
 
 ## Live Proof
 
@@ -112,8 +118,10 @@ curl -X POST "http://127.0.0.1:8788/api/runtimes/$runtime_id/start" \
 Node tests plus shell syntax validation for the live smoke script.
 
 `./scripts/smoke-test-first-usable-backend.sh` is the live Docker/control-plane
-proof. It validates seed, compact, restart, recall, and backend status through
-control-plane routes.
+proof. It validates seed, restart, recall, and backend status through
+control-plane routes, while exercising compact and proving memory through
+request and status results. A runtime-proxy 502 from compact is tolerated by
+the script.
 
 ## Operational Notes
 
