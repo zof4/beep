@@ -9,16 +9,14 @@ import { createStaticSitePreview } from "./static-site-preview.mjs";
 import { DEFAULT_ALLOWED_SCOPES, TOOL_MANIFEST } from "./tool-manifest.mjs";
 import { ToolBrokerError } from "./tool-broker-error.mjs";
 
-function normalizePath(path = "/") {
-  if (typeof path !== "string" || path.trim() === "") return "/";
-  return path.startsWith("/") ? path : `/${path}`;
-}
-
 function normalizePreviewUrlPath(path = "/") {
   if (typeof path !== "string" || /[\u0000-\u001F\u007F\\]/u.test(path)) {
     return "";
   }
   const trimmedPath = path.trim();
+  if (path !== trimmedPath) {
+    return "";
+  }
   if (trimmedPath === "" || trimmedPath.startsWith("//") || /^[A-Za-z][A-Za-z0-9+.-]*:/u.test(trimmedPath)) {
     return "";
   }

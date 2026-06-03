@@ -60,6 +60,8 @@ test("preview port exposure cannot return external URLs from scheme-like paths",
       "javascript:alert(1)",
       "\\\\attacker.test\\x",
       " http://attacker.test/x",
+      " /safe",
+      " safe?x=1",
       "\nhttps://attacker.test/x",
       "/https://attacker.test/x",
       "../x",
@@ -69,6 +71,9 @@ test("preview port exposure cannot return external URLs from scheme-like paths",
       "%2e%2e%2f%2e%2e%2f%2e%2e%2fapi/tools",
       "safe%2f..%2fapi/tools",
       "safe%5c..%5capi/tools",
+      "%zz",
+      "%C0%AF",
+      "%E0%80%AF",
     ];
 
     for (const path of poisoningPaths) {
