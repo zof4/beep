@@ -35,7 +35,14 @@ function captureResponse() {
   };
 }
 
-async function callRoute({ method = "GET", target = "/api/agent", body = null, authOk = true, runtimeResult = null }) {
+async function callRoute({
+  method = "GET",
+  target = "/api/agent",
+  body = null,
+  authOk = true,
+  runtimeResult = null,
+  runtimeError = null,
+}) {
   const calls = [];
   let authCalls = 0;
   const req = request(method, target, {}, body === null ? null : JSON.stringify(body));
@@ -57,6 +64,7 @@ async function callRoute({ method = "GET", target = "/api/agent", body = null, a
     },
     forwardRuntimeRequest: async (path, options = {}) => {
       calls.push({ path, options });
+      if (runtimeError) throw runtimeError;
       return runtimeResult || { ok: true, path };
     },
   });
@@ -138,6 +146,20 @@ test("LCM compact POST parses JSON and passes body object to forwardRuntimeReque
   assert.equal(result.statusCode, 200);
 });
 
+test("LCM record POST parses JSON and proxies to the generic runtime LCM route", async () => {
+  const result = await callRoute({
+    method: "POST",
+    target: "/api/agent/lcm",
+    body: { force: true },
+  });
+
+  assert.equal(result.authCalls, 1);
+  assert.deepEqual(result.calls, [
+    { path: "/agent/lcm", options: { method: "POST", body: { force: true } } },
+  ]);
+  assert.equal(result.statusCode, 200);
+});
+
 test("LCM assemble-preview and rotate POST parse JSON and pass body objects", async () => {
   const assemblePreview = await callRoute({
     method: "POST",
@@ -180,8 +202,37 @@ test("runtime proxy failures return 502 with runtime payload", async () => {
   assert.deepEqual(result.payload, { ok: false, error: "runtime unavailable" });
 });
 
+test("runtime proxy thrown errors return 502 with upstream payload details", async () => {
+  const error = new Error("LCM compact failed");
+  error.status = 409;
+  error.payload = { ok: false, compact: { ok: false, reason: "busy" } };
+  const result = await callRoute({
+    method: "POST",
+    target: "/api/agent/lcm/compact",
+    body: { force: true },
+    runtimeError: error,
+  });
+
+  assert.equal(result.statusCode, 502);
+  assert.deepEqual(result.payload, {
+    ok: false,
+    error: "LCM compact failed",
+    upstreamStatus: 409,
+    upstream: { ok: false, compact: { ok: false, reason: "busy" } },
+  });
+});
+
 test("unsupported methods on known route return 405", async () => {
   const result = await callRoute({ method: "POST", target: "/api/agent/summary", body: { ignored: true } });
+
+  assert.equal(result.authCalls, 1);
+  assert.deepEqual(result.calls, []);
+  assert.equal(result.statusCode, 405);
+  assert.deepEqual(result.payload, { ok: false, error: "method not allowed" });
+});
+
+test("GET on generic LCM POST route returns 405", async () => {
+  const result = await callRoute({ method: "GET", target: "/api/agent/lcm" });
 
   assert.equal(result.authCalls, 1);
   assert.deepEqual(result.calls, []);
@@ -290,6 +341,76 @@ test("createControlPlaneHandler delegates agent routes through managed runtime p
         body: undefined,
       },
     });
+  } finally {
+    cleanup();
+  }
+});
+
+test("createControlPlaneHandler maps thrown runtime proxy payloads to 502", async () => {
+  const { store, cleanup } = tempStore();
+  try {
+    const handler = handlerFor({
+      store,
+      runtimeManager: {
+        status: async () => ({ runtimeId: "local", running: false }),
+        ensureRuntime: async () => ({ runtimeId: "local", running: true }),
+        proxyToRuntime: async () => {
+          const error = new Error("LCM compact failed");
+          error.status = 409;
+          error.payload = { ok: false, compact: { ok: false, reason: "busy" } };
+          throw error;
+        },
+      },
+    });
+
+    const response = captureResponse();
+    await handler(
+      request(
+        "POST",
+        "/api/agent/lcm/compact",
+        { ...operatorHeaders(store), "content-type": "application/json" },
+        JSON.stringify({ force: true }),
+      ),
+      response.response,
+    );
+
+    assert.equal(response.json().statusCode, 502);
+    assert.deepEqual(response.json().payload, {
+      ok: false,
+      error: "LCM compact failed",
+      upstreamStatus: 409,
+      upstream: { ok: false, compact: { ok: false, reason: "busy" } },
+    });
+  } finally {
+    cleanup();
+  }
+});
+
+test("createControlPlaneHandler keeps invalid JSON body errors as 400", async () => {
+  const { store, cleanup } = tempStore();
+  try {
+    const proxyCalls = [];
+    const handler = handlerFor({
+      store,
+      runtimeManager: {
+        status: async () => ({ runtimeId: "local", running: false }),
+        ensureRuntime: async () => ({ runtimeId: "local", running: true }),
+        proxyToRuntime: async (path, options) => {
+          proxyCalls.push({ path, options });
+          return { ok: true };
+        },
+      },
+    });
+
+    const response = captureResponse();
+    await handler(
+      request("POST", "/api/agent/lcm", { ...operatorHeaders(store), "content-type": "application/json" }, "{"),
+      response.response,
+    );
+
+    assert.equal(response.json().statusCode, 400);
+    assert.match(response.json().payload.error, /invalid JSON body/u);
+    assert.deepEqual(proxyCalls, []);
   } finally {
     cleanup();
   }

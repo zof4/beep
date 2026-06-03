@@ -114,6 +114,50 @@ test("runtime manager proxies to runtime with runtime API token", async () => {
   }
 });
 
+test("runtime manager attaches parsed upstream payloads to non-2xx proxy errors", async () => {
+  const originalFetch = globalThis.fetch;
+  const { store, manager, cleanup } = tempManager();
+  try {
+    const token = store.ensureRuntimeApiToken();
+    globalThis.fetch = async (url) => {
+      const requestUrl = new URL(String(url));
+      if (requestUrl.pathname === "/health") {
+        const challenge = requestUrl.searchParams.get("challenge");
+        const { createRuntimeHealthProof } = await import("../../runtime/src/runtime-api-auth.mjs");
+        return {
+          ok: true,
+          json: async () => ({
+            ok: true,
+            service: "beep-agentd",
+            runtimeId: "local",
+            managedProof: createRuntimeHealthProof({ challenge, runtimeApiToken: token }),
+          }),
+        };
+      }
+      return {
+        ok: false,
+        status: 409,
+        statusText: "Conflict",
+        json: async () => ({ ok: false, compact: { ok: false, reason: "busy" } }),
+      };
+    };
+
+    await assert.rejects(
+      () => manager.proxyToRuntime("/agent/lcm/compact", { method: "POST" }),
+      (error) => {
+        assert.equal(error.message, "Conflict");
+        assert.equal(error.status, 409);
+        assert.equal(error.upstreamStatus, 409);
+        assert.deepEqual(error.payload, { ok: false, compact: { ok: false, reason: "busy" } });
+        return true;
+      },
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    cleanup();
+  }
+});
+
 test("runtime compose file declares control-plane boundary environment", () => {
   const compose = readFileSync(join(process.cwd(), "docker/compose.runtime-dev.yml"), "utf8");
 

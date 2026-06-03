@@ -9,6 +9,7 @@ const GET_ROUTES = new Map([
 ]);
 
 const POST_ROUTES = new Map([
+  ["/api/agent/lcm", "/agent/lcm"],
   ["/api/agent/lcm/compact", "/agent/lcm/compact"],
   ["/api/agent/lcm/maintain", "/agent/lcm/maintain"],
   ["/api/agent/lcm/backup", "/agent/lcm/backup"],
@@ -49,6 +50,21 @@ export function unsafeRuntimeAgentRequestTargetError(requestTarget, normalizedPa
   const rawPath = rawPathFromRequestTarget(requestTarget);
   const needsValidation = isRuntimeAgentPath(rawPath) || isRuntimeAgentPath(normalizedPathname);
   return needsValidation ? unsafeEncodedPathError(requestTarget) : null;
+}
+
+function runtimeProxyErrorPayload(error) {
+  const payload = {
+    ok: false,
+    error: error instanceof Error ? error.message : String(error),
+  };
+  const upstreamStatus = error?.upstreamStatus ?? error?.status;
+  if (Number.isInteger(upstreamStatus)) {
+    payload.upstreamStatus = upstreamStatus;
+  }
+  if (error?.payload !== undefined) {
+    payload.upstream = error.payload;
+  }
+  return payload;
 }
 
 function routeFor(pathname, url) {
@@ -102,6 +118,12 @@ export async function handleRuntimeAgentRoute({
     options.body = await readJsonBody(request);
   }
 
-  const result = await forwardRuntimeRequest(route.runtimePath, options);
+  let result = null;
+  try {
+    result = await forwardRuntimeRequest(route.runtimePath, options);
+  } catch (error) {
+    sendJson(response, 502, runtimeProxyErrorPayload(error));
+    return;
+  }
   sendJson(response, result?.ok === false ? 502 : 200, result);
 }

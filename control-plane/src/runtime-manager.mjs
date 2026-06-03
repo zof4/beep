@@ -79,6 +79,8 @@ async function fetchRuntime(path, options = {}) {
   if (!response.ok) {
     const error = new Error(payload?.error || response.statusText);
     error.status = response.status;
+    error.upstreamStatus = response.status;
+    error.payload = payload;
     throw error;
   }
   return payload;
