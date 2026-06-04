@@ -243,6 +243,7 @@ const failures = [];
 
 const isObject = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
 const nonEmptyString = (value) => typeof value === "string" && value.length > 0;
+const finiteNumber = (value) => typeof value === "number" && Number.isFinite(value);
 const numberOrNull = (value) => value === null || (typeof value === "number" && Number.isFinite(value));
 const stringOrNull = (value) => value === null || typeof value === "string";
 const failedStatuses = new Set(["failed", "error", "errored", "cancelled", "canceled", "timeout", "timed_out"]);
@@ -560,6 +561,27 @@ const validateAgentContextStatus = (value) => {
     if (!numberOrNull(value.context.ratio)) {
       failures.push("agent context status context.ratio must be numeric or null");
     }
+    if (!stringOrNull(value.context.lastInjectionAt)) {
+      failures.push("agent context status context.lastInjectionAt must be string or null");
+    }
+    if (value.context.lastInjectionOk !== true) {
+      failures.push("agent context status context.lastInjectionOk must be true after live memory proof");
+    }
+    if (value.context.lastInjectionOk === true && !nonEmptyString(value.context.lastInjectionAt)) {
+      failures.push("agent context status context.lastInjectionAt must be non-empty after live memory proof");
+    }
+    if (!numberOrNull(value.context.inputMessageCount)) {
+      failures.push("agent context status context.inputMessageCount must be numeric or null");
+    }
+    if (finiteNumber(value.context.inputMessageCount) && value.context.inputMessageCount <= 0) {
+      failures.push("agent context status context.inputMessageCount must be positive when present");
+    }
+    if (!numberOrNull(value.context.outputMessageCount)) {
+      failures.push("agent context status context.outputMessageCount must be numeric or null");
+    }
+    if (finiteNumber(value.context.outputMessageCount) && value.context.outputMessageCount <= 0) {
+      failures.push("agent context status context.outputMessageCount must be positive when present");
+    }
     if (typeof value.context.enabled !== "boolean") {
       failures.push("agent context status context.enabled must be boolean");
     }
@@ -570,11 +592,40 @@ const validateAgentContextStatus = (value) => {
   if (value.lcm?.available !== true) {
     failures.push("agent context status must report LCM as available after live memory proof");
   }
+  if (isObject(value.lcm)) {
+    for (const field of [
+      "conversationCount",
+      "messageCount",
+      "contextItemCount",
+      "summaryCount",
+      "messageTokens",
+      "summaryTokens",
+      "summarizedSourceTokens",
+    ]) {
+      if (!finiteNumber(value.lcm[field])) {
+        failures.push(`agent context status lcm.${field} must be numeric`);
+      }
+    }
+    if (!nonEmptyString(value.lcm.lastIngestRequestId)) {
+      failures.push("agent context status lcm.lastIngestRequestId must be non-empty after live memory proof");
+    }
+    if (value.lcm.lastIngestOk !== true) {
+      failures.push("agent context status lcm.lastIngestOk must be true after live memory proof");
+    }
+  }
   if (isObject(value.hindsight) && typeof value.hindsight.available !== "boolean") {
     failures.push("agent context status hindsight.available must be boolean");
   }
   if (isObject(value.hindsight) && typeof value.hindsight.configured !== "boolean") {
     failures.push("agent context status hindsight.configured must be boolean");
+  }
+  if (isObject(value.hindsight)) {
+    if (!finiteNumber(value.hindsight.telemetryCount)) {
+      failures.push("agent context status hindsight.telemetryCount must be numeric");
+    }
+    if (!finiteNumber(value.hindsight.failureCount)) {
+      failures.push("agent context status hindsight.failureCount must be numeric");
+    }
   }
   if (isObject(value.webSearch) && value.webSearch.mode !== "disabled") {
     failures.push("agent context status webSearch.mode must be disabled in this backend slice");
@@ -591,6 +642,9 @@ const validateAgentContextStatus = (value) => {
     }
     if (!Array.isArray(value.webSearch.notes)) {
       failures.push("agent context status webSearch.notes must be an array");
+    }
+    if (Array.isArray(value.webSearch.notes) && !value.webSearch.notes.every((note) => typeof note === "string")) {
+      failures.push("agent context status webSearch.notes must contain only strings");
     }
   }
 
