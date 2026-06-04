@@ -112,6 +112,15 @@ test("summary and events proxy through operator auth and preserve event query st
   assert.deepEqual(events.payload, { ok: true, path: "/agent/events?limit=10" });
 });
 
+test("agent context proxies through operator auth", async () => {
+  const context = await callRoute({ target: "/api/agent/context" });
+
+  assert.equal(context.authCalls, 1);
+  assert.deepEqual(context.calls, [{ path: "/agent/context", options: { method: "GET" } }]);
+  assert.equal(context.statusCode, 200);
+  assert.deepEqual(context.payload, { ok: true, path: "/agent/context" });
+});
+
 test("agent request list and detail proxy to runtime request paths", async () => {
   const list = await callRoute({ target: "/api/agent/requests" });
   assert.deepEqual(list.calls, [{ path: "/agent/requests", options: { method: "GET" } }]);

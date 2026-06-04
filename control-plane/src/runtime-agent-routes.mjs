@@ -3,6 +3,7 @@ import { readJsonBody, sendJson } from "./http-utils.mjs";
 const GET_ROUTES = new Map([
   ["/api/agent", "/agent"],
   ["/api/agent/summary", "/agent/summary"],
+  ["/api/agent/context", "/agent/context"],
   ["/api/agent/requests", "/agent/requests"],
   ["/api/agent/lcm/status", "/agent/lcm/status"],
   ["/api/agent/lcm/doctor", "/agent/lcm/doctor"],
