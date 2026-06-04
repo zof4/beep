@@ -126,6 +126,8 @@ test("MemoryCoordinator retainPiSessionSpan strips injected Hindsight memory and
   assert.equal(result.ok, true);
   assert.equal(retained[0].bankId, "beep:local:ash:beep2");
   assert.equal(retained[0].items[0].document_id, "beep-pi:agent_beep:0:2");
+  assert.equal(retained[0].items[0].metadata.fromMessageEntry, "0");
+  assert.equal(retained[0].items[0].metadata.nextMessageEntryCount, "2");
   assert.match(retained[0].items[0].content, /Remember local-only/);
   assert.match(retained[0].items[0].content, /Confirmed local-only/);
   assert.doesNotMatch(retained[0].items[0].content, /Injected/);

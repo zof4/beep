@@ -80,3 +80,33 @@ test("HindsightService recall sends strict tag filters to the local API", async 
     tags_match: "all_strict",
   });
 });
+
+test("HindsightService formats validation detail arrays in error messages", async () => {
+  const service = new HindsightService(
+    loadHindsightConfig({
+      BEEP_HINDSIGHT_API_URL: "http://hindsight:8888",
+    }),
+    {
+      fetchImpl: async () =>
+        new Response(
+          JSON.stringify({
+            detail: [
+              {
+                loc: ["body", "items", 0, "metadata", "fromMessageEntry"],
+                msg: "Input should be a valid string",
+              },
+            ],
+          }),
+          {
+            status: 422,
+            headers: { "content-type": "application/json" },
+          },
+        ),
+    },
+  );
+
+  await assert.rejects(
+    () => service.retain({ bankId: "beep:local:user:project", items: [] }),
+    /body\.items\.0\.metadata\.fromMessageEntry: Input should be a valid string/,
+  );
+});

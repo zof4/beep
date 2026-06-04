@@ -1,7 +1,7 @@
 import { appendFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import {
-  canonicalMessagesFromEntries,
+  canonicalMemoryMessagesFromEntries,
   extractPiSessionTranscript,
   textFromContent,
 } from "./lcm-service.mjs";
@@ -174,7 +174,7 @@ export class MemoryCoordinator {
       };
     }
     const selectedEntries = transcript.messageEntries.slice(fromMessageEntry, nextMessageEntryCount);
-    const messages = canonicalMessagesFromEntries(selectedEntries);
+    const messages = canonicalMemoryMessagesFromEntries(selectedEntries);
     const content = retainContentFromMessages(messages);
     if (!content) {
       return { ok: true, enabled: true, retained: false, reason: "empty_content" };
@@ -193,8 +193,8 @@ export class MemoryCoordinator {
         runtimeSessionId,
         requestId,
         sessionPath,
-        fromMessageEntry,
-        nextMessageEntryCount,
+        fromMessageEntry: String(fromMessageEntry),
+        nextMessageEntryCount: String(nextMessageEntryCount),
         source: "beep-pi",
       },
     };

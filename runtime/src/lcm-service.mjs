@@ -186,6 +186,18 @@ export function canonicalMessagesFromEntries(entries) {
   });
 }
 
+export function isNoopToolResultMessage(message) {
+  if (!message || typeof message !== "object") return false;
+  if (message.role !== "toolResult" && message.role !== "tool") return false;
+  if (message.isError === true) return false;
+  const text = textFromContent(message.content).trim();
+  return text.length === 0 || text === "(no output)";
+}
+
+export function canonicalMemoryMessagesFromEntries(entries) {
+  return canonicalMessagesFromEntries(entries).filter((message) => !isNoopToolResultMessage(message));
+}
+
 export function messagesWithExternalMemoryHints(messages, externalMemoryHints = null) {
   const hintMessages = renderExternalMemoryHintsAsMessages(externalMemoryHints);
   return [...hintMessages, ...cloneJson(messages)];
@@ -405,8 +417,8 @@ export class LcmService {
     const selectedFromMessageCount = Math.max(0, Number.parseInt(String(fromMessageCount || 0), 10) || 0);
     const transcript = extractPiSessionTranscript(sessionPath);
     const selectedEntries = transcript.messageEntries.slice(selectedFromMessageCount);
-    const messages = canonicalMessagesFromEntries(selectedEntries);
-    const allMessages = canonicalMessagesFromEntries(transcript.messageEntries);
+    const messages = canonicalMemoryMessagesFromEntries(selectedEntries);
+    const allMessages = canonicalMemoryMessagesFromEntries(transcript.messageEntries);
     const sessionId = lcmSessionIdForRuntimeSession(runtimeSessionId);
     const sessionKey = lcmSessionKeyForRuntimeSession(runtimeSessionId);
     const logStart = this.logs.length;
@@ -668,7 +680,7 @@ export class LcmService {
 
   async assemblePreview({ sessionId, sessionKey, sessionPath, tokenBudget, prompt, includeMessages = true }) {
     const transcript = extractPiSessionTranscript(sessionPath);
-    const messages = canonicalMessagesFromEntries(transcript.messageEntries);
+    const messages = canonicalMemoryMessagesFromEntries(transcript.messageEntries);
     return this.exclusive(async () => {
       const { engine } = await this.ready();
       const logStart = this.logs.length;

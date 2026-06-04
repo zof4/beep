@@ -53,6 +53,36 @@ async function responseJson(response) {
   }
 }
 
+function formatErrorDetail(detail) {
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail)) {
+    return detail
+      .map((entry) => {
+        if (!entry || typeof entry !== "object") return String(entry);
+        const loc = Array.isArray(entry.loc) ? entry.loc.join(".") : "";
+        const msg = typeof entry.msg === "string" ? entry.msg : JSON.stringify(entry);
+        return loc ? `${loc}: ${msg}` : msg;
+      })
+      .join("; ");
+  }
+  if (detail && typeof detail === "object") {
+    return JSON.stringify(detail);
+  }
+  return "";
+}
+
+function errorMessageFromPayload(payload, fallback) {
+  if (payload?.detail !== undefined) {
+    const message = formatErrorDetail(payload.detail);
+    if (message) return message;
+  }
+  if (payload?.error !== undefined) {
+    const message = formatErrorDetail(payload.error);
+    if (message) return message;
+  }
+  return fallback;
+}
+
 export class HindsightService {
   constructor(config = loadHindsightConfig(), { fetchImpl = globalThis.fetch } = {}) {
     this.config = config;
@@ -83,7 +113,7 @@ export class HindsightService {
       });
       const payload = await responseJson(response);
       if (!response.ok) {
-        const message = payload?.detail || payload?.error || `Hindsight ${method} ${path} failed with ${response.status}`;
+        const message = errorMessageFromPayload(payload, `Hindsight ${method} ${path} failed with ${response.status}`);
         throw Object.assign(new Error(String(message)), { status: response.status, payload });
       }
       return payload;
