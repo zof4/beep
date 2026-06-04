@@ -1045,6 +1045,7 @@ class AgentSupervisor {
       message: request.message,
       finalText: request.finalText || null,
       error: request.error || null,
+      memoryError: request.memoryError || null,
       lcm: request.lcm || null,
       hindsight: request.hindsight || null,
       promptResult: request.promptResult || null,
@@ -1100,6 +1101,7 @@ class AgentSupervisor {
     request.status = "running";
     request.startedAt = nowIso();
     request.error = null;
+    request.memoryError = null;
     this.state.activeRequestId = request.id;
     this.persistState();
     this.notifyRequest(request);
@@ -1118,25 +1120,41 @@ class AgentSupervisor {
       };
       request.finalText = promptResult.finalText || null;
       if (request.recordLcm) {
-        request.lcm = await session.recordLcm();
-        request.hindsight = await defaultMemoryCoordinator.retainPiSessionSpan({
-          runtimeSessionId: session.id,
-          requestId: request.id,
-          sessionPath: request.lcm.session.path,
-          fromMessageEntry: request.lcm.session.fromMessageEntry,
-          nextMessageEntryCount: request.lcm.session.nextMessageEntryCount,
-          queuePath: join(session.rootDir, "hindsight-retain-queue.jsonl"),
-        });
-        safeRecordHindsightMemory(session, {
-          kind: "hindsight_retain",
-          ok: request.hindsight.ok,
-          enabled: request.hindsight.enabled,
-          requestId: request.id,
-          bankId: request.hindsight.bankId || null,
-          documentId: request.hindsight.documentId || null,
-          queued: request.hindsight.queued === true,
-          error: request.hindsight.error || null,
-        });
+        try {
+          request.lcm = await session.recordLcm();
+          request.hindsight = await defaultMemoryCoordinator.retainPiSessionSpan({
+            runtimeSessionId: session.id,
+            requestId: request.id,
+            sessionPath: request.lcm.session.path,
+            fromMessageEntry: request.lcm.session.fromMessageEntry,
+            nextMessageEntryCount: request.lcm.session.nextMessageEntryCount,
+            queuePath: join(session.rootDir, "hindsight-retain-queue.jsonl"),
+          });
+          safeRecordHindsightMemory(session, {
+            kind: "hindsight_retain",
+            ok: request.hindsight.ok,
+            enabled: request.hindsight.enabled,
+            requestId: request.id,
+            bankId: request.hindsight.bankId || null,
+            documentId: request.hindsight.documentId || null,
+            queued: request.hindsight.queued === true,
+            error: request.hindsight.error || null,
+          });
+        } catch (memoryError) {
+          const memoryErrorMessage = memoryError instanceof Error ? memoryError.message : String(memoryError);
+          request.memoryError = memoryErrorMessage;
+          if (!request.lcm) {
+            request.lcm = {
+              ok: false,
+              error: memoryErrorMessage,
+            };
+          } else if (!request.hindsight) {
+            request.hindsight = {
+              ok: false,
+              error: memoryErrorMessage,
+            };
+          }
+        }
       }
       request.status = "completed";
       request.completedAt = nowIso();

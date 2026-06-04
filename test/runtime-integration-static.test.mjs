@@ -58,6 +58,24 @@ test("agent request records LCM before Hindsight retain", () => {
   assert.ok(lcmIndex < retainIndex, "LCM ingest must happen before Hindsight retain");
 });
 
+test("agent request preserves completed prompt when memory ingest fails", () => {
+  const runRequestIndex = apiSource.indexOf("async runRequest(request)");
+  const promptFinalIndex = apiSource.indexOf("request.finalText = promptResult.finalText || null", runRequestIndex);
+  const lcmIndex = apiSource.indexOf("request.lcm = await session.recordLcm", promptFinalIndex);
+  const memoryCatchIndex = apiSource.indexOf("catch (memoryError)", lcmIndex);
+  const completedIndex = apiSource.indexOf('request.status = "completed"', lcmIndex);
+  const failedIndex = apiSource.indexOf('request.status = "failed"', lcmIndex);
+
+  assert.ok(runRequestIndex > 0, "agent request runner should exist");
+  assert.ok(promptFinalIndex > runRequestIndex, "prompt final text should be stored before memory ingest");
+  assert.ok(lcmIndex > promptFinalIndex, "LCM record call should happen after final text is stored");
+  assert.ok(memoryCatchIndex > lcmIndex, "memory ingest should have its own catch block");
+  assert.ok(memoryCatchIndex < completedIndex, "memory ingest catch should happen before completed status");
+  assert.ok(completedIndex < failedIndex, "memory ingest failure should not skip directly to failed status");
+  assert.match(apiSource, /request\.memoryError = memoryErrorMessage/);
+  assert.match(apiSource, /request\.lcm = \{\s*ok: false,\s*error: memoryErrorMessage,\s*\}/);
+});
+
 test("Pi spawn can load control-plane tools extension independently from LCM context extension", () => {
   const lcmPathIndex = apiSource.indexOf("const LCM_CONTEXT_EXTENSION_PATH");
   const toolsPathIndex = apiSource.indexOf("const CONTROL_PLANE_TOOLS_EXTENSION_PATH");
