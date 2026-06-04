@@ -567,6 +567,9 @@ const validateAgentContextStatus = (value) => {
   if (isObject(value.lcm) && typeof value.lcm.available !== "boolean") {
     failures.push("agent context status lcm.available must be boolean");
   }
+  if (value.lcm?.available !== true) {
+    failures.push("agent context status must report LCM as available after live memory proof");
+  }
   if (isObject(value.hindsight) && typeof value.hindsight.available !== "boolean") {
     failures.push("agent context status hindsight.available must be boolean");
   }

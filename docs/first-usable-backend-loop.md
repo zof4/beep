@@ -113,9 +113,10 @@ curl -X POST "http://127.0.0.1:8788/api/runtimes/$runtime_id/start" \
 - The operator-only backend status and `/api/agent/context` endpoints expose
   sanitized LCM and Hindsight telemetry. `/api/agent/context` is the
   purpose-built operator route for memory/context observability, including
-  `context.pressure`, `lcm.available`, `hindsight.available`, `warnings`, and
-  `webSearch` readiness. Neither endpoint should expose raw runtime
-  transcripts, raw memory files, raw Hindsight memories, or LCM message bodies.
+  `context.pressure`, latest injection and latest ingest telemetry,
+  `lcm.available`, `hindsight.available`, `warnings`, and `webSearch`
+  readiness. Neither endpoint should expose raw runtime transcripts, raw memory
+  files, raw Hindsight memories, or LCM message bodies.
 
 ## Live Proof
 
