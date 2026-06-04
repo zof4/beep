@@ -58,7 +58,7 @@ function latestFailedHindsightEvent(history) {
     .at(-1) || null;
 }
 
-export function calculateContextPressure({ estimatedTokens, tokenBudget }) {
+export function calculateContextPressure({ estimatedTokens, tokenBudget } = {}) {
   const normalizedEstimatedTokens = normalizeTokenCount(estimatedTokens);
   const normalizedTokenBudget = normalizeTokenCount(tokenBudget);
   if (normalizedEstimatedTokens === null || normalizedTokenBudget === null || normalizedTokenBudget <= 0) {

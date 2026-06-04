@@ -5,6 +5,14 @@ import {
   calculateContextPressure,
 } from "../runtime/src/agent-context-status.mjs";
 
+test("calculateContextPressure returns unknown without arguments", () => {
+  assert.deepEqual(calculateContextPressure(), {
+    pressure: "unknown",
+    remainingTokens: null,
+    ratio: null,
+  });
+});
+
 test("calculateContextPressure returns unknown without usable numbers", () => {
   assert.deepEqual(calculateContextPressure({ estimatedTokens: null, tokenBudget: 128000 }), {
     pressure: "unknown",
