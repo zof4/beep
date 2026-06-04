@@ -91,11 +91,11 @@ curl http://127.0.0.1:8787/agent/context \
 
 `GET /agent/context` is the sanitized backend observability contract for memory
 and context health. It reports model and thinking settings, context pressure,
-LCM counters and latest ingest state, Hindsight retain/recall telemetry,
-warnings, and web-search readiness, without exposing raw transcripts, message
-bodies, raw Hindsight memories, or LCM message content. Web search is currently
-reported as readiness and planned execution in this backend slice; live
-execution is not enabled here.
+LCM counters, latest LCM context injection, and latest ingest state, Hindsight
+retain/recall telemetry, warnings, and web-search readiness, without exposing
+raw transcripts, message bodies, raw Hindsight memories, or LCM message content.
+Web search is currently reported as readiness and planned execution in this
+backend slice; live execution is not enabled here.
 
 `beep-agentd` is not the future trust boundary for external tools. It owns the
 sandbox-local agent loop, queue, events, Pi RPC process, and LCM adapter. Future
