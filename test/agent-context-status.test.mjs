@@ -24,6 +24,11 @@ test("calculateContextPressure returns unknown without usable numbers", () => {
     remainingTokens: null,
     ratio: null,
   });
+  assert.deepEqual(calculateContextPressure({ estimatedTokens: -1, tokenBudget: 100 }), {
+    pressure: "unknown",
+    remainingTokens: null,
+    ratio: null,
+  });
 });
 
 test("calculateContextPressure classifies pressure thresholds", () => {
@@ -253,7 +258,7 @@ test("buildAgentContextStatus redacts sensitive strings from observable errors a
   assert.doesNotMatch(serialized, /SECRET_LCM_STATUS_ERROR/u);
   assert.match(status.agent.lastError, /Agent error/u);
   assert.match(status.lcm.statusError, /LCM status error/u);
-  assert.match(status.lcm.lastIngestError, /LCM ingest failed/u);
+  assert.match(status.lcm.lastIngestError, /Memory ingest failed/u);
   assert.match(status.hindsight.latestError, /Hindsight recall failed/u);
 });
 
@@ -285,6 +290,55 @@ test("buildAgentContextStatus bases last LCM ingest on latest request with memor
   assert.equal(status.lcm.lastIngestOk, false);
   assert.match(status.warnings.join("\n"), /latest completed request has memory ingest errors/u);
   assert.doesNotMatch(JSON.stringify(status), /SECRET_OLD_PROMPT/u);
+});
+
+test("buildAgentContextStatus treats memoryError as degraded even when LCM ingest succeeded", () => {
+  const status = buildAgentContextStatus({
+    requests: {
+      req_memory_degraded: {
+        id: "req_memory_degraded",
+        sequence: 1,
+        status: "completed",
+        memoryError: "Hindsight retain failed with SECRET_RETAIN_PAYLOAD",
+        lcm: { ok: true },
+      },
+    },
+    lcmStatus: { ok: true, rowCounts: {}, totals: {} },
+  });
+
+  assert.equal(status.lcm.lastIngestRequestId, "req_memory_degraded");
+  assert.equal(status.lcm.lastIngestOk, false);
+  assert.equal(status.lcm.lastIngestError, "Memory ingest failed.");
+  assert.match(status.warnings.join("\n"), /latest completed request has memory ingest errors/u);
+  assert.doesNotMatch(JSON.stringify(status), /SECRET_RETAIN_PAYLOAD/u);
+});
+
+test("buildAgentContextStatus does not warn about missing injection telemetry for queued or running requests", () => {
+  const status = buildAgentContextStatus({
+    lcmContextEnabled: true,
+    lcmStatus: { ok: true, rowCounts: {}, totals: {} },
+    requests: {
+      req_queued: { id: "req_queued", sequence: 1, status: "queued" },
+      req_running: { id: "req_running", sequence: 2, status: "running" },
+    },
+  });
+
+  assert.doesNotMatch(status.warnings.join("\n"), /no telemetry after processed requests/u);
+});
+
+test("buildAgentContextStatus sanitizes arbitrary web search notes", () => {
+  const status = buildAgentContextStatus({
+    webSearch: {
+      mode: "live",
+      configured: true,
+      provider: "openai-hosted",
+      agentToolAvailable: true,
+      notes: ["provider setup failed with SECRET_WEB_SEARCH_SETUP"],
+    },
+  });
+
+  assert.doesNotMatch(JSON.stringify(status), /SECRET_WEB_SEARCH_SETUP/u);
+  assert.deepEqual(status.webSearch.notes, ["Web search status note redacted."]);
 });
 
 test("buildAgentContextStatus marks configured Hindsight unavailable until telemetry is observed", () => {
@@ -332,4 +386,22 @@ test("buildAgentContextStatus marks Hindsight unavailable when latest event fail
   assert.equal(recallFailed.hindsight.available, false);
   assert.doesNotMatch(JSON.stringify(retainFailed), /SECRET_RETAIN_LATEST/u);
   assert.doesNotMatch(JSON.stringify(recallFailed), /SECRET_RECALL_LATEST/u);
+});
+
+test("buildAgentContextStatus uses Hindsight latest telemetry when history is absent", () => {
+  const status = buildAgentContextStatus({
+    hindsightConfigured: true,
+    sessionStatus: {
+      hindsightMemory: {
+        enabled: true,
+        total: 1,
+        failures: 0,
+        latest: { kind: "hindsight_recall", ok: true },
+      },
+    },
+  });
+
+  assert.equal(status.hindsight.observed, true);
+  assert.equal(status.hindsight.available, true);
+  assert.equal(status.hindsight.latestRecallOk, true);
 });

@@ -15,7 +15,7 @@ function statusSafeError(value, fallback) {
 }
 
 function normalizeTokenCount(value) {
-  return usableNumber(value) ? Math.max(0, Math.round(value)) : null;
+  return usableNumber(value) && value >= 0 ? Math.round(value) : null;
 }
 
 function roundRatio(value) {
@@ -37,6 +37,12 @@ function latestCompletedRequest(requests) {
     .at(-1) || null;
 }
 
+function completedRequestCount(requests) {
+  return sortRequests(requests)
+    .filter((request) => request?.status === "completed")
+    .length;
+}
+
 function latestCompletedLcmIngestRequest(requests) {
   return sortRequests(requests)
     .filter((request) => (
@@ -44,6 +50,12 @@ function latestCompletedLcmIngestRequest(requests) {
       && (request?.lcm || hasText(request?.memoryError))
     ))
     .at(-1) || null;
+}
+
+function memoryIngestOk(request) {
+  if (!request) return null;
+  if (hasText(request.memoryError)) return false;
+  return request?.lcm?.ok ?? null;
 }
 
 function latestHindsightEvent(history, kind) {
@@ -56,6 +68,21 @@ function latestFailedHindsightEvent(history) {
   return (Array.isArray(history) ? history : [])
     .filter((event) => event?.ok === false)
     .at(-1) || null;
+}
+
+function normalizeHindsightHistory(hindsightTelemetry) {
+  const history = Array.isArray(hindsightTelemetry?.history) ? hindsightTelemetry.history : [];
+  if (history.length > 0) return history;
+  return hindsightTelemetry?.latest ? [hindsightTelemetry.latest] : [];
+}
+
+function sanitizeWebSearchNotes(notes) {
+  if (!Array.isArray(notes)) return [DEFAULT_WEB_SEARCH_NOTE];
+  return notes.map((note) => (
+    note === DEFAULT_WEB_SEARCH_NOTE
+      ? DEFAULT_WEB_SEARCH_NOTE
+      : "Web search status note redacted."
+  ));
 }
 
 export function calculateContextPressure({ estimatedTokens, tokenBudget } = {}) {
@@ -110,7 +137,7 @@ export function buildAgentContextStatus({
   const completedRequest = latestCompletedRequest(requests);
   const lcmIngestRequest = latestCompletedLcmIngestRequest(requests);
   const hindsightTelemetry = sessionStatus?.hindsightMemory || {};
-  const hindsightHistory = Array.isArray(hindsightTelemetry.history) ? hindsightTelemetry.history : [];
+  const hindsightHistory = normalizeHindsightHistory(hindsightTelemetry);
   const latestRetain = latestHindsightEvent(hindsightHistory, "hindsight_retain");
   const latestRecall = latestHindsightEvent(hindsightHistory, "hindsight_recall");
   const latestFailedHindsight = latestFailedHindsightEvent(hindsightHistory);
@@ -126,7 +153,7 @@ export function buildAgentContextStatus({
     configured: webSearch?.configured === true,
     provider: webSearch?.provider || null,
     agentToolAvailable: webSearch?.agentToolAvailable === true,
-    notes: Array.isArray(webSearch?.notes) ? webSearch.notes : [DEFAULT_WEB_SEARCH_NOTE],
+    notes: sanitizeWebSearchNotes(webSearch?.notes),
   };
 
   const lcm = {
@@ -140,8 +167,10 @@ export function buildAgentContextStatus({
     summarizedSourceTokens: lcmStatus?.totals?.summarizedSourceTokens ?? 0,
     statusError: statusSafeError(lcmStatusError, "LCM status error."),
     lastIngestRequestId: lcmIngestRequest?.id || null,
-    lastIngestOk: lcmIngestRequest?.lcm?.ok ?? null,
-    lastIngestError: statusSafeError(lcmIngestRequest?.memoryError || lcmIngestRequest?.lcm?.error, "LCM ingest failed."),
+    lastIngestOk: memoryIngestOk(lcmIngestRequest),
+    lastIngestError: hasText(lcmIngestRequest?.memoryError)
+      ? "Memory ingest failed."
+      : statusSafeError(lcmIngestRequest?.lcm?.error, "LCM ingest failed."),
   };
 
   const hindsight = {
@@ -200,7 +229,7 @@ export function buildAgentContextStatus({
     lcmIngestRequest,
     latestRetain,
     latestRecall,
-    requestCount: sortRequests(requests).length,
+    completedRequestCount: completedRequestCount(requests),
   });
 
   return status;
@@ -213,7 +242,7 @@ function statusSafeHindsightError(event) {
   return "Hindsight error.";
 }
 
-function buildWarnings({ status, latestInjection, lcmIngestRequest, latestRetain, latestRecall, requestCount }) {
+function buildWarnings({ status, latestInjection, lcmIngestRequest, latestRetain, latestRecall, completedRequestCount }) {
   const warnings = [];
 
   if (!status.lcm.available) {
@@ -228,7 +257,7 @@ function buildWarnings({ status, latestInjection, lcmIngestRequest, latestRetain
     warnings.push("LCM context injection failed.");
   }
 
-  if (status.context.enabled && !latestInjection && requestCount > 0) {
+  if (status.context.enabled && !latestInjection && completedRequestCount > 0) {
     warnings.push("LCM context injection has no telemetry after processed requests.");
   }
 
