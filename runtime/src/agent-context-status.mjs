@@ -6,8 +6,20 @@ function usableNumber(value) {
   return typeof value === "number" && Number.isFinite(value);
 }
 
-function shortString(value) {
-  return typeof value === "string" && value.trim() ? value.trim() : null;
+function hasText(value) {
+  return typeof value === "string" && value.trim();
+}
+
+function statusSafeError(value, fallback) {
+  return hasText(value) ? fallback : null;
+}
+
+function normalizeTokenCount(value) {
+  return usableNumber(value) ? Math.max(0, Math.round(value)) : null;
+}
+
+function roundRatio(value) {
+  return Math.round(value * 10_000) / 10_000;
 }
 
 function sortRequests(requests) {
@@ -25,6 +37,15 @@ function latestCompletedRequest(requests) {
     .at(-1) || null;
 }
 
+function latestCompletedLcmIngestRequest(requests) {
+  return sortRequests(requests)
+    .filter((request) => (
+      request?.status === "completed"
+      && (request?.lcm || hasText(request?.memoryError))
+    ))
+    .at(-1) || null;
+}
+
 function latestHindsightEvent(history, kind) {
   return (Array.isArray(history) ? history : [])
     .filter((event) => event?.kind === kind)
@@ -38,7 +59,9 @@ function latestFailedHindsightEvent(history) {
 }
 
 export function calculateContextPressure({ estimatedTokens, tokenBudget }) {
-  if (!usableNumber(estimatedTokens) || !usableNumber(tokenBudget) || estimatedTokens < 0 || tokenBudget <= 0) {
+  const normalizedEstimatedTokens = normalizeTokenCount(estimatedTokens);
+  const normalizedTokenBudget = normalizeTokenCount(tokenBudget);
+  if (normalizedEstimatedTokens === null || normalizedTokenBudget === null || normalizedTokenBudget <= 0) {
     return {
       pressure: "unknown",
       remainingTokens: null,
@@ -46,7 +69,7 @@ export function calculateContextPressure({ estimatedTokens, tokenBudget }) {
     };
   }
 
-  const ratio = estimatedTokens / tokenBudget;
+  const ratio = roundRatio(normalizedEstimatedTokens / normalizedTokenBudget);
   let pressure = "low";
   if (ratio >= 0.95) {
     pressure = "critical";
@@ -58,7 +81,7 @@ export function calculateContextPressure({ estimatedTokens, tokenBudget }) {
 
   return {
     pressure,
-    remainingTokens: tokenBudget - estimatedTokens,
+    remainingTokens: Math.max(0, normalizedTokenBudget - normalizedEstimatedTokens),
     ratio,
   };
 }
@@ -77,19 +100,26 @@ export function buildAgentContextStatus({
   webSearch = null,
 } = {}) {
   const latestInjection = sessionStatus?.lcmContextInjection?.latest || null;
-  const tokenBudget = usableNumber(latestInjection?.tokenBudget)
-    ? latestInjection.tokenBudget
-    : lcmContextTokenBudget;
-  const estimatedTokens = usableNumber(latestInjection?.estimatedTokens)
-    ? latestInjection.estimatedTokens
+  const tokenBudget = normalizeTokenCount(latestInjection?.tokenBudget)
+    ?? normalizeTokenCount(lcmContextTokenBudget)
+    ?? DEFAULT_CONTEXT_WINDOW_TOKENS;
+  const estimatedTokens = normalizeTokenCount(latestInjection?.estimatedTokens) !== null
+    ? normalizeTokenCount(latestInjection.estimatedTokens)
     : null;
   const pressure = calculateContextPressure({ estimatedTokens, tokenBudget });
   const completedRequest = latestCompletedRequest(requests);
+  const lcmIngestRequest = latestCompletedLcmIngestRequest(requests);
   const hindsightTelemetry = sessionStatus?.hindsightMemory || {};
   const hindsightHistory = Array.isArray(hindsightTelemetry.history) ? hindsightTelemetry.history : [];
   const latestRetain = latestHindsightEvent(hindsightHistory, "hindsight_retain");
   const latestRecall = latestHindsightEvent(hindsightHistory, "hindsight_recall");
   const latestFailedHindsight = latestFailedHindsightEvent(hindsightHistory);
+  const hindsightObserved = Boolean((hindsightTelemetry?.total ?? hindsightHistory.length) > 0 || hindsightHistory.length > 0);
+  const hindsightLatestFailure = latestRetain?.ok === false || latestRecall?.ok === false;
+  const hindsightAvailable = hindsightConfigured
+    && hindsightObserved
+    && !hindsightLatestFailure
+    && (latestRetain?.ok === true || latestRecall?.ok === true || (hindsightTelemetry?.failures ?? 0) === 0);
   const lcmAvailable = lcmStatus?.ok === true;
   const webSearchStatus = {
     mode: webSearch?.mode || "disabled",
@@ -108,19 +138,20 @@ export function buildAgentContextStatus({
     messageTokens: lcmStatus?.totals?.messageTokens ?? 0,
     summaryTokens: lcmStatus?.totals?.summaryTokens ?? 0,
     summarizedSourceTokens: lcmStatus?.totals?.summarizedSourceTokens ?? 0,
-    statusError: shortString(lcmStatusError),
-    lastIngestRequestId: completedRequest?.id || null,
-    lastIngestOk: completedRequest?.lcm?.ok ?? null,
-    lastIngestError: shortString(completedRequest?.memoryError || completedRequest?.lcm?.error),
+    statusError: statusSafeError(lcmStatusError, "LCM status error."),
+    lastIngestRequestId: lcmIngestRequest?.id || null,
+    lastIngestOk: lcmIngestRequest?.lcm?.ok ?? null,
+    lastIngestError: statusSafeError(lcmIngestRequest?.memoryError || lcmIngestRequest?.lcm?.error, "LCM ingest failed."),
   };
 
   const hindsight = {
-    available: hindsightConfigured ? hindsightTelemetry?.enabled === true : false,
+    available: hindsightAvailable,
     configured: hindsightConfigured,
     enabled: hindsightTelemetry?.enabled === true,
+    observed: hindsightObserved,
     latestRetainOk: latestRetain?.ok ?? null,
     latestRecallOk: latestRecall?.ok ?? null,
-    latestError: shortString(latestFailedHindsight?.error),
+    latestError: statusSafeHindsightError(latestFailedHindsight),
     telemetryCount: hindsightTelemetry?.total ?? hindsightHistory.length,
     failureCount: hindsightTelemetry?.failures ?? hindsightHistory.filter((event) => event?.ok === false).length,
   };
@@ -135,7 +166,7 @@ export function buildAgentContextStatus({
       queueDepth: agentStatus?.queueDepth ?? 0,
       activeRequestId: agentStatus?.activeRequestId || null,
       lastCompletedRequestId: completedRequest?.id || null,
-      lastError: shortString(agentStatus?.lastError),
+      lastError: statusSafeError(agentStatus?.lastError, "Agent error."),
     },
     model: {
       provider: runtimeConfig?.provider || "openai-codex",
@@ -166,7 +197,7 @@ export function buildAgentContextStatus({
   status.warnings = buildWarnings({
     status,
     latestInjection,
-    completedRequest,
+    lcmIngestRequest,
     latestRetain,
     latestRecall,
     requestCount: sortRequests(requests).length,
@@ -175,7 +206,14 @@ export function buildAgentContextStatus({
   return status;
 }
 
-function buildWarnings({ status, latestInjection, completedRequest, latestRetain, latestRecall, requestCount }) {
+function statusSafeHindsightError(event) {
+  if (!hasText(event?.error)) return null;
+  if (event?.kind === "hindsight_retain") return "Hindsight retain failed.";
+  if (event?.kind === "hindsight_recall") return "Hindsight recall failed.";
+  return "Hindsight error.";
+}
+
+function buildWarnings({ status, latestInjection, lcmIngestRequest, latestRetain, latestRecall, requestCount }) {
   const warnings = [];
 
   if (!status.lcm.available) {
@@ -187,18 +225,14 @@ function buildWarnings({ status, latestInjection, completedRequest, latestRetain
   }
 
   if (status.context.enabled && latestInjection?.ok === false) {
-    warnings.push(
-      shortString(latestInjection.error)
-        ? `LCM context injection failed: ${shortString(latestInjection.error)}`
-        : "LCM context injection failed.",
-    );
+    warnings.push("LCM context injection failed.");
   }
 
   if (status.context.enabled && !latestInjection && requestCount > 0) {
     warnings.push("LCM context injection has no telemetry after processed requests.");
   }
 
-  if (completedRequest?.memoryError || completedRequest?.lcm?.ok === false) {
+  if (lcmIngestRequest?.memoryError || lcmIngestRequest?.lcm?.ok === false) {
     warnings.push(
       status.lcm.lastIngestError
         ? `latest completed request has memory ingest errors: ${status.lcm.lastIngestError}`
@@ -212,17 +246,13 @@ function buildWarnings({ status, latestInjection, completedRequest, latestRetain
 
   if (latestRetain?.ok === false) {
     warnings.push(
-      shortString(latestRetain.error)
-        ? `Hindsight retain failed: ${shortString(latestRetain.error)}`
-        : "Hindsight retain failed.",
+      "Hindsight retain failed.",
     );
   }
 
   if (latestRecall?.ok === false) {
     warnings.push(
-      shortString(latestRecall.error)
-        ? `Hindsight recall failed: ${shortString(latestRecall.error)}`
-        : "Hindsight recall failed.",
+      "Hindsight recall failed.",
     );
   }
 
