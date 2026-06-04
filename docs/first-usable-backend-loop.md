@@ -67,6 +67,8 @@ curl http://127.0.0.1:8788/api/agent/requests/<id> \
   -H "authorization: Bearer $operator_token"
 curl "http://127.0.0.1:8788/api/agent/events?limit=20" \
   -H "authorization: Bearer $operator_token"
+curl http://127.0.0.1:8788/api/agent/context \
+  -H "authorization: Bearer $operator_token"
 ```
 
 LCM operations use the same proxy path:
@@ -108,9 +110,12 @@ curl -X POST "http://127.0.0.1:8788/api/runtimes/$runtime_id/start" \
   transcript after each completed turn.
 - Hindsight remains a local sidecar that feeds LCM ephemeral external-memory
   hints. It is not the canonical transcript store.
-- The operator-only backend status endpoint exposes sanitized LCM and Hindsight
-  telemetry. It should not expose raw runtime transcripts, raw memory files, or
-  LCM message bodies.
+- The operator-only backend status and `/api/agent/context` endpoints expose
+  sanitized LCM and Hindsight telemetry. `/api/agent/context` is the
+  purpose-built operator route for memory/context observability, including
+  `context.pressure`, `lcm.available`, `hindsight.available`, `warnings`, and
+  `webSearch` readiness. Neither endpoint should expose raw runtime
+  transcripts, raw memory files, raw Hindsight memories, or LCM message bodies.
 
 ## Live Proof
 

@@ -26,6 +26,7 @@ RUNTIME_START_FILE="$OUTPUT_DIR/runtime-start-response.json"
 RECALL_BODY_FILE="$OUTPUT_DIR/recall-request.json"
 RECALL_OUTPUT_FILE="$OUTPUT_DIR/recall-response.json"
 STATUS_AFTER_FILE="$OUTPUT_DIR/backend-status-after.json"
+CONTEXT_AFTER_FILE="$OUTPUT_DIR/agent-context-after.json"
 
 control_plane_request_http() {
   local method="$1"
@@ -194,21 +195,38 @@ auth_post "/api/runtimes/$RUNTIME_ID/stop" "" "$RUNTIME_STOP_FILE"
 auth_post "/api/runtimes/$RUNTIME_ID/start" "" "$RUNTIME_START_FILE"
 auth_post "/api/requests" "$RECALL_BODY_FILE" "$RECALL_OUTPUT_FILE"
 auth_get "/api/backend/status" "$STATUS_AFTER_FILE"
+auth_get "/api/agent/context" "$CONTEXT_AFTER_FILE"
 
 node --input-type=module - \
   "$STATUS_BEFORE_FILE" \
   "$STATUS_AFTER_FILE" \
+  "$CONTEXT_AFTER_FILE" \
   "$SEED_OUTPUT_FILE" \
   "$RECALL_OUTPUT_FILE" \
   "$RUNTIME_STOP_FILE" \
   "$RUNTIME_START_FILE" <<'NODE'
 import { readFileSync } from "node:fs";
 
-const [beforeStatusPath, statusPath, seedResponsePath, recallResponsePath, stopResponsePath, startResponsePath] =
-  process.argv.slice(2);
-if (!beforeStatusPath || !statusPath || !seedResponsePath || !recallResponsePath || !stopResponsePath || !startResponsePath) {
+const [
+  beforeStatusPath,
+  statusPath,
+  contextStatusPath,
+  seedResponsePath,
+  recallResponsePath,
+  stopResponsePath,
+  startResponsePath,
+] = process.argv.slice(2);
+if (
+  !beforeStatusPath ||
+  !statusPath ||
+  !contextStatusPath ||
+  !seedResponsePath ||
+  !recallResponsePath ||
+  !stopResponsePath ||
+  !startResponsePath
+) {
   console.error(
-    "usage: validator <before-status.json> <final-status.json> <seed-response.json> <recall-response.json> <runtime-stop.json> <runtime-start.json>",
+    "usage: validator <before-status.json> <final-status.json> <context-status.json> <seed-response.json> <recall-response.json> <runtime-stop.json> <runtime-start.json>",
   );
   process.exit(2);
 }
@@ -216,6 +234,7 @@ if (!beforeStatusPath || !statusPath || !seedResponsePath || !recallResponsePath
 const readJson = (path) => JSON.parse(readFileSync(path, "utf8"));
 const beforeStatus = readJson(beforeStatusPath);
 const status = readJson(statusPath);
+const contextStatus = readJson(contextStatusPath);
 const seedResponse = readJson(seedResponsePath);
 const recallResponse = readJson(recallResponsePath);
 const stopResponse = readJson(stopResponsePath);
@@ -224,6 +243,8 @@ const failures = [];
 
 const isObject = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
 const nonEmptyString = (value) => typeof value === "string" && value.length > 0;
+const numberOrNull = (value) => value === null || (typeof value === "number" && Number.isFinite(value));
+const stringOrNull = (value) => value === null || typeof value === "string";
 const failedStatuses = new Set(["failed", "error", "errored", "cancelled", "canceled", "timeout", "timed_out"]);
 const isFailureStatus = (value) => failedStatuses.has(String(value || "").toLowerCase());
 const hasErrorValue = (value) =>
@@ -489,6 +510,111 @@ const requireFinalStatusRequest = (label, requestId) => {
 };
 const finalSeedRequest = requireFinalStatusRequest("seed", seedRequestId);
 const finalRecallRequest = requireFinalStatusRequest("recall", recallRequestId);
+const validateAgentContextStatus = (value) => {
+  const pressureValues = new Set(["unknown", "low", "medium", "high", "critical"]);
+  const forbiddenKeys = new Set(["lastAssistantText", "message", "finalText"]);
+
+  if (!isObject(value)) {
+    failures.push("agent context status must be a JSON object");
+    return null;
+  }
+
+  if (value.ok !== true) failures.push("agent context status ok must be true");
+  if (value.schemaVersion !== 1) failures.push("agent context status schemaVersion must be 1");
+  if (!isObject(value.agent)) failures.push("agent context status must include agent");
+  if (!isObject(value.model)) failures.push("agent context status must include model");
+  if (!isObject(value.context)) failures.push("agent context status must include context");
+  if (!isObject(value.lcm)) failures.push("agent context status must include lcm");
+  if (!isObject(value.hindsight)) failures.push("agent context status must include hindsight");
+  if (!isObject(value.webSearch)) failures.push("agent context status must include webSearch");
+  if (!Array.isArray(value.warnings)) failures.push("agent context status warnings must be an array");
+  if (Array.isArray(value.warnings) && !value.warnings.every((warning) => typeof warning === "string")) {
+    failures.push("agent context status warnings must contain only strings");
+  }
+  if (isObject(value.agent)) {
+    if (!nonEmptyString(value.agent.id)) failures.push("agent context status agent.id must be non-empty");
+    if (!nonEmptyString(value.agent.phase)) failures.push("agent context status agent.phase must be non-empty");
+    if (typeof value.agent.queueDepth !== "number" || !Number.isFinite(value.agent.queueDepth)) {
+      failures.push("agent context status agent.queueDepth must be numeric");
+    }
+  }
+  if (isObject(value.model)) {
+    if (!nonEmptyString(value.model.provider)) failures.push("agent context status model.provider must be non-empty");
+    if (!numberOrNull(value.model.estimatedContextWindowTokens)) {
+      failures.push("agent context status model.estimatedContextWindowTokens must be numeric or null");
+    }
+  }
+  if (isObject(value.context) && !pressureValues.has(value.context.pressure)) {
+    failures.push("agent context status context.pressure must be an expected pressure value");
+  }
+  if (isObject(value.context)) {
+    if (!numberOrNull(value.context.tokenBudget)) {
+      failures.push("agent context status context.tokenBudget must be numeric or null");
+    }
+    if (!numberOrNull(value.context.estimatedTokens)) {
+      failures.push("agent context status context.estimatedTokens must be numeric or null");
+    }
+    if (!numberOrNull(value.context.remainingTokens)) {
+      failures.push("agent context status context.remainingTokens must be numeric or null");
+    }
+    if (!numberOrNull(value.context.ratio)) {
+      failures.push("agent context status context.ratio must be numeric or null");
+    }
+    if (typeof value.context.enabled !== "boolean") {
+      failures.push("agent context status context.enabled must be boolean");
+    }
+  }
+  if (isObject(value.lcm) && typeof value.lcm.available !== "boolean") {
+    failures.push("agent context status lcm.available must be boolean");
+  }
+  if (isObject(value.hindsight) && typeof value.hindsight.available !== "boolean") {
+    failures.push("agent context status hindsight.available must be boolean");
+  }
+  if (isObject(value.hindsight) && typeof value.hindsight.configured !== "boolean") {
+    failures.push("agent context status hindsight.configured must be boolean");
+  }
+  if (isObject(value.webSearch) && value.webSearch.mode !== "disabled") {
+    failures.push("agent context status webSearch.mode must be disabled in this backend slice");
+  }
+  if (isObject(value.webSearch)) {
+    if (typeof value.webSearch.configured !== "boolean") {
+      failures.push("agent context status webSearch.configured must be boolean");
+    }
+    if (typeof value.webSearch.agentToolAvailable !== "boolean") {
+      failures.push("agent context status webSearch.agentToolAvailable must be boolean");
+    }
+    if (!stringOrNull(value.webSearch.provider)) {
+      failures.push("agent context status webSearch.provider must be string or null");
+    }
+    if (!Array.isArray(value.webSearch.notes)) {
+      failures.push("agent context status webSearch.notes must be an array");
+    }
+  }
+
+  const findForbiddenKey = (candidate) => {
+    if (Array.isArray(candidate)) {
+      return candidate.some(findForbiddenKey);
+    }
+    if (!isObject(candidate)) return false;
+    return Object.entries(candidate).some(
+      ([key, nestedValue]) => forbiddenKeys.has(key) || findForbiddenKey(nestedValue),
+    );
+  };
+  if (findForbiddenKey(value)) {
+    failures.push("agent context status must not include raw transcript-like fields");
+  }
+
+  const serialized = JSON.stringify(value);
+  if (serialized.includes("Remember this Beep project rule")) {
+    failures.push("agent context status must not include raw seed prompt text");
+  }
+  if (serialized.includes("Continue from the earlier memory rule")) {
+    failures.push("agent context status must not include raw recall prompt text");
+  }
+
+  return value;
+};
+const agentContext = validateAgentContextStatus(contextStatus);
 
 if (status.ok !== true) failures.push("backend status ok must be true");
 if (status.schemaVersion !== 1) failures.push("backend status schemaVersion must be 1");
@@ -540,6 +666,8 @@ const summary = {
   runtimeRunning,
   runtimeStatus: runtime?.state?.status || runtime?.status || null,
   agentAvailable: status.agent?.available === true,
+  agentContextPressure: agentContext?.context?.pressure || null,
+  agentContextWarnings: Array.isArray(agentContext?.warnings) ? agentContext.warnings : [],
   lcmAvailable: lcm?.available === true,
   lcmStatus: lcm?.status?.status || lcm?.status?.ok || null,
   lcmLatestContextKind: lcm?.latestContextInjection?.kind || null,
@@ -576,6 +704,7 @@ Smoke output files:
   recall request body:    $RECALL_BODY_FILE
   recall response:        $RECALL_OUTPUT_FILE
   final backend status:   $STATUS_AFTER_FILE
+  final agent context:    $CONTEXT_AFTER_FILE
 
 First usable backend control-plane smoke passed.
 EOF
