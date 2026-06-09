@@ -9,6 +9,73 @@ function positiveIntegerEnv(name, fallback) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+const DETAIL_STRING_CAP_BYTES = 128 * 1024;
+const DETAIL_JSON_CAP_BYTES = 256 * 1024;
+const CONTENT_TEXT_CAP_BYTES = 128 * 1024;
+const MIN_PORTAL_TIMEOUT_CUSHION_MS = 1000;
+const MAX_PORTAL_TIMEOUT_CUSHION_MS = 5000;
+
+function truncateText(text, capBytes = DETAIL_STRING_CAP_BYTES) {
+  const buffer = Buffer.from(String(text ?? ""), "utf8");
+  if (buffer.length <= capBytes) return { text: String(text ?? ""), truncated: false };
+  return {
+    text: `${buffer.subarray(0, capBytes).toString("utf8")}\n[output truncated at ${capBytes} bytes]`,
+    truncated: true,
+  };
+}
+
+function sanitizeDetailValue(value) {
+  if (typeof value === "string") return truncateText(value).text;
+  if (value === null || typeof value !== "object") return value;
+  if (Array.isArray(value)) return value.slice(0, 100).map((entry) => sanitizeDetailValue(entry));
+
+  return Object.fromEntries(
+    Object.entries(value)
+      .slice(0, 100)
+      .map(([key, entry]) => [key, sanitizeDetailValue(entry)]),
+  );
+}
+
+function sanitizeDetails(details = {}) {
+  const sanitized = sanitizeDetailValue(details && typeof details === "object" ? details : {});
+  const serialized = JSON.stringify(sanitized);
+  if (Buffer.byteLength(serialized || "", "utf8") <= DETAIL_JSON_CAP_BYTES) return sanitized;
+  const summary = truncateText(serialized, DETAIL_JSON_CAP_BYTES);
+  return {
+    ok: false,
+    detailsTruncated: true,
+    summary: summary.text,
+  };
+}
+
+function sanitizeContent(content, fallbackText) {
+  const fallback = [{ type: "text", text: fallbackText }];
+  const parts = Array.isArray(content) ? content : fallback;
+  const sanitized = [];
+  let remainingTextBytes = CONTENT_TEXT_CAP_BYTES;
+
+  for (const part of parts) {
+    if (sanitized.length >= 100 || remainingTextBytes <= 0) {
+      sanitized.push({ type: "text", text: `[content truncated at ${CONTENT_TEXT_CAP_BYTES} bytes]` });
+      break;
+    }
+
+    if (!part || typeof part !== "object") continue;
+    if (part.type !== "text") {
+      sanitized.push(part);
+      continue;
+    }
+
+    const rawText = String(part.text ?? "");
+    const output = truncateText(rawText, remainingTextBytes);
+    sanitized.push({ ...part, text: output.text });
+    remainingTextBytes -= Math.min(Buffer.byteLength(rawText, "utf8"), remainingTextBytes);
+    if (output.truncated) break;
+  }
+
+  return sanitized.length ? sanitized : fallback;
+}
+
 function maybeOptional(Type, schema) {
   return Type.Optional(schema);
 }
@@ -50,6 +117,14 @@ function timeoutMsForCall(config, toolName, args = {}) {
   return Number.isFinite(seconds) && seconds > 0 ? Math.round(seconds * 1000) : config.timeoutMs;
 }
 
+function requestTimeoutMsForCall(timeoutMs) {
+  const cushion = Math.min(
+    MAX_PORTAL_TIMEOUT_CUSHION_MS,
+    Math.max(MIN_PORTAL_TIMEOUT_CUSHION_MS, Math.ceil(timeoutMs * 0.1)),
+  );
+  return timeoutMs + cushion;
+}
+
 async function callPortal(config, toolName, toolCallId, args) {
   if (!config.url || !config.token) {
     return {
@@ -60,6 +135,7 @@ async function callPortal(config, toolName, toolCallId, args) {
   }
 
   const timeoutMs = timeoutMsForCall(config, toolName, args);
+  const requestTimeoutMs = requestTimeoutMsForCall(timeoutMs);
   try {
     const { response, payload } = await fetchJson(
       config.url,
@@ -71,20 +147,21 @@ async function callPortal(config, toolName, toolCallId, args) {
         },
         body: JSON.stringify({ toolCallId, toolName, args, timeoutMs }),
       },
-      timeoutMs,
+      requestTimeoutMs,
     );
 
     if (!response.ok || payload?.ok === false) {
+      const fallbackText = payload?.error || response.statusText || `${toolName} failed`;
       return {
-        content: payload?.content || [{ type: "text", text: payload?.error || response.statusText || `${toolName} failed` }],
-        details: { ...(payload?.details || {}), ok: false },
+        content: sanitizeContent(payload?.content, fallbackText),
+        details: { ...sanitizeDetails(payload?.details), ok: false },
         isError: true,
       };
     }
 
     return {
-      content: payload?.content || [{ type: "text", text: `${toolName} succeeded.` }],
-      details: payload?.details || {},
+      content: sanitizeContent(payload?.content, `${toolName} succeeded.`),
+      details: sanitizeDetails(payload?.details),
       isError: false,
     };
   } catch (error) {

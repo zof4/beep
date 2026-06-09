@@ -1,8 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { executeSandboxTool } from "../runtime/src/sandbox-tool-executor.mjs";
 
 function tempWorkspace() {
@@ -46,6 +47,29 @@ test("bash reports no output for silent successful commands", async () => {
   }
 });
 
+test("bash bounds large stdout and stderr in content and details", async () => {
+  const { dir, cleanup } = tempWorkspace();
+  try {
+    const result = await executeSandboxTool({
+      toolCallId: "call_bash",
+      toolName: "bash",
+      args: { command: "yes A | head -c 200000; yes B | head -c 200000 >&2" },
+      cwd: dir,
+      timeoutMs: 5000,
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.details.truncated, true);
+    assert.equal(result.details.stdoutTruncated, true);
+    assert.equal(result.details.stderrTruncated, true);
+    assert.ok(result.content[0].text.length < 140_000);
+    assert.ok(result.details.stdout.length < 140_000);
+    assert.ok(result.details.stderr.length < 140_000);
+    assert.match(result.content[0].text, /output truncated/u);
+  } finally {
+    cleanup();
+  }
+});
+
 test("write and read operate under the workspace", async () => {
   const { dir, cleanup } = tempWorkspace();
   try {
@@ -67,6 +91,26 @@ test("write and read operate under the workspace", async () => {
     });
     assert.equal(read.ok, true);
     assert.equal(read.content[0].text, "hello portal\n");
+  } finally {
+    cleanup();
+  }
+});
+
+test("read bounds large file output", async () => {
+  const { dir, cleanup } = tempWorkspace();
+  try {
+    writeFileSync(join(dir, "large.txt"), `${"x".repeat(200_000)}\n`);
+
+    const result = await executeSandboxTool({
+      toolCallId: "call_read",
+      toolName: "read",
+      args: { path: "large.txt" },
+      cwd: dir,
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.details.truncated, true);
+    assert.ok(result.content[0].text.length < 140_000);
+    assert.match(result.content[0].text, /output truncated/u);
   } finally {
     cleanup();
   }
@@ -129,6 +173,26 @@ test("grep returns matches and no-match text in Pi-compatible format", async () 
     });
     assert.equal(noMatch.ok, true);
     assert.equal(noMatch.content[0].text, "No matches found");
+  } finally {
+    cleanup();
+  }
+});
+
+test("grep bounds captured command output", async () => {
+  const { dir, cleanup } = tempWorkspace();
+  try {
+    writeFileSync(join(dir, "large.txt"), `needle ${"x".repeat(200_000)}\n`);
+
+    const result = await executeSandboxTool({
+      toolCallId: "call_grep",
+      toolName: "grep",
+      args: { pattern: "needle", path: "." },
+      cwd: dir,
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.details.truncated, true);
+    assert.ok(result.content[0].text.length < 140_000);
+    assert.match(result.content[0].text, /output truncated/u);
   } finally {
     cleanup();
   }
@@ -227,6 +291,90 @@ test("read rejects paths outside the workspace", async () => {
     });
     assert.equal(result.ok, false);
     assert.match(result.content[0].text, /outside workspace/u);
+  } finally {
+    cleanup();
+  }
+});
+
+test("read rejects symlinks that resolve outside the workspace", async () => {
+  const workspace = tempWorkspace();
+  const outside = tempWorkspace();
+  try {
+    writeFileSync(join(outside.dir, "secret.txt"), "outside\n");
+    symlinkSync(join(outside.dir, "secret.txt"), join(workspace.dir, "link.txt"));
+
+    const result = await executeSandboxTool({
+      toolCallId: "call_read",
+      toolName: "read",
+      args: { path: "link.txt" },
+      cwd: workspace.dir,
+    });
+    assert.equal(result.ok, false);
+    assert.match(result.content[0].text, /outside workspace/u);
+  } finally {
+    workspace.cleanup();
+    outside.cleanup();
+  }
+});
+
+test("write rejects symlink parents that resolve outside the workspace", async () => {
+  const workspace = tempWorkspace();
+  const outside = tempWorkspace();
+  try {
+    symlinkSync(outside.dir, join(workspace.dir, "escape-dir"), "dir");
+
+    const result = await executeSandboxTool({
+      toolCallId: "call_write",
+      toolName: "write",
+      args: { path: "escape-dir/pwned.txt", content: "outside\n" },
+      cwd: workspace.dir,
+    });
+    assert.equal(result.ok, false);
+    assert.match(result.content[0].text, /outside workspace/u);
+    assert.equal(existsSync(join(outside.dir, "pwned.txt")), false);
+  } finally {
+    workspace.cleanup();
+    outside.cleanup();
+  }
+});
+
+test("edit rejects symlinks that resolve outside the workspace", async () => {
+  const workspace = tempWorkspace();
+  const outside = tempWorkspace();
+  try {
+    writeFileSync(join(outside.dir, "secret.txt"), "outside\n");
+    symlinkSync(join(outside.dir, "secret.txt"), join(workspace.dir, "link.txt"));
+
+    const result = await executeSandboxTool({
+      toolCallId: "call_edit",
+      toolName: "edit",
+      args: { path: "link.txt", edits: [{ oldText: "outside", newText: "changed" }] },
+      cwd: workspace.dir,
+    });
+    assert.equal(result.ok, false);
+    assert.match(result.content[0].text, /outside workspace/u);
+    assert.equal(readFileSync(join(outside.dir, "secret.txt"), "utf8"), "outside\n");
+  } finally {
+    workspace.cleanup();
+    outside.cleanup();
+  }
+});
+
+test("bash timeout cleans up background children in the process group", async () => {
+  const { dir, cleanup } = tempWorkspace();
+  try {
+    const result = await executeSandboxTool({
+      toolCallId: "call_bash_timeout",
+      toolName: "bash",
+      args: { command: "(sleep 0.5; touch child-survived.txt) & sleep 5" },
+      cwd: dir,
+      timeoutMs: 100,
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.details.timedOut, true);
+
+    await delay(900);
+    assert.equal(existsSync(join(dir, "child-survived.txt")), false);
   } finally {
     cleanup();
   }

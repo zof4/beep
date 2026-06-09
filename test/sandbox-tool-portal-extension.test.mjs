@@ -142,3 +142,76 @@ test("bash portal tool posts same-name request to runtime route", async () => {
     }
   });
 });
+
+test("bash portal HTTP timeout allows runtime to return structured timeout result", async () => {
+  await withPortalEnv(async () => {
+    const originalFetch = globalThis.fetch;
+    const originalSetTimeout = globalThis.setTimeout;
+    const originalClearTimeout = globalThis.clearTimeout;
+    let seenAbortDelay = null;
+    let seenBody = null;
+
+    globalThis.setTimeout = (callback, delay, ...args) => {
+      seenAbortDelay = delay;
+      return originalSetTimeout(callback, 60_000, ...args);
+    };
+    globalThis.clearTimeout = (timer) => originalClearTimeout(timer);
+    globalThis.fetch = async (_url, options = {}) => {
+      seenBody = JSON.parse(options.body);
+      return {
+        ok: false,
+        statusText: "Request Timeout",
+        json: async () => ({
+          ok: false,
+          content: [{ type: "text", text: "bash timed out" }],
+          details: { timedOut: true },
+        }),
+      };
+    };
+
+    try {
+      const tools = await registeredTools();
+      const bash = tools.find((tool) => tool.name === "bash");
+      const result = await bash.execute("call_bash", { command: "sleep 5", timeout: 0.01 });
+
+      assert.equal(seenBody.timeoutMs, 10);
+      assert.ok(seenAbortDelay > seenBody.timeoutMs);
+      assert.equal(textFromResult(result), "bash timed out");
+      assert.equal(result.details.timedOut, true);
+      assert.equal(result.isError, true);
+    } finally {
+      globalThis.fetch = originalFetch;
+      globalThis.setTimeout = originalSetTimeout;
+      globalThis.clearTimeout = originalClearTimeout;
+    }
+  });
+});
+
+test("portal bounds returned content and details before exposing them to Pi", async () => {
+  await withPortalEnv(async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => ({
+      ok: true,
+      statusText: "OK",
+      json: async () => ({
+        ok: true,
+        content: [{ type: "text", text: "x".repeat(200_000) }],
+        details: { stdout: "y".repeat(200_000), exitCode: 0 },
+      }),
+    });
+
+    try {
+      const tools = await registeredTools();
+      const read = tools.find((tool) => tool.name === "read");
+      const result = await read.execute("call_read", { path: "large.txt" });
+
+      assert.equal(result.isError, false);
+      assert.ok(textFromResult(result).length < 140_000);
+      assert.ok(result.details.stdout.length < 140_000);
+      assert.match(textFromResult(result), /output truncated/u);
+      assert.match(result.details.stdout, /output truncated/u);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
