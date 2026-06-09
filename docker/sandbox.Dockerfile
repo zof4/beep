@@ -10,7 +10,6 @@ RUN apt-get update \
   && apt-get install -y --no-install-recommends \
     bash \
     ca-certificates \
-    curl \
     git \
     jq \
     ripgrep \
@@ -24,9 +23,11 @@ COPY runtime/bin/beep-sandbox-tool-runner /runtime/bin/beep-sandbox-tool-runner
 COPY runtime/src/sandbox-tool-executor.mjs /runtime/src/sandbox-tool-executor.mjs
 COPY runtime/src/sandbox-tool-protocol.mjs /runtime/src/sandbox-tool-protocol.mjs
 
-RUN chmod +x /runtime/bin/beep-sandbox-tool-runner \
+RUN chmod 0555 /runtime /runtime/bin /runtime/src \
+  && chmod 0555 /runtime/bin/beep-sandbox-tool-runner \
+  && chmod 0444 /runtime/src/sandbox-tool-executor.mjs /runtime/src/sandbox-tool-protocol.mjs \
   && mkdir -p /workspace \
-  && chown -R beep:beep /runtime /workspace /home/beep
+  && chown -R beep:beep /workspace /home/beep
 
 USER beep
 WORKDIR /workspace

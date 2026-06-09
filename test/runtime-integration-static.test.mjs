@@ -132,8 +132,17 @@ test("control-plane tools are fail closed by default and Pi env is sanitized", (
 
 test("sandbox image copies the tool runner without credentials", () => {
   const dockerfile = readFileSync(new URL("../docker/sandbox.Dockerfile", import.meta.url), "utf8");
+  const dockerignore = readFileSync(new URL("../.dockerignore", import.meta.url), "utf8");
   assert.match(dockerfile, /COPY runtime\/bin\/beep-sandbox-tool-runner/u);
   assert.match(dockerfile, /COPY runtime\/src\/sandbox-tool-/u);
+  assert.match(dockerfile, /chmod 0555 \/runtime/u);
+  assert.doesNotMatch(dockerfile, /chown -R beep:beep \/runtime/u);
+  assert.doesNotMatch(dockerfile, /\bcurl\b/u);
   assert.match(dockerfile, /USER beep/u);
   assert.doesNotMatch(dockerfile, /CODEX_HOME|auth\.json|BEEP_RUNTIME_API_TOKEN|BEEP_CONTROL_PLANE_RUNTIME_TOKEN/u);
+  assert.match(dockerignore, /^\.codex$/mu);
+  assert.match(dockerignore, /^\.env\.\*$/mu);
+  assert.match(dockerignore, /^auth\.json$/mu);
+  assert.match(dockerignore, /^\*\*\/auth\.json$/mu);
+  assert.match(dockerignore, /^\*\.pem$/mu);
 });
