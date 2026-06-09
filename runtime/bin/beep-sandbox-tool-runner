@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { stdin, stdout, stderr, exit } from "node:process";
+import { stdin, stdout, stderr } from "node:process";
 import { executeSandboxTool } from "../src/sandbox-tool-executor.mjs";
 import { normalizeSandboxToolRequest } from "../src/sandbox-tool-protocol.mjs";
 
@@ -10,17 +10,27 @@ async function readStdin() {
   return input;
 }
 
+async function writeStdoutLine(line) {
+  await new Promise((resolve, reject) => {
+    stdout.write(`${line}\n`, (error) => {
+      if (error) reject(error);
+      else resolve();
+    });
+  });
+}
+
 try {
   const input = await readStdin();
   const body = JSON.parse(input || "{}");
+  const cwd = process.env.BEEP_SANDBOX_WORKSPACE || "/workspace";
   const request = normalizeSandboxToolRequest({
     ...body,
-    cwd: body.cwd || process.env.BEEP_SANDBOX_WORKSPACE || "/workspace",
+    cwd,
   });
   const result = await executeSandboxTool(request);
-  stdout.write(`${JSON.stringify(result)}\n`);
-  exit(result.ok ? 0 : 2);
+  await writeStdoutLine(JSON.stringify(result));
+  process.exitCode = result.ok ? 0 : 2;
 } catch (error) {
   stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
-  exit(1);
+  process.exitCode = 1;
 }

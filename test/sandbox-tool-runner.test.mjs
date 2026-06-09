@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -46,6 +46,57 @@ test("sandbox tool runner executes one normalized request from stdin", async () 
     assert.equal(readFileSync(join(workspace, "proof.txt"), "utf8"), "runner-ok\n");
   } finally {
     rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("sandbox tool runner flushes large JSON results before exiting", async () => {
+  const workspace = mkdtempSync(join(tmpdir(), "beep-runner-large-"));
+  try {
+    const result = await runRunner(
+      {
+        toolCallId: "call_large",
+        toolName: "bash",
+        args: { command: "yes R | head -c 200000" },
+        timeoutMs: 5000,
+      },
+      { cwd: workspace },
+    );
+
+    assert.equal(result.code, 0);
+    const payload = JSON.parse(result.stdout);
+    assert.equal(payload.ok, true);
+    assert.equal(payload.toolCallId, "call_large");
+    assert.equal(payload.details.stdoutTruncated, true);
+    assert.match(payload.content[0].text, /output truncated/u);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("sandbox tool runner ignores stdin cwd overrides", async () => {
+  const workspace = mkdtempSync(join(tmpdir(), "beep-runner-root-"));
+  const outside = mkdtempSync(join(tmpdir(), "beep-runner-outside-"));
+  const outsidePath = join(outside, "secret.txt");
+  try {
+    writeFileSync(outsidePath, "outside-secret\n");
+    const result = await runRunner(
+      {
+        toolCallId: "call_escape",
+        toolName: "read",
+        cwd: "/",
+        args: { path: outsidePath },
+      },
+      { cwd: workspace },
+    );
+
+    assert.equal(result.code, 2);
+    const payload = JSON.parse(result.stdout);
+    assert.equal(payload.ok, false);
+    assert.match(payload.content[0].text, /Path escapes outside workspace/u);
+    assert.doesNotMatch(payload.content[0].text, /outside-secret/u);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
   }
 });
 
