@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { mkdir } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
@@ -11,9 +12,16 @@ const DEFAULT_NAME_PREFIX = "beep-sandbox";
 const DEFAULT_MEMORY = "1024m";
 const DEFAULT_CPUS = "2";
 const DEFAULT_PIDS_LIMIT = "512";
+const DEFAULT_DOCKER_TIMEOUT_MS = 30_000;
+const DEFAULT_DOCKER_MAX_OUTPUT_BYTES = 1024 * 1024;
 
 function stringOption(value, fallback) {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : fallback;
+}
+
+function positiveIntegerOption(value, fallback) {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 function validateSessionId(value) {
@@ -37,6 +45,14 @@ function slug(value, fallback = "sandbox", maxLength = 80) {
     .replace(/^-+|-+$/gu, "")
     .slice(0, maxLength);
   return normalized || fallback;
+}
+
+function shortHash(value) {
+  return createHash("sha256").update(String(value)).digest("hex").slice(0, 16);
+}
+
+function sessionComponent(sessionId) {
+  return `${slug(sessionId, "session", 48)}-${shortHash(sessionId)}`;
 }
 
 function isPathInside(root, candidate) {
@@ -77,47 +93,110 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+function boundedAppend(current, chunk, maxBytes) {
+  if (current.truncated) return current;
+  const nextChunk = String(chunk);
+  const remaining = maxBytes - current.bytes;
+  if (remaining <= 0) return { ...current, truncated: true };
+  const chunkBytes = Buffer.byteLength(nextChunk);
+  if (chunkBytes <= remaining) {
+    return {
+      text: current.text + nextChunk,
+      bytes: current.bytes + chunkBytes,
+      truncated: false,
+    };
+  }
+  return {
+    text: current.text + nextChunk.slice(0, remaining),
+    bytes: maxBytes,
+    truncated: true,
+  };
+}
+
 export function defaultRunDocker(command, args, options = {}) {
   return new Promise((resolvePromise, rejectPromise) => {
+    const timeoutMs = positiveIntegerOption(options.timeoutMs, DEFAULT_DOCKER_TIMEOUT_MS);
+    const maxOutputBytes = positiveIntegerOption(options.maxOutputBytes, DEFAULT_DOCKER_MAX_OUTPUT_BYTES);
     const child = spawn(command, args, {
       cwd: options.cwd,
       env: options.env || process.env,
       stdio: ["pipe", "pipe", "pipe"],
     });
-    let stdout = "";
-    let stderr = "";
+    let stdoutState = { text: "", bytes: 0, truncated: false };
+    let stderrState = { text: "", bytes: 0, truncated: false };
     let settled = false;
+    let timedOut = false;
+    let killTimer = null;
 
     const settle = (callback, value) => {
       if (settled) return;
       settled = true;
+      clearTimeout(timeout);
+      if (killTimer) clearTimeout(killTimer);
       callback(value);
     };
+
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGTERM");
+      killTimer = setTimeout(() => child.kill("SIGKILL"), 1000);
+    }, timeoutMs);
 
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
     child.stdout.on("data", (chunk) => {
-      stdout += chunk;
+      stdoutState = boundedAppend(stdoutState, chunk, maxOutputBytes);
     });
     child.stderr.on("data", (chunk) => {
-      stderr += chunk;
+      stderrState = boundedAppend(stderrState, chunk, maxOutputBytes);
     });
     child.on("error", (error) => {
-      error.stdout = stdout;
-      error.stderr = stderr;
+      error.stdout = stdoutState.text;
+      error.stderr = stderrState.text;
+      error.stdoutTruncated = stdoutState.truncated;
+      error.stderrTruncated = stderrState.truncated;
       settle(rejectPromise, error);
     });
     child.on("close", (code, signal) => {
+      const stdout = stdoutState.text;
+      const stderr = stderrState.text;
+      if (timedOut) {
+        const error = new Error(`${command} ${args.join(" ")} timed out after ${timeoutMs}ms`);
+        error.stdout = stdout;
+        error.stderr = stderr;
+        error.stdoutTruncated = stdoutState.truncated;
+        error.stderrTruncated = stderrState.truncated;
+        error.code = code;
+        error.signal = signal;
+        error.timedOut = true;
+        settle(rejectPromise, error);
+        return;
+      }
       if (code === 0) {
-        settle(resolvePromise, { stdout, stderr, code, signal });
+        settle(resolvePromise, {
+          stdout,
+          stderr,
+          stdoutTruncated: stdoutState.truncated,
+          stderrTruncated: stderrState.truncated,
+          code,
+          signal,
+        });
         return;
       }
       const suffix = stderr || stdout || signal || code;
       const error = new Error(`${command} ${args.join(" ")} failed: ${suffix}`.trim());
       error.stdout = stdout;
       error.stderr = stderr;
+      error.stdoutTruncated = stdoutState.truncated;
+      error.stderrTruncated = stderrState.truncated;
       error.code = code;
       error.signal = signal;
+      settle(rejectPromise, error);
+    });
+    child.stdin.on("error", (error) => {
+      if (error?.code === "EPIPE") return;
+      error.stdout = stdoutState.text;
+      error.stderr = stderrState.text;
       settle(rejectPromise, error);
     });
 
@@ -133,6 +212,8 @@ export class DockerSandboxManager {
     memory = process.env.BEEP_SANDBOX_MEMORY || DEFAULT_MEMORY,
     cpus = process.env.BEEP_SANDBOX_CPUS || DEFAULT_CPUS,
     pidsLimit = process.env.BEEP_SANDBOX_PIDS_LIMIT || DEFAULT_PIDS_LIMIT,
+    dockerTimeoutMs = process.env.BEEP_SANDBOX_DOCKER_TIMEOUT_MS || DEFAULT_DOCKER_TIMEOUT_MS,
+    dockerMaxOutputBytes = process.env.BEEP_SANDBOX_DOCKER_MAX_OUTPUT_BYTES || DEFAULT_DOCKER_MAX_OUTPUT_BYTES,
     runDocker = defaultRunDocker,
   } = {}) {
     this.workspaceRoot = resolve(stringOption(workspaceRoot, DEFAULT_WORKSPACE_ROOT));
@@ -141,13 +222,24 @@ export class DockerSandboxManager {
     this.memory = stringOption(memory, DEFAULT_MEMORY);
     this.cpus = stringOption(cpus, DEFAULT_CPUS);
     this.pidsLimit = stringOption(pidsLimit, DEFAULT_PIDS_LIMIT);
+    this.dockerTimeoutMs = positiveIntegerOption(dockerTimeoutMs, DEFAULT_DOCKER_TIMEOUT_MS);
+    this.dockerMaxOutputBytes = positiveIntegerOption(dockerMaxOutputBytes, DEFAULT_DOCKER_MAX_OUTPUT_BYTES);
     this.runDocker = runDocker;
     this.leases = new Map();
+    this.inflight = new Map();
   }
 
   workspaceFor(sessionId) {
     const normalizedSessionId = validateSessionId(sessionId);
-    return containedPath(this.workspaceRoot, slug(normalizedSessionId));
+    return containedPath(this.workspaceRoot, sessionComponent(normalizedSessionId));
+  }
+
+  runDockerCommand(args, options = {}) {
+    return this.runDocker("docker", args, {
+      timeoutMs: this.dockerTimeoutMs,
+      maxOutputBytes: this.dockerMaxOutputBytes,
+      ...options,
+    });
   }
 
   sandboxDiagnostics(lease, overrides = {}) {
@@ -168,6 +260,7 @@ export class DockerSandboxManager {
         cpus: this.cpus,
         pidsLimit: this.pidsLimit,
       },
+      dockerTimeoutMs: this.dockerTimeoutMs,
       lastHealthyAt: lease?.lastHealthyAt ?? null,
       lastError: overrides.lastError ?? lease?.lastError ?? null,
     };
@@ -194,6 +287,19 @@ export class DockerSandboxManager {
 
   async ensureSandbox(sessionId) {
     const normalizedSessionId = validateSessionId(sessionId);
+    const pending = this.inflight.get(normalizedSessionId);
+    if (pending) return pending;
+
+    const promise = this.ensureSandboxUnlocked(normalizedSessionId);
+    this.inflight.set(normalizedSessionId, promise);
+    try {
+      return await promise;
+    } finally {
+      if (this.inflight.get(normalizedSessionId) === promise) this.inflight.delete(normalizedSessionId);
+    }
+  }
+
+  async ensureSandboxUnlocked(normalizedSessionId) {
     const existing = this.leases.get(normalizedSessionId);
     if (existing) {
       const inspection = await this.inspectContainer(existing.containerId);
@@ -205,15 +311,27 @@ export class DockerSandboxManager {
       }
       existing.status = inspection.status || "missing";
       existing.lastError = inspection.error || `sandbox is ${existing.status}`;
+      await this.removeContainer(existing.containerId);
     }
 
-    const sessionSlug = slug(normalizedSessionId);
-    const generation = Number(existing?.generation || 0) + 1;
+    const sessionSlug = sessionComponent(normalizedSessionId);
     const workspacePath = containedPath(this.workspaceRoot, sessionSlug);
     await mkdir(workspacePath, { recursive: true });
 
+    const discovered = await this.discoverSessionContainers(normalizedSessionId, sessionSlug, workspacePath);
+    const running = discovered
+      .filter((lease) => lease.status === "running")
+      .sort((left, right) => right.generation - left.generation)[0];
+    if (running) {
+      this.leases.set(normalizedSessionId, running);
+      return running;
+    }
+    await Promise.all(discovered.map((lease) => this.removeContainer(lease.containerId)));
+
+    const generation = Math.max(Number(existing?.generation || 0), ...discovered.map((lease) => lease.generation), 0) + 1;
     const name = containerName(this.namePrefix, sessionSlug, generation);
-    const create = await this.runDocker("docker", [
+    let containerId = null;
+    const create = await this.runDockerCommand([
       "create",
       "--name",
       name,
@@ -244,12 +362,17 @@ export class DockerSandboxManager {
       `type=bind,source=${workspacePath},target=/workspace`,
       this.image,
     ]);
-    const containerId = firstOutputLine(create.stdout);
+    containerId = firstOutputLine(create.stdout);
     if (!containerId) {
       throw new Error("Docker did not return a sandbox container id.");
     }
 
-    await this.runDocker("docker", ["start", containerId]);
+    try {
+      await this.runDockerCommand(["start", containerId]);
+    } catch (error) {
+      await this.removeContainer(containerId);
+      throw error;
+    }
     const timestamp = nowIso();
     const lease = {
       sessionId: normalizedSessionId,
@@ -268,17 +391,62 @@ export class DockerSandboxManager {
     return lease;
   }
 
+  async discoverSessionContainers(sessionId, sessionSlug, workspacePath) {
+    try {
+      const result = await this.runDockerCommand([
+        "ps",
+        "-aq",
+        "--filter",
+        "label=beep.sandbox=1",
+        "--filter",
+        `label=beep.sandbox.session=${sessionId}`,
+      ]);
+      const ids = String(result.stdout || "")
+        .split(/\r?\n/u)
+        .map((line) => line.trim())
+        .filter(Boolean);
+      const leases = [];
+      for (const id of ids) {
+        const inspection = await this.inspectContainer(id);
+        const labels = inspection.labels || {};
+        if (labels["beep.sandbox"] !== "1" || labels["beep.sandbox.session"] !== sessionId) continue;
+        const generation = Number.parseInt(labels["beep.sandbox.generation"] || "0", 10);
+        if (!Number.isInteger(generation) || generation <= 0) continue;
+        const timestamp = nowIso();
+        leases.push({
+          sessionId,
+          sessionSlug,
+          generation,
+          containerId: inspection.containerId || id,
+          name: inspection.name || containerName(this.namePrefix, sessionSlug, generation),
+          workspacePath,
+          status: inspection.running ? "running" : inspection.status || "stopped",
+          createdAt: timestamp,
+          startedAt: timestamp,
+          lastHealthyAt: inspection.running ? timestamp : null,
+          lastError: inspection.running ? null : inspection.error || null,
+        });
+      }
+      return leases;
+    } catch {
+      return [];
+    }
+  }
+
   async inspectContainer(containerId) {
     if (!containerId) return { exists: false, running: false, status: "missing", error: "missing container id" };
     try {
-      const result = await this.runDocker("docker", ["inspect", containerId]);
+      const result = await this.runDockerCommand(["inspect", containerId]);
       const payload = JSON.parse(result.stdout);
-      const state = payload?.[0]?.State || {};
+      const container = payload?.[0] || {};
+      const state = container.State || {};
       return {
         exists: true,
         running: Boolean(state.Running),
         status: String(state.Status || (state.Running ? "running" : "stopped")),
-        containerId: payload?.[0]?.Id || containerId,
+        containerId: container.Id || containerId,
+        name: String(container.Name || "").replace(/^\/+/u, ""),
+        labels: container.Config?.Labels || {},
       };
     } catch (error) {
       return {
@@ -293,6 +461,15 @@ export class DockerSandboxManager {
   async isRunning(containerId) {
     const inspection = await this.inspectContainer(containerId);
     return inspection.running;
+  }
+
+  async removeContainer(containerId) {
+    if (!containerId) return;
+    try {
+      await this.runDockerCommand(["rm", "-f", containerId]);
+    } catch {
+      // Best-effort cleanup should not mask the original lifecycle error.
+    }
   }
 
   enrichResultWithDiagnostics(result, lease, extraDiagnostics = {}) {
@@ -313,16 +490,20 @@ export class DockerSandboxManager {
     let lease = null;
     try {
       normalizedSessionId = validateSessionId(sessionId);
-      lease = await this.ensureSandbox(normalizedSessionId);
       const request = normalizeSandboxToolRequest({
         ...input,
         cwd: "/workspace",
-        sandboxGeneration: lease.generation,
       });
+      lease = await this.ensureSandbox(normalizedSessionId);
+      request.sandboxGeneration = lease.generation;
       const result = await this.runDocker(
         "docker",
         ["exec", "-i", lease.containerId, SANDBOX_RUNNER_PATH],
-        { input: `${JSON.stringify(request)}\n` },
+        {
+          timeoutMs: this.dockerTimeoutMs,
+          maxOutputBytes: this.dockerMaxOutputBytes,
+          input: `${JSON.stringify(request)}\n`,
+        },
       );
       lease.status = "running";
       lease.lastHealthyAt = nowIso();
@@ -376,11 +557,7 @@ export class DockerSandboxManager {
     const normalizedSessionId = validateSessionId(sessionId);
     const lease = this.leases.get(normalizedSessionId);
     if (!lease) return null;
-    try {
-      await this.runDocker("docker", ["rm", "-f", lease.containerId]);
-    } catch (error) {
-      lease.lastError = error instanceof Error ? error.message : String(error);
-    }
+    await this.removeContainer(lease.containerId);
     lease.status = "stopped";
     lease.stoppedAt = nowIso();
     return this.leaseSnapshot(lease);
