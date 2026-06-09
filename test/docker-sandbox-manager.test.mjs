@@ -59,10 +59,12 @@ function valuesAfter(args, flag) {
 
 test("creates a labeled non-root sandbox with only the session workspace mounted", async () => {
   const root = mkdtempSync(join(tmpdir(), "beep-sandbox-manager-"));
+  const dockerRoot = mkdtempSync(join(tmpdir(), "beep-sandbox-manager-host-"));
   try {
     const runner = fakeRunner();
     const manager = new DockerSandboxManager({
       workspaceRoot: root,
+      dockerWorkspaceRoot: dockerRoot,
       image: "beep-sandbox:local",
       runDocker: runner.run,
     });
@@ -89,12 +91,14 @@ test("creates a labeled non-root sandbox with only the session workspace mounted
 
     const mounts = valuesAfter(create.args, "--mount");
     assert.equal(mounts.length, 1);
-    assert.equal(mounts[0].startsWith(`type=bind,source=${resolve(root, "agent_beep")}`), true);
+    assert.equal(mounts[0].startsWith(`type=bind,source=${resolve(dockerRoot, "agent_beep")}`), true);
     assert.match(mounts[0], /-[a-f0-9]{16},target=\/workspace$/u);
-    assert.ok(existsSync(mounts[0].match(/source=([^,]+)/u)[1]));
+    assert.ok(existsSync(sandbox.workspacePath));
+    assert.equal(sandbox.dockerWorkspacePath, mounts[0].match(/source=([^,]+)/u)[1]);
     assert.doesNotMatch(create.args.join(" "), /codex|auth\.json|docker\.sock/u);
   } finally {
     rmSync(root, { recursive: true, force: true });
+    rmSync(dockerRoot, { recursive: true, force: true });
   }
 });
 
@@ -144,6 +148,7 @@ test("executes a normalized tool request in the active sandbox", async () => {
     assert.ok(exec);
     assert.equal(exec.command, "docker");
     assert.deepEqual(exec.args, ["exec", "-i", "container_1", "/runtime/bin/beep-sandbox-tool-runner"]);
+    assert.equal(exec.options.timeoutMs, 10_000);
 
     const payload = JSON.parse(exec.options.input);
     assert.equal(payload.schemaVersion, 1);
@@ -152,6 +157,30 @@ test("executes a normalized tool request in the active sandbox", async () => {
     assert.equal(payload.cwd, "/workspace");
     assert.equal(payload.timeoutMs, 5000);
     assert.equal(payload.sandboxGeneration, 1);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("allows the runner timeout to report before the Docker exec wrapper timeout", async () => {
+  const root = mkdtempSync(join(tmpdir(), "beep-sandbox-manager-exec-timeout-"));
+  try {
+    const runner = fakeRunner();
+    const manager = new DockerSandboxManager({
+      workspaceRoot: root,
+      dockerTimeoutMs: 30_000,
+      execTimeoutGraceMs: 5_000,
+      runDocker: runner.run,
+    });
+
+    await manager.executeTool("agent_beep", {
+      toolCallId: "call_1",
+      toolName: "bash",
+      args: { command: "sleep 120" },
+    });
+
+    const exec = runner.calls.find((call) => call.args[0] === "exec");
+    assert.equal(exec.options.timeoutMs, 65_000);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -251,6 +280,52 @@ test("reuses a running labeled container discovered after manager restart", asyn
   }
 });
 
+test("starts and reuses a stopped labeled container discovered after restart", async () => {
+  const root = mkdtempSync(join(tmpdir(), "beep-sandbox-manager-stopped-"));
+  try {
+    const calls = [];
+    const manager = new DockerSandboxManager({
+      workspaceRoot: root,
+      async runDocker(command, args, options = {}) {
+        calls.push({ command, args, options });
+        if (args[0] === "ps") return { stdout: "stopped_container\n", stderr: "" };
+        if (args[0] === "inspect") {
+          const started = calls.some((call) => call.args[0] === "start");
+          return {
+            stdout: JSON.stringify([
+              {
+                Id: "stopped_container",
+                Config: {
+                  Labels: {
+                    "beep.sandbox": "1",
+                    "beep.sandbox.session": "agent_beep",
+                    "beep.sandbox.generation": "2",
+                  },
+                },
+                State: started
+                  ? { Running: true, Status: "running" }
+                  : { Running: false, Status: "exited" },
+              },
+            ]),
+            stderr: "",
+          };
+        }
+        if (args[0] === "start") return { stdout: "stopped_container\n", stderr: "" };
+        throw new Error(`unexpected docker ${args.join(" ")}`);
+      },
+    });
+
+    const sandbox = await manager.ensureSandbox("agent_beep");
+
+    assert.equal(sandbox.containerId, "stopped_container");
+    assert.equal(sandbox.generation, 2);
+    assert.equal(calls.filter((call) => call.args[0] === "start").length, 1);
+    assert.equal(calls.filter((call) => call.args[0] === "rm").length, 0);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("cleans up a created container when start fails", async () => {
   const root = mkdtempSync(join(tmpdir(), "beep-sandbox-manager-start-fail-"));
   try {
@@ -273,6 +348,55 @@ test("cleans up a created container when start fails", async () => {
       calls.filter((call) => call.args[0] === "rm").map((call) => call.args),
       [["rm", "-f", "created_container"]],
     );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("recovers from Docker name conflicts by discovering the winning container", async () => {
+  const root = mkdtempSync(join(tmpdir(), "beep-sandbox-manager-conflict-"));
+  try {
+    const calls = [];
+    const manager = new DockerSandboxManager({
+      workspaceRoot: root,
+      async runDocker(command, args, options = {}) {
+        calls.push({ command, args, options });
+        if (args[0] === "ps") {
+          const conflictSeen = calls.some((call) => call.args[0] === "create");
+          return { stdout: conflictSeen ? "winner_container\n" : "", stderr: "" };
+        }
+        if (args[0] === "inspect") {
+          return {
+            stdout: JSON.stringify([
+              {
+                Id: "winner_container",
+                Config: {
+                  Labels: {
+                    "beep.sandbox": "1",
+                    "beep.sandbox.session": "agent_beep",
+                    "beep.sandbox.generation": "1",
+                  },
+                },
+                State: { Running: true, Status: "running" },
+              },
+            ]),
+            stderr: "",
+          };
+        }
+        if (args[0] === "create") {
+          const error = new Error("Conflict. The container name is already in use.");
+          error.stderr = "Conflict. The container name is already in use.";
+          throw error;
+        }
+        throw new Error(`unexpected docker ${args.join(" ")}`);
+      },
+    });
+
+    const sandbox = await manager.ensureSandbox("agent_beep");
+
+    assert.equal(sandbox.containerId, "winner_container");
+    assert.equal(calls.filter((call) => call.args[0] === "create").length, 1);
+    assert.equal(calls.filter((call) => call.args[0] === "rm").length, 0);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

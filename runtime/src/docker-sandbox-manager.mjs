@@ -14,6 +14,7 @@ const DEFAULT_CPUS = "2";
 const DEFAULT_PIDS_LIMIT = "512";
 const DEFAULT_DOCKER_TIMEOUT_MS = 30_000;
 const DEFAULT_DOCKER_MAX_OUTPUT_BYTES = 1024 * 1024;
+const DEFAULT_EXEC_TIMEOUT_GRACE_MS = 5_000;
 
 function stringOption(value, fallback) {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : fallback;
@@ -87,6 +88,11 @@ function parseJsonObject(text) {
   } catch {
     return null;
   }
+}
+
+function isDockerNameConflict(error) {
+  const text = `${error?.message || ""}\n${error?.stderr || ""}\n${error?.stdout || ""}`;
+  return /Conflict\.|already in use|container name/i.test(text);
 }
 
 function nowIso() {
@@ -207,6 +213,7 @@ export function defaultRunDocker(command, args, options = {}) {
 export class DockerSandboxManager {
   constructor({
     workspaceRoot = process.env.BEEP_SANDBOX_WORKSPACE_ROOT || DEFAULT_WORKSPACE_ROOT,
+    dockerWorkspaceRoot = process.env.BEEP_SANDBOX_DOCKER_WORKSPACE_ROOT || workspaceRoot,
     image = process.env.BEEP_SANDBOX_IMAGE || DEFAULT_IMAGE,
     namePrefix = process.env.BEEP_SANDBOX_NAME_PREFIX || DEFAULT_NAME_PREFIX,
     memory = process.env.BEEP_SANDBOX_MEMORY || DEFAULT_MEMORY,
@@ -214,9 +221,11 @@ export class DockerSandboxManager {
     pidsLimit = process.env.BEEP_SANDBOX_PIDS_LIMIT || DEFAULT_PIDS_LIMIT,
     dockerTimeoutMs = process.env.BEEP_SANDBOX_DOCKER_TIMEOUT_MS || DEFAULT_DOCKER_TIMEOUT_MS,
     dockerMaxOutputBytes = process.env.BEEP_SANDBOX_DOCKER_MAX_OUTPUT_BYTES || DEFAULT_DOCKER_MAX_OUTPUT_BYTES,
+    execTimeoutGraceMs = process.env.BEEP_SANDBOX_EXEC_TIMEOUT_GRACE_MS || DEFAULT_EXEC_TIMEOUT_GRACE_MS,
     runDocker = defaultRunDocker,
   } = {}) {
     this.workspaceRoot = resolve(stringOption(workspaceRoot, DEFAULT_WORKSPACE_ROOT));
+    this.dockerWorkspaceRoot = resolve(stringOption(dockerWorkspaceRoot, this.workspaceRoot));
     this.image = stringOption(image, DEFAULT_IMAGE);
     this.namePrefix = stringOption(namePrefix, DEFAULT_NAME_PREFIX);
     this.memory = stringOption(memory, DEFAULT_MEMORY);
@@ -224,6 +233,7 @@ export class DockerSandboxManager {
     this.pidsLimit = stringOption(pidsLimit, DEFAULT_PIDS_LIMIT);
     this.dockerTimeoutMs = positiveIntegerOption(dockerTimeoutMs, DEFAULT_DOCKER_TIMEOUT_MS);
     this.dockerMaxOutputBytes = positiveIntegerOption(dockerMaxOutputBytes, DEFAULT_DOCKER_MAX_OUTPUT_BYTES);
+    this.execTimeoutGraceMs = positiveIntegerOption(execTimeoutGraceMs, DEFAULT_EXEC_TIMEOUT_GRACE_MS);
     this.runDocker = runDocker;
     this.leases = new Map();
     this.inflight = new Map();
@@ -232,6 +242,11 @@ export class DockerSandboxManager {
   workspaceFor(sessionId) {
     const normalizedSessionId = validateSessionId(sessionId);
     return containedPath(this.workspaceRoot, sessionComponent(normalizedSessionId));
+  }
+
+  dockerWorkspaceFor(sessionId) {
+    const normalizedSessionId = validateSessionId(sessionId);
+    return containedPath(this.dockerWorkspaceRoot, sessionComponent(normalizedSessionId));
   }
 
   runDockerCommand(args, options = {}) {
@@ -250,6 +265,7 @@ export class DockerSandboxManager {
       containerId: lease?.containerId ?? overrides.containerId ?? null,
       containerName: lease?.name ?? overrides.containerName ?? null,
       workspacePath: lease?.workspacePath ?? overrides.workspacePath ?? null,
+      dockerWorkspacePath: lease?.dockerWorkspacePath ?? overrides.dockerWorkspacePath ?? null,
       status: overrides.status ?? lease?.status ?? "unavailable",
       image: this.image,
       runnerPath: SANDBOX_RUNNER_PATH,
@@ -261,6 +277,7 @@ export class DockerSandboxManager {
         pidsLimit: this.pidsLimit,
       },
       dockerTimeoutMs: this.dockerTimeoutMs,
+      execTimeoutGraceMs: this.execTimeoutGraceMs,
       lastHealthyAt: lease?.lastHealthyAt ?? null,
       lastError: overrides.lastError ?? lease?.lastError ?? null,
     };
@@ -275,6 +292,7 @@ export class DockerSandboxManager {
       containerId: lease.containerId,
       name: lease.name,
       workspacePath: lease.workspacePath,
+      dockerWorkspacePath: lease.dockerWorkspacePath,
       status: lease.status,
       createdAt: lease.createdAt,
       startedAt: lease.startedAt,
@@ -316,9 +334,10 @@ export class DockerSandboxManager {
 
     const sessionSlug = sessionComponent(normalizedSessionId);
     const workspacePath = containedPath(this.workspaceRoot, sessionSlug);
+    const dockerWorkspacePath = containedPath(this.dockerWorkspaceRoot, sessionSlug);
     await mkdir(workspacePath, { recursive: true });
 
-    const discovered = await this.discoverSessionContainers(normalizedSessionId, sessionSlug, workspacePath);
+    const discovered = await this.discoverSessionContainers(normalizedSessionId, sessionSlug, workspacePath, dockerWorkspacePath);
     const running = discovered
       .filter((lease) => lease.status === "running")
       .sort((left, right) => right.generation - left.generation)[0];
@@ -326,42 +345,59 @@ export class DockerSandboxManager {
       this.leases.set(normalizedSessionId, running);
       return running;
     }
+    const recoveredStopped = await this.recoverDiscoveredLease(discovered);
+    if (recoveredStopped) {
+      this.leases.set(normalizedSessionId, recoveredStopped);
+      return recoveredStopped;
+    }
     await Promise.all(discovered.map((lease) => this.removeContainer(lease.containerId)));
 
     const generation = Math.max(Number(existing?.generation || 0), ...discovered.map((lease) => lease.generation), 0) + 1;
     const name = containerName(this.namePrefix, sessionSlug, generation);
     let containerId = null;
-    const create = await this.runDockerCommand([
-      "create",
-      "--name",
-      name,
-      "--label",
-      "beep.sandbox=1",
-      "--label",
-      `beep.sandbox.session=${normalizedSessionId}`,
-      "--label",
-      `beep.sandbox.generation=${generation}`,
-      "--read-only",
-      "--tmpfs",
-      "/tmp:size=256m,mode=1777",
-      "--security-opt",
-      "no-new-privileges:true",
-      "--cap-drop",
-      "ALL",
-      "--user",
-      "beep",
-      "--network",
-      "none",
-      "--memory",
-      this.memory,
-      "--cpus",
-      this.cpus,
-      "--pids-limit",
-      this.pidsLimit,
-      "--mount",
-      `type=bind,source=${workspacePath},target=/workspace`,
-      this.image,
-    ]);
+    let create = null;
+    try {
+      create = await this.runDockerCommand([
+        "create",
+        "--name",
+        name,
+        "--label",
+        "beep.sandbox=1",
+        "--label",
+        `beep.sandbox.session=${normalizedSessionId}`,
+        "--label",
+        `beep.sandbox.generation=${generation}`,
+        "--read-only",
+        "--tmpfs",
+        "/tmp:size=256m,mode=1777",
+        "--security-opt",
+        "no-new-privileges:true",
+        "--cap-drop",
+        "ALL",
+        "--user",
+        "beep",
+        "--network",
+        "none",
+        "--memory",
+        this.memory,
+        "--cpus",
+        this.cpus,
+        "--pids-limit",
+        this.pidsLimit,
+        "--mount",
+        `type=bind,source=${dockerWorkspacePath},target=/workspace`,
+        this.image,
+      ]);
+    } catch (error) {
+      if (isDockerNameConflict(error)) {
+        const recovered = await this.recoverFromNameConflict(normalizedSessionId, sessionSlug, workspacePath, dockerWorkspacePath);
+        if (recovered) {
+          this.leases.set(normalizedSessionId, recovered);
+          return recovered;
+        }
+      }
+      throw error;
+    }
     containerId = firstOutputLine(create.stdout);
     if (!containerId) {
       throw new Error("Docker did not return a sandbox container id.");
@@ -381,6 +417,7 @@ export class DockerSandboxManager {
       containerId,
       name,
       workspacePath,
+      dockerWorkspacePath,
       status: "running",
       createdAt: timestamp,
       startedAt: timestamp,
@@ -391,7 +428,7 @@ export class DockerSandboxManager {
     return lease;
   }
 
-  async discoverSessionContainers(sessionId, sessionSlug, workspacePath) {
+  async discoverSessionContainers(sessionId, sessionSlug, workspacePath, dockerWorkspacePath) {
     try {
       const result = await this.runDockerCommand([
         "ps",
@@ -420,6 +457,7 @@ export class DockerSandboxManager {
           containerId: inspection.containerId || id,
           name: inspection.name || containerName(this.namePrefix, sessionSlug, generation),
           workspacePath,
+          dockerWorkspacePath,
           status: inspection.running ? "running" : inspection.status || "stopped",
           createdAt: timestamp,
           startedAt: timestamp,
@@ -430,6 +468,37 @@ export class DockerSandboxManager {
       return leases;
     } catch {
       return [];
+    }
+  }
+
+  async recoverFromNameConflict(sessionId, sessionSlug, workspacePath, dockerWorkspacePath) {
+    const discovered = await this.discoverSessionContainers(sessionId, sessionSlug, workspacePath, dockerWorkspacePath);
+    const running = discovered
+      .sort((left, right) => right.generation - left.generation)
+      .find((lease) => lease.status === "running");
+    if (running) return running;
+    return this.recoverDiscoveredLease(discovered);
+  }
+
+  async recoverDiscoveredLease(discovered) {
+    const stopped = discovered.sort((left, right) => right.generation - left.generation)[0];
+    if (!stopped) return null;
+    try {
+      await this.runDockerCommand(["start", stopped.containerId]);
+      stopped.status = "running";
+      stopped.startedAt = nowIso();
+      stopped.lastHealthyAt = stopped.startedAt;
+      stopped.lastError = null;
+      return stopped;
+    } catch {
+      const inspection = await this.inspectContainer(stopped.containerId);
+      if (inspection.running) {
+        stopped.status = inspection.status || "running";
+        stopped.lastHealthyAt = nowIso();
+        stopped.lastError = null;
+        return stopped;
+      }
+      return null;
     }
   }
 
@@ -500,7 +569,7 @@ export class DockerSandboxManager {
         "docker",
         ["exec", "-i", lease.containerId, SANDBOX_RUNNER_PATH],
         {
-          timeoutMs: this.dockerTimeoutMs,
+          timeoutMs: request.timeoutMs + this.execTimeoutGraceMs,
           maxOutputBytes: this.dockerMaxOutputBytes,
           input: `${JSON.stringify(request)}\n`,
         },
