@@ -62,7 +62,11 @@ function sanitizeContent(content, fallbackText) {
 
     if (!part || typeof part !== "object") continue;
     if (part.type !== "text") {
-      sanitized.push(part);
+      const partType = typeof part.type === "string" && part.type ? part.type : "unknown";
+      const placeholder = `[non-text content omitted: ${partType}]`;
+      const output = truncateText(placeholder, remainingTextBytes);
+      sanitized.push({ type: "text", text: output.text });
+      remainingTextBytes -= Math.min(Buffer.byteLength(placeholder, "utf8"), remainingTextBytes);
       continue;
     }
 

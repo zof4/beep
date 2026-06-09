@@ -215,3 +215,31 @@ test("portal bounds returned content and details before exposing them to Pi", as
     }
   });
 });
+
+test("portal omits non-text content payloads before exposing them to Pi", async () => {
+  await withPortalEnv(async () => {
+    const originalFetch = globalThis.fetch;
+    const largePayload = "x".repeat(200_000);
+    globalThis.fetch = async () => ({
+      ok: true,
+      statusText: "OK",
+      json: async () => ({
+        ok: true,
+        content: [{ type: "image", mimeType: "image/png", data: largePayload }],
+        details: { exitCode: 0 },
+      }),
+    });
+
+    try {
+      const tools = await registeredTools();
+      const read = tools.find((tool) => tool.name === "read");
+      const result = await read.execute("call_read", { path: "image.bin" });
+
+      assert.equal(result.isError, false);
+      assert.deepEqual(result.content, [{ type: "text", text: "[non-text content omitted: image]" }]);
+      assert.equal(JSON.stringify(result.content).includes(largePayload), false);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
