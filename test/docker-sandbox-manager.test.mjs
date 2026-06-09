@@ -353,6 +353,50 @@ test("cleans up a created container when start fails", async () => {
   }
 });
 
+test("adopts a created container when a peer starts it before start returns", async () => {
+  const root = mkdtempSync(join(tmpdir(), "beep-sandbox-manager-start-race-"));
+  try {
+    const calls = [];
+    const manager = new DockerSandboxManager({
+      workspaceRoot: root,
+      async runDocker(command, args, options = {}) {
+        calls.push({ command, args, options });
+        if (args[0] === "ps") return { stdout: "", stderr: "" };
+        if (args[0] === "create") return { stdout: "container_1\n", stderr: "" };
+        if (args[0] === "start") throw new Error("container is already running");
+        if (args[0] === "inspect") {
+          return {
+            stdout: JSON.stringify([
+              {
+                Id: "container_1",
+                Config: {
+                  Labels: {
+                    "beep.sandbox": "1",
+                    "beep.sandbox.session": "agent_beep",
+                    "beep.sandbox.generation": "1",
+                  },
+                },
+                State: { Running: true, Status: "running" },
+              },
+            ]),
+            stderr: "",
+          };
+        }
+        if (args[0] === "rm") throw new Error("should not remove running peer container");
+        return { stdout: "", stderr: "" };
+      },
+    });
+
+    const sandbox = await manager.ensureSandbox("agent_beep");
+
+    assert.equal(sandbox.containerId, "container_1");
+    assert.equal(sandbox.status, "running");
+    assert.equal(calls.filter((call) => call.args[0] === "rm").length, 0);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("recovers from Docker name conflicts by discovering the winning container", async () => {
   const root = mkdtempSync(join(tmpdir(), "beep-sandbox-manager-conflict-"));
   try {

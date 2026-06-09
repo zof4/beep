@@ -406,6 +406,26 @@ export class DockerSandboxManager {
     try {
       await this.runDockerCommand(["start", containerId]);
     } catch (error) {
+      const inspection = await this.inspectContainer(containerId);
+      if (inspection.running) {
+        const timestamp = nowIso();
+        const recoveredLease = {
+          sessionId: normalizedSessionId,
+          sessionSlug,
+          generation,
+          containerId: inspection.containerId || containerId,
+          name: inspection.name || name,
+          workspacePath,
+          dockerWorkspacePath,
+          status: inspection.status || "running",
+          createdAt: timestamp,
+          startedAt: timestamp,
+          lastHealthyAt: timestamp,
+          lastError: null,
+        };
+        this.leases.set(normalizedSessionId, recoveredLease);
+        return recoveredLease;
+      }
       await this.removeContainer(containerId);
       throw error;
     }
