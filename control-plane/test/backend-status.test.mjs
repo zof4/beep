@@ -600,6 +600,56 @@ test("buildBackendStatus sanitizes agent summary while exposing memory telemetry
   }
 });
 
+test("buildBackendStatus includes sanitized sandbox telemetry when runtime reports it", async () => {
+  const { store, cleanup } = tempStore();
+  try {
+    const status = await buildBackendStatus({
+      store,
+      runtimeManager: {
+        status: async () => ({ runtimeId: "local", running: true, health: { service: "beep-agentd" } }),
+      },
+      toolBroker: { manifest: () => ({ tools: [] }) },
+      forwardRuntimeRequest: async (path) => {
+        if (path === "/agent/summary") {
+          return {
+            ok: true,
+            summary: {
+              sessionId: "agent_beep",
+              sandbox: {
+                backend: "docker",
+                active: [
+                  {
+                    sessionId: "agent_beep",
+                    generation: 2,
+                    status: "running",
+                    workspacePath: "/workspace/sandboxes/agent_beep",
+                    dockerWorkspacePath: "/srv/beep/workspaces/sandboxes/agent_beep",
+                    diagnostics: {
+                      containerName: "beep-sandbox-agent_beep-2",
+                      runnerPath: "/runtime/bin/beep-sandbox-tool-runner",
+                    },
+                  },
+                ],
+              },
+            },
+          };
+        }
+        if (path === "/agent/lcm/status") return { ok: true, lcm: { available: true } };
+        return { ok: true };
+      },
+    });
+
+    assert.equal(status.agent.summary.sandbox.backend, "docker");
+    assert.equal(status.agent.summary.sandbox.active[0].generation, 2);
+    assert.equal(status.agent.summary.sandbox.active[0].status, "running");
+    assert.equal(status.agent.summary.sandbox.active[0].workspacePath, undefined);
+    assert.equal(status.agent.summary.sandbox.active[0].dockerWorkspacePath, undefined);
+    assert.equal(status.agent.summary.sandbox.active[0].diagnostics.runnerPath, undefined);
+  } finally {
+    cleanup();
+  }
+});
+
 test("buildBackendStatus treats ok false runtime summary payload as unavailable", async () => {
   const { store, cleanup } = tempStore();
   try {

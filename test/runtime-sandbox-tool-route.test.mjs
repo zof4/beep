@@ -42,3 +42,10 @@ test("runtime sandbox route preserves auth and validation boundaries", () => {
   assert.doesNotMatch(sandboxToolsSource, /workspaceRoot: SANDBOX_WORKSPACE_ROOT/u);
   assert.doesNotMatch(sandboxToolsSource, /dockerWorkspaceRoot: SANDBOX_DOCKER_WORKSPACE_ROOT/u);
 });
+
+test("runtime agent status and summaries expose sandbox manager telemetry", () => {
+  assert.match(apiSource, /sandbox: \{/u);
+  assert.match(apiSource, /backend: SANDBOX_TOOL_BACKEND/u);
+  assert.match(apiSource, /active: defaultSandboxManager\.status\(\)/u);
+  assert.match(apiSource, /active: defaultSandboxManager\.status\(this\.id\)/u);
+});

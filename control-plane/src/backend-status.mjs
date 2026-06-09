@@ -164,6 +164,10 @@ function safeAgentSummary(agentSummaryResponse) {
     safe.lcm = sanitizeOperationalObject(summary.lcm);
   }
 
+  if (isPlainObject(summary.sandbox)) {
+    safe.sandbox = sanitizeOperationalObject(summary.sandbox);
+  }
+
   return safe;
 }
 

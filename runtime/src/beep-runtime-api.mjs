@@ -671,6 +671,10 @@ class PiRpcSession {
       lcm: readJsonFile(this.lcmSummaryPath, null),
       lcmContextInjection: this.readLcmContextInjection(),
       hindsightMemory: this.readHindsightMemory(),
+      sandbox: {
+        backend: SANDBOX_TOOL_BACKEND,
+        active: defaultSandboxManager.status(this.id),
+      },
       ...extra,
     };
     writeJsonFile(this.summaryPath, summary);
@@ -1058,6 +1062,10 @@ class AgentSupervisor {
           .sort((left, right) => String(right.createdAt).localeCompare(String(left.createdAt)))
           .slice(0, 20)
           .map((request) => this.publicRequest(request)),
+      },
+      sandbox: {
+        backend: SANDBOX_TOOL_BACKEND,
+        active: defaultSandboxManager.status(),
       },
       session: this.session && !this.session.closed ? this.session.status() : readSessionStatus(this.sessionId),
       lastError: this.state.lastError,
