@@ -72,7 +72,7 @@ function sanitizeContent(content, fallbackText) {
 
     const rawText = String(part.text ?? "");
     const output = truncateText(rawText, remainingTextBytes);
-    sanitized.push({ ...part, text: output.text });
+    sanitized.push({ type: "text", text: output.text });
     remainingTextBytes -= Math.min(Buffer.byteLength(rawText, "utf8"), remainingTextBytes);
     if (output.truncated) break;
   }

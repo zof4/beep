@@ -243,3 +243,31 @@ test("portal omits non-text content payloads before exposing them to Pi", async 
     }
   });
 });
+
+test("portal strips extra fields from text content before exposing it to Pi", async () => {
+  await withPortalEnv(async () => {
+    const originalFetch = globalThis.fetch;
+    const largePayload = "x".repeat(200_000);
+    globalThis.fetch = async () => ({
+      ok: true,
+      statusText: "OK",
+      json: async () => ({
+        ok: true,
+        content: [{ type: "text", text: "ok", data: largePayload }],
+        details: { exitCode: 0 },
+      }),
+    });
+
+    try {
+      const tools = await registeredTools();
+      const read = tools.find((tool) => tool.name === "read");
+      const result = await read.execute("call_read", { path: "hello.txt" });
+
+      assert.equal(result.isError, false);
+      assert.deepEqual(result.content, [{ type: "text", text: "ok" }]);
+      assert.equal(JSON.stringify(result.content).includes(largePayload), false);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
