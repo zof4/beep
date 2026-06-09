@@ -26,6 +26,7 @@ test("runtime API token protects control routes while health and capabilities st
     ["POST", "/sessions"],
     ["POST", "/sessions/sess_1/prompt"],
     ["POST", "/runs"],
+    ["POST", "/internal/sandbox/tools/call"],
   ]) {
     assert.deepEqual(
       authorizeRuntimeApiRequest({
@@ -54,6 +55,15 @@ test("runtime API token protects control routes while health and capabilities st
 
   assert.deepEqual(
     authorizeRuntimeApiRequest({
+      pathname: "/internal/sandbox/tools/call",
+      authorization: "Bearer runtime-api-secret",
+      runtimeApiToken: "runtime-api-secret",
+    }),
+    { ok: true, required: true },
+  );
+
+  assert.deepEqual(
+    authorizeRuntimeApiRequest({
       pathname: "/sessions",
       authorization: "Bearer wrong-token",
       runtimeApiToken: "runtime-api-secret",
@@ -71,6 +81,20 @@ test("runtime API protected routes fail closed when no runtime API token is conf
   assert.deepEqual(
     authorizeRuntimeApiRequest({
       pathname: "/agent",
+      authorization: "",
+      runtimeApiToken: "",
+    }),
+    {
+      ok: false,
+      required: true,
+      status: 503,
+      error: "Runtime API bearer token is not configured.",
+    },
+  );
+
+  assert.deepEqual(
+    authorizeRuntimeApiRequest({
+      pathname: "/internal/sandbox/tools/call",
       authorization: "",
       runtimeApiToken: "",
     }),

@@ -137,7 +137,12 @@ test("runtime routes sandbox tools through Docker manager before LCM-only intern
   assert.match(apiSource, /const SANDBOX_TOOL_BACKEND = process\.env\.BEEP_SANDBOX_TOOL_BACKEND \|\| "docker"/);
   assert.match(apiSource, /const SANDBOX_DOCKER_WORKSPACE_ROOT = process\.env\.BEEP_SANDBOX_DOCKER_WORKSPACE_ROOT \|\| SANDBOX_WORKSPACE_ROOT/);
   assert.match(apiSource, /const defaultSandboxManager = new DockerSandboxManager\(\{[\s\S]*dockerWorkspaceRoot: SANDBOX_DOCKER_WORKSPACE_ROOT/);
-  assert.match(apiSource, /sandboxTools: \{[\s\S]*backend: SANDBOX_TOOL_BACKEND[\s\S]*dockerWorkspaceRoot: SANDBOX_DOCKER_WORKSPACE_ROOT/);
+  assert.match(
+    apiSource,
+    /sandboxTools: \{[\s\S]*backend: SANDBOX_TOOL_BACKEND[\s\S]*dockerWorkspaceRootConfigured: Boolean\(process\.env\.BEEP_SANDBOX_DOCKER_WORKSPACE_ROOT\)/,
+  );
+  assert.match(apiSource, /function sandboxRouteSessionId\(value\)/);
+  assert.match(apiSource, /const status = error\?\.statusCode \|\| error\?\.status \|\| 500/);
 
   const internalRouteIndex = apiSource.indexOf("async function handleInternalRoute");
   const sandboxRouteIndex = apiSource.indexOf('resource === "sandbox" && action === "tools"', internalRouteIndex);

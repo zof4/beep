@@ -11,6 +11,9 @@ export function runtimeApiAuthRequired(pathname) {
     .split("/")
     .filter(Boolean);
   const root = parts[0] || "";
+  if (root === "internal") {
+    return parts.length === 4 && parts[1] === "sandbox" && parts[2] === "tools" && parts[3] === "call";
+  }
   return PROTECTED_RUNTIME_API_ROOTS.has(root) || root === "runs";
 }
 

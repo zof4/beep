@@ -23,3 +23,22 @@ test("runtime sandbox route uses DockerSandboxManager in host-loop mode", () => 
   assert.match(apiSource, /BEEP_SANDBOX_DOCKER_WORKSPACE_ROOT/u);
   assert.match(apiSource, /dockerWorkspaceRoot: SANDBOX_DOCKER_WORKSPACE_ROOT/u);
 });
+
+test("runtime sandbox route preserves auth and validation boundaries", () => {
+  const sandboxToolsStart = apiSource.indexOf("sandboxTools: {");
+  const sandboxToolsEnd = apiSource.indexOf("\n    },", sandboxToolsStart);
+  const sandboxToolsSource = apiSource.slice(sandboxToolsStart, sandboxToolsEnd);
+
+  assert.match(apiSource, /BEEP_SANDBOX_LOCAL_BACKEND_ENABLED/u);
+  assert.match(apiSource, /function sandboxRouteSessionId\(value\)/u);
+  assert.match(apiSource, /if \(SANDBOX_TOOL_BACKEND === "local"\)/u);
+  assert.match(apiSource, /if \(!SANDBOX_LOCAL_BACKEND_ENABLED\)/u);
+  assert.match(apiSource, /cwd: SANDBOX_TOOL_BACKEND === "local" \? WORKSPACE_DIR : "\/workspace"/u);
+  assert.match(apiSource, /const status = error\?\.statusCode \|\| error\?\.status \|\| 500/u);
+  assert.match(sandboxToolsSource, /localBackendEnabled: SANDBOX_LOCAL_BACKEND_ENABLED/u);
+  assert.match(sandboxToolsSource, /workspaceRootConfigured: Boolean\(process\.env\.BEEP_SANDBOX_WORKSPACE_ROOT\)/u);
+  assert.match(sandboxToolsSource, /dockerWorkspaceRootConfigured: Boolean\(process\.env\.BEEP_SANDBOX_DOCKER_WORKSPACE_ROOT\)/u);
+  assert.doesNotMatch(sandboxToolsSource, /workspaceDir: WORKSPACE_DIR/u);
+  assert.doesNotMatch(sandboxToolsSource, /workspaceRoot: SANDBOX_WORKSPACE_ROOT/u);
+  assert.doesNotMatch(sandboxToolsSource, /dockerWorkspaceRoot: SANDBOX_DOCKER_WORKSPACE_ROOT/u);
+});

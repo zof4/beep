@@ -58,6 +58,8 @@ const CONTROL_PLANE_RUNTIME_ID = process.env.BEEP_CONTROL_PLANE_RUNTIME_ID || "l
 const CONTROL_PLANE_RUNTIME_TOKEN = process.env.BEEP_CONTROL_PLANE_RUNTIME_TOKEN || "";
 const CONTROL_PLANE_TOOL_TIMEOUT_MS = process.env.BEEP_CONTROL_PLANE_TOOL_TIMEOUT_MS || "15000";
 const SANDBOX_TOOL_BACKEND = process.env.BEEP_SANDBOX_TOOL_BACKEND || "docker";
+const SANDBOX_LOCAL_BACKEND_ENABLED =
+  ["1", "true", "yes", "on"].includes(String(process.env.BEEP_SANDBOX_LOCAL_BACKEND_ENABLED || "0").toLowerCase());
 const SANDBOX_WORKSPACE_ROOT = process.env.BEEP_SANDBOX_WORKSPACE_ROOT || join(WORKSPACE_DIR, "sandboxes");
 const SANDBOX_DOCKER_WORKSPACE_ROOT = process.env.BEEP_SANDBOX_DOCKER_WORKSPACE_ROOT || SANDBOX_WORKSPACE_ROOT;
 const DEFAULT_PROMPT_TIMEOUT_MS = 10 * 60 * 1000;
@@ -1445,9 +1447,9 @@ async function handleCapabilities(_req, res) {
       route: "POST /internal/sandbox/tools/call",
       tools: ["bash", "read", "write", "edit", "ls", "grep", "find"],
       auth: "runtime-api-token",
-      workspaceDir: WORKSPACE_DIR,
-      workspaceRoot: SANDBOX_WORKSPACE_ROOT,
-      dockerWorkspaceRoot: SANDBOX_DOCKER_WORKSPACE_ROOT,
+      localBackendEnabled: SANDBOX_LOCAL_BACKEND_ENABLED,
+      workspaceRootConfigured: Boolean(process.env.BEEP_SANDBOX_WORKSPACE_ROOT),
+      dockerWorkspaceRootConfigured: Boolean(process.env.BEEP_SANDBOX_DOCKER_WORKSPACE_ROOT),
     },
     current: runtimeConfig,
     paths: {
@@ -1586,26 +1588,44 @@ async function handleRun(req, res) {
   });
 }
 
+function sandboxRouteSessionId(value) {
+  if (value === undefined || value === null || value === "") return agentSupervisor.sessionId;
+  if (typeof value !== "string") {
+    throw Object.assign(new Error("sessionId must be a string."), { status: 400 });
+  }
+  if (value.length > 256) {
+    throw Object.assign(new Error("sessionId must be 256 characters or fewer."), { status: 400 });
+  }
+  if (/[\u0000-\u001f\u007f]/u.test(value)) {
+    throw Object.assign(new Error("sessionId must not contain control characters."), { status: 400 });
+  }
+  return value;
+}
+
 async function handleSandboxToolRoute(req, res) {
   try {
     const body = await readRequestJson(req);
     if (!body || typeof body !== "object" || Array.isArray(body)) {
       throw Object.assign(new Error("Sandbox tool request body must be an object."), { status: 400 });
     }
+    const sessionId = sandboxRouteSessionId(body.sessionId);
     const request = normalizeSandboxToolRequest({
       ...body,
-      cwd: body.cwd || (SANDBOX_TOOL_BACKEND === "local" ? WORKSPACE_DIR : "/workspace"),
+      cwd: SANDBOX_TOOL_BACKEND === "local" ? WORKSPACE_DIR : "/workspace",
     });
-    const sessionId =
-      typeof body.sessionId === "string" && body.sessionId ? body.sessionId : agentSupervisor.sessionId;
-    const result =
-      SANDBOX_TOOL_BACKEND === "local"
-        ? await executeSandboxTool(request)
-        : await defaultSandboxManager.executeTool(sessionId, request);
+    let result;
+    if (SANDBOX_TOOL_BACKEND === "local") {
+      if (!SANDBOX_LOCAL_BACKEND_ENABLED) {
+        throw Object.assign(new Error("Local sandbox tool backend is disabled."), { status: 503 });
+      }
+      result = await executeSandboxTool(request);
+    } else {
+      result = await defaultSandboxManager.executeTool(sessionId, request);
+    }
     jsonResponse(res, result.ok ? 200 : 422, result);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    const status = error?.status === 400 || error?.statusCode === 400 ? 400 : 500;
+    const status = error?.statusCode || error?.status || 500;
     routeError(res, status, message);
   }
 }
@@ -1619,7 +1639,7 @@ async function handleInternalRoute(req, res, _url, parts) {
   const resource = parts[1] || "";
   const action = parts[2] || "";
 
-  if (resource === "sandbox" && action === "tools" && parts[3] === "call") {
+  if (resource === "sandbox" && action === "tools" && parts[3] === "call" && parts.length === 4) {
     if (req.method !== "POST") {
       routeError(res, 405, "Unsupported method for POST /internal/sandbox/tools/call route.");
       return;
