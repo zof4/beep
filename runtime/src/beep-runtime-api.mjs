@@ -13,7 +13,10 @@ import {
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { resolveCodexAccessToken } from "./codex-auth-for-pi.mjs";
+import { DockerSandboxManager } from "./docker-sandbox-manager.mjs";
 import { authorizeRuntimeApiRequest, createRuntimeHealthProof } from "./runtime-api-auth.mjs";
+import { executeSandboxTool } from "./sandbox-tool-executor.mjs";
+import { normalizeSandboxToolRequest } from "./sandbox-tool-protocol.mjs";
 import {
   defaultLcmService,
   lcmSessionIdForRuntimeSession,
@@ -54,6 +57,9 @@ const CONTROL_PLANE_URL = process.env.BEEP_CONTROL_PLANE_URL || "";
 const CONTROL_PLANE_RUNTIME_ID = process.env.BEEP_CONTROL_PLANE_RUNTIME_ID || "local";
 const CONTROL_PLANE_RUNTIME_TOKEN = process.env.BEEP_CONTROL_PLANE_RUNTIME_TOKEN || "";
 const CONTROL_PLANE_TOOL_TIMEOUT_MS = process.env.BEEP_CONTROL_PLANE_TOOL_TIMEOUT_MS || "15000";
+const SANDBOX_TOOL_BACKEND = process.env.BEEP_SANDBOX_TOOL_BACKEND || "docker";
+const SANDBOX_WORKSPACE_ROOT = process.env.BEEP_SANDBOX_WORKSPACE_ROOT || join(WORKSPACE_DIR, "sandboxes");
+const SANDBOX_DOCKER_WORKSPACE_ROOT = process.env.BEEP_SANDBOX_DOCKER_WORKSPACE_ROOT || SANDBOX_WORKSPACE_ROOT;
 const DEFAULT_PROMPT_TIMEOUT_MS = 10 * 60 * 1000;
 const DEFAULT_RPC_TIMEOUT_MS = 60 * 1000;
 const MAX_REQUEST_BYTES = Number.parseInt(process.env.BEEP_MAX_REQUEST_BYTES || `${8 * 1024 * 1024}`, 10);
@@ -61,6 +67,10 @@ const EVENT_MEMORY_LIMIT = 2_000;
 const THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh"]);
 
 const sessions = new Map();
+const defaultSandboxManager = new DockerSandboxManager({
+  workspaceRoot: SANDBOX_WORKSPACE_ROOT,
+  dockerWorkspaceRoot: SANDBOX_DOCKER_WORKSPACE_ROOT,
+});
 
 function nowIso() {
   return new Date().toISOString();
@@ -1429,6 +1439,16 @@ async function handleCapabilities(_req, res) {
       timeoutMs: Number(CONTROL_PLANE_TOOL_TIMEOUT_MS),
       route: "POST /internal/tools/call",
     },
+    sandboxTools: {
+      enabled: true,
+      backend: SANDBOX_TOOL_BACKEND,
+      route: "POST /internal/sandbox/tools/call",
+      tools: ["bash", "read", "write", "edit", "ls", "grep", "find"],
+      auth: "runtime-api-token",
+      workspaceDir: WORKSPACE_DIR,
+      workspaceRoot: SANDBOX_WORKSPACE_ROOT,
+      dockerWorkspaceRoot: SANDBOX_DOCKER_WORKSPACE_ROOT,
+    },
     current: runtimeConfig,
     paths: {
       stateDir: STATE_DIR,
@@ -1475,6 +1495,7 @@ async function handleCapabilities(_req, res) {
       "POST /sessions/:id/rpc",
       "POST /sessions/:id/lcm",
       "DELETE /sessions/:id",
+      "POST /internal/sandbox/tools/call",
       "POST /runs",
     ],
     piRpcCommands: [
@@ -1565,6 +1586,30 @@ async function handleRun(req, res) {
   });
 }
 
+async function handleSandboxToolRoute(req, res) {
+  try {
+    const body = await readRequestJson(req);
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      throw Object.assign(new Error("Sandbox tool request body must be an object."), { status: 400 });
+    }
+    const request = normalizeSandboxToolRequest({
+      ...body,
+      cwd: body.cwd || (SANDBOX_TOOL_BACKEND === "local" ? WORKSPACE_DIR : "/workspace"),
+    });
+    const sessionId =
+      typeof body.sessionId === "string" && body.sessionId ? body.sessionId : agentSupervisor.sessionId;
+    const result =
+      SANDBOX_TOOL_BACKEND === "local"
+        ? await executeSandboxTool(request)
+        : await defaultSandboxManager.executeTool(sessionId, request);
+    jsonResponse(res, result.ok ? 200 : 422, result);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const status = error?.status === 400 || error?.statusCode === 400 ? 400 : 500;
+    routeError(res, status, message);
+  }
+}
+
 function internalTokenAuthorized(req) {
   const authorization = String(req.headers.authorization || "");
   return authorization === `Bearer ${LCM_CONTEXT_TOKEN}`;
@@ -1573,6 +1618,15 @@ function internalTokenAuthorized(req) {
 async function handleInternalRoute(req, res, _url, parts) {
   const resource = parts[1] || "";
   const action = parts[2] || "";
+
+  if (resource === "sandbox" && action === "tools" && parts[3] === "call") {
+    if (req.method !== "POST") {
+      routeError(res, 405, "Unsupported method for POST /internal/sandbox/tools/call route.");
+      return;
+    }
+    await handleSandboxToolRoute(req, res);
+    return;
+  }
 
   if (resource !== "lcm" || action !== "context") {
     routeError(res, 404, `Unknown internal route: ${req.method} /${parts.join("/")}`);

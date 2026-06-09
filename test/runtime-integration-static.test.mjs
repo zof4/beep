@@ -130,6 +130,23 @@ test("control-plane tools are fail closed by default and Pi env is sanitized", (
   );
 });
 
+test("runtime routes sandbox tools through Docker manager before LCM-only internal handling", () => {
+  assert.match(apiSource, /import \{ DockerSandboxManager \} from "\.\/docker-sandbox-manager\.mjs"/);
+  assert.match(apiSource, /import \{ executeSandboxTool \} from "\.\/sandbox-tool-executor\.mjs"/);
+  assert.match(apiSource, /import \{ normalizeSandboxToolRequest \} from "\.\/sandbox-tool-protocol\.mjs"/);
+  assert.match(apiSource, /const SANDBOX_TOOL_BACKEND = process\.env\.BEEP_SANDBOX_TOOL_BACKEND \|\| "docker"/);
+  assert.match(apiSource, /const SANDBOX_DOCKER_WORKSPACE_ROOT = process\.env\.BEEP_SANDBOX_DOCKER_WORKSPACE_ROOT \|\| SANDBOX_WORKSPACE_ROOT/);
+  assert.match(apiSource, /const defaultSandboxManager = new DockerSandboxManager\(\{[\s\S]*dockerWorkspaceRoot: SANDBOX_DOCKER_WORKSPACE_ROOT/);
+  assert.match(apiSource, /sandboxTools: \{[\s\S]*backend: SANDBOX_TOOL_BACKEND[\s\S]*dockerWorkspaceRoot: SANDBOX_DOCKER_WORKSPACE_ROOT/);
+
+  const internalRouteIndex = apiSource.indexOf("async function handleInternalRoute");
+  const sandboxRouteIndex = apiSource.indexOf('resource === "sandbox" && action === "tools"', internalRouteIndex);
+  const lcmOnlyIndex = apiSource.indexOf('resource !== "lcm" || action !== "context"', internalRouteIndex);
+  assert.ok(internalRouteIndex > 0, "internal route handler should exist");
+  assert.ok(sandboxRouteIndex > internalRouteIndex, "sandbox route should be handled inside internal route dispatch");
+  assert.ok(lcmOnlyIndex > sandboxRouteIndex, "sandbox route should dispatch before LCM-only rejection");
+});
+
 test("sandbox image copies the tool runner without credentials", () => {
   const dockerfile = readFileSync(new URL("../docker/sandbox.Dockerfile", import.meta.url), "utf8");
   const dockerignore = readFileSync(new URL("../.dockerignore", import.meta.url), "utf8");
