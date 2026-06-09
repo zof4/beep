@@ -3,6 +3,10 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
 const apiSource = readFileSync(new URL("../runtime/src/beep-runtime-api.mjs", import.meta.url), "utf8");
+const sandboxPortalRuntimeSource = readFileSync(
+  new URL("../runtime/pi-extensions/sandbox-tool-portal-runtime.mjs", import.meta.url),
+  "utf8",
+);
 
 test("internal LCM context route calls MemoryCoordinator before LCM assemble", () => {
   const recallIndex = apiSource.indexOf("defaultMemoryCoordinator.recallForContext");
@@ -128,6 +132,71 @@ test("control-plane tools are fail closed by default and Pi env is sanitized", (
     /if \(controlPlaneToolsExtensionLoaded\) \{[\s\S]*env\.BEEP_CONTROL_PLANE_RUNTIME_TOKEN = CONTROL_PLANE_RUNTIME_TOKEN/,
     "runtime tool token should be assigned inside the control-plane tools loaded guard",
   );
+});
+
+test("trusted Pi loop can load the sandbox tool portal extension", () => {
+  assert.match(apiSource, /const SANDBOX_TOOL_PORTAL_ENABLED\s*=/);
+  assert.match(apiSource, /const SANDBOX_TOOL_PORTAL_EXTENSION_PATH\s*=/);
+  assert.match(apiSource, /process\.env\.BEEP_SANDBOX_TOOL_PORTAL_ENABLED\s*\|\|\s*"1"/);
+  assert.match(
+    apiSource,
+    /process\.env\.BEEP_SANDBOX_TOOL_PORTAL_EXTENSION_PATH\s*\|\|\s*"\/runtime\/pi-extensions\/sandbox-tool-portal-extension\.mjs"/,
+  );
+  assert.match(
+    apiSource,
+    /const SANDBOX_TOOL_PORTAL_URL\s*=[\s\S]*`http:\/\/127\.0\.0\.1:\$\{API_PORT\}\/internal\/sandbox\/tools\/call`/,
+  );
+  assert.match(
+    apiSource,
+    /const SANDBOX_TOOL_PORTAL_TIMEOUT_MS\s*=\s*process\.env\.BEEP_SANDBOX_TOOL_PORTAL_TIMEOUT_MS\s*\|\|\s*"60000"/,
+  );
+  assert.match(
+    apiSource,
+    /function buildPiChildEnv\(session, \{ lcmContextExtensionLoaded, controlPlaneToolsExtensionLoaded, sandboxToolPortalExtensionLoaded \}\)/,
+  );
+  assert.match(
+    apiSource,
+    /BEEP_SANDBOX_TOOL_PORTAL_ENABLED:\s*sandboxToolPortalExtensionLoaded \? "1" : "0"/,
+  );
+  assert.match(
+    apiSource,
+    /if \(sandboxToolPortalExtensionLoaded\) \{[\s\S]*env\.BEEP_SANDBOX_TOOL_PORTAL_URL = SANDBOX_TOOL_PORTAL_URL[\s\S]*env\.BEEP_SANDBOX_TOOL_PORTAL_TOKEN = RUNTIME_API_TOKEN[\s\S]*env\.BEEP_SANDBOX_TOOL_PORTAL_TIMEOUT_MS = SANDBOX_TOOL_PORTAL_TIMEOUT_MS[\s\S]*\}/,
+    "portal URL, token, and timeout should only be assigned when the portal extension is loaded",
+  );
+  assert.doesNotMatch(
+    apiSource,
+    /BEEP_SANDBOX_TOOL_PORTAL_TOKEN:\s*RUNTIME_API_TOKEN/,
+    "runtime API token must not be unconditionally exposed to Pi",
+  );
+
+  const lcmLoadedIndex = apiSource.indexOf("const lcmContextExtensionLoaded");
+  const portalLoadedIndex = apiSource.indexOf("const sandboxToolPortalExtensionLoaded");
+  const toolsLoadedIndex = apiSource.indexOf("const controlPlaneToolsExtensionLoaded");
+  const lcmPushIndex = apiSource.indexOf('args.push("--extension", LCM_CONTEXT_EXTENSION_PATH)');
+  const portalPushIndex = apiSource.indexOf('args.push("--extension", SANDBOX_TOOL_PORTAL_EXTENSION_PATH)');
+  const toolsPushIndex = apiSource.indexOf('args.push("--extension", CONTROL_PLANE_TOOLS_EXTENSION_PATH)');
+
+  assert.ok(portalLoadedIndex > lcmLoadedIndex, "sandbox portal extension loading should happen after LCM");
+  assert.ok(toolsLoadedIndex > portalLoadedIndex, "control-plane tools loading should happen after sandbox portal");
+  assert.ok(portalPushIndex > lcmPushIndex, "sandbox portal extension arg should be pushed after LCM");
+  assert.ok(toolsPushIndex > portalPushIndex, "control-plane tools extension arg should be pushed after sandbox portal");
+  assert.match(
+    apiSource,
+    /const sandboxToolPortalExtensionLoaded =[\s\S]*SANDBOX_TOOL_PORTAL_ENABLED &&[\s\S]*Boolean\(RUNTIME_API_TOKEN\) &&[\s\S]*existsSync\(SANDBOX_TOOL_PORTAL_EXTENSION_PATH\)/,
+  );
+  assert.match(apiSource, /args\.push\("--extension", SANDBOX_TOOL_PORTAL_EXTENSION_PATH\)/);
+  assert.match(
+    apiSource,
+    /sandboxToolPortal: \{[\s\S]*enabled: SANDBOX_TOOL_PORTAL_ENABLED[\s\S]*extensionPath: SANDBOX_TOOL_PORTAL_EXTENSION_PATH[\s\S]*extensionLoaded: sandboxToolPortalExtensionLoaded[\s\S]*url: SANDBOX_TOOL_PORTAL_URL[\s\S]*timeoutMs: Number\(SANDBOX_TOOL_PORTAL_TIMEOUT_MS\)/,
+  );
+  assert.match(
+    apiSource,
+    /buildPiChildEnv\(this, \{[\s\S]*sandboxToolPortalExtensionLoaded[\s\S]*\}\)/,
+    "Pi spawn should pass the portal-loaded guard into the child env builder",
+  );
+  assert.match(apiSource, /delete env\.BEEP_RUNTIME_API_TOKEN/);
+  assert.doesNotMatch(apiSource, /delete env\.BEEP_SANDBOX_TOOL_PORTAL_TOKEN/);
+  assert.match(sandboxPortalRuntimeSource, /delete process\.env\.BEEP_SANDBOX_TOOL_PORTAL_TOKEN/);
 });
 
 test("runtime routes sandbox tools through Docker manager before LCM-only internal handling", () => {

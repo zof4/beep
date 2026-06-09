@@ -57,6 +57,13 @@ const CONTROL_PLANE_URL = process.env.BEEP_CONTROL_PLANE_URL || "";
 const CONTROL_PLANE_RUNTIME_ID = process.env.BEEP_CONTROL_PLANE_RUNTIME_ID || "local";
 const CONTROL_PLANE_RUNTIME_TOKEN = process.env.BEEP_CONTROL_PLANE_RUNTIME_TOKEN || "";
 const CONTROL_PLANE_TOOL_TIMEOUT_MS = process.env.BEEP_CONTROL_PLANE_TOOL_TIMEOUT_MS || "15000";
+const SANDBOX_TOOL_PORTAL_ENABLED =
+  !["0", "false", "no", "off"].includes(String(process.env.BEEP_SANDBOX_TOOL_PORTAL_ENABLED || "1").toLowerCase());
+const SANDBOX_TOOL_PORTAL_EXTENSION_PATH =
+  process.env.BEEP_SANDBOX_TOOL_PORTAL_EXTENSION_PATH || "/runtime/pi-extensions/sandbox-tool-portal-extension.mjs";
+const SANDBOX_TOOL_PORTAL_URL =
+  process.env.BEEP_SANDBOX_TOOL_PORTAL_URL || `http://127.0.0.1:${API_PORT}/internal/sandbox/tools/call`;
+const SANDBOX_TOOL_PORTAL_TIMEOUT_MS = process.env.BEEP_SANDBOX_TOOL_PORTAL_TIMEOUT_MS || "60000";
 const SANDBOX_TOOL_BACKEND = process.env.BEEP_SANDBOX_TOOL_BACKEND || "docker";
 const SANDBOX_LOCAL_BACKEND_ENABLED =
   ["1", "true", "yes", "on"].includes(String(process.env.BEEP_SANDBOX_LOCAL_BACKEND_ENABLED || "0").toLowerCase());
@@ -305,7 +312,7 @@ function validateThinking(thinking) {
   }
 }
 
-function buildPiChildEnv(session, { lcmContextExtensionLoaded, controlPlaneToolsExtensionLoaded }) {
+function buildPiChildEnv(session, { lcmContextExtensionLoaded, controlPlaneToolsExtensionLoaded, sandboxToolPortalExtensionLoaded }) {
   const env = {
     PATH: process.env.PATH || "",
     HOME: process.env.HOME || join(STATE_DIR, "home"),
@@ -322,7 +329,14 @@ function buildPiChildEnv(session, { lcmContextExtensionLoaded, controlPlaneTools
     BEEP_LCM_CONTEXT_TOKEN_BUDGET: LCM_CONTEXT_TOKEN_BUDGET,
     BEEP_LCM_CONTEXT_TIMEOUT_MS: LCM_CONTEXT_TIMEOUT_MS,
     BEEP_CONTROL_PLANE_TOOLS_ENABLED: controlPlaneToolsExtensionLoaded ? "1" : "0",
+    BEEP_SANDBOX_TOOL_PORTAL_ENABLED: sandboxToolPortalExtensionLoaded ? "1" : "0",
   };
+
+  if (sandboxToolPortalExtensionLoaded) {
+    env.BEEP_SANDBOX_TOOL_PORTAL_URL = SANDBOX_TOOL_PORTAL_URL;
+    env.BEEP_SANDBOX_TOOL_PORTAL_TOKEN = RUNTIME_API_TOKEN;
+    env.BEEP_SANDBOX_TOOL_PORTAL_TIMEOUT_MS = SANDBOX_TOOL_PORTAL_TIMEOUT_MS;
+  }
 
   if (controlPlaneToolsExtensionLoaded) {
     env.BEEP_CONTROL_PLANE_TOOLS_EXTENSION_PATH = CONTROL_PLANE_TOOLS_EXTENSION_PATH;
@@ -442,6 +456,11 @@ class PiRpcSession {
     if (lcmContextExtensionLoaded) {
       args.push("--extension", LCM_CONTEXT_EXTENSION_PATH);
     }
+    const sandboxToolPortalExtensionLoaded =
+      SANDBOX_TOOL_PORTAL_ENABLED && Boolean(RUNTIME_API_TOKEN) && existsSync(SANDBOX_TOOL_PORTAL_EXTENSION_PATH);
+    if (sandboxToolPortalExtensionLoaded) {
+      args.push("--extension", SANDBOX_TOOL_PORTAL_EXTENSION_PATH);
+    }
     const controlPlaneToolsExtensionLoaded =
       CONTROL_PLANE_TOOLS_ENABLED &&
       Boolean(CONTROL_PLANE_URL) &&
@@ -471,6 +490,13 @@ class PiRpcSession {
         tokenBudget: Number(LCM_CONTEXT_TOKEN_BUDGET),
         timeoutMs: Number(LCM_CONTEXT_TIMEOUT_MS),
       },
+      sandboxToolPortal: {
+        enabled: SANDBOX_TOOL_PORTAL_ENABLED,
+        extensionPath: SANDBOX_TOOL_PORTAL_EXTENSION_PATH,
+        extensionLoaded: sandboxToolPortalExtensionLoaded,
+        url: SANDBOX_TOOL_PORTAL_URL,
+        timeoutMs: Number(SANDBOX_TOOL_PORTAL_TIMEOUT_MS),
+      },
       controlPlaneTools: {
         enabled: CONTROL_PLANE_TOOLS_ENABLED,
         extensionPath: CONTROL_PLANE_TOOLS_EXTENSION_PATH,
@@ -483,7 +509,11 @@ class PiRpcSession {
       createdAt: this.createdAt,
     });
 
-    const env = buildPiChildEnv(this, { lcmContextExtensionLoaded, controlPlaneToolsExtensionLoaded });
+    const env = buildPiChildEnv(this, {
+      lcmContextExtensionLoaded,
+      controlPlaneToolsExtensionLoaded,
+      sandboxToolPortalExtensionLoaded,
+    });
 
     this.stdoutStream = createWriteStream(this.stdoutPath, { flags: "a" });
     this.stderrStream = createWriteStream(this.stderrPath, { flags: "a" });
