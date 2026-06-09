@@ -101,6 +101,7 @@ services:
     restart: unless-stopped
     environment:
       <<: *beep-runtime-env
+      BEEP_HINDSIGHT_ENABLED: "${BEEP_HOST_LOOP_HINDSIGHT_ENABLED:-0}"
       BEEP_SANDBOX_TOOL_BACKEND: docker
       BEEP_SANDBOX_TOOL_PORTAL_ENABLED: "1"
       BEEP_SANDBOX_IMAGE: "${BEEP_SANDBOX_IMAGE:-beep-sandbox:local}"
@@ -119,9 +120,6 @@ services:
     ports:
       - "127.0.0.1:8787:8787"
       - "127.0.0.1:13000-13099:3000-3099"
-    depends_on:
-      hindsight:
-        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8787/health"]
       interval: 10s

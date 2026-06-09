@@ -290,6 +290,7 @@ test("runtime compose declares the trusted host-loop service and sandbox boundar
   assert.match(runtimeManagerSource, /BEEP_DOCKER_GROUP_ID:\s*dockerSocketGroupId\(\)/u);
   assert.match(compose, /^x-beep-runtime-env:\s*&beep-runtime-env$/mu);
   assert.match(compose, /^\s+beep-host-loop:/mu);
+  assert.match(compose, /^\s+BEEP_HINDSIGHT_ENABLED:\s*"\$\{BEEP_HOST_LOOP_HINDSIGHT_ENABLED:-0\}"$/mu);
   assert.match(compose, /^\s+BEEP_SANDBOX_TOOL_BACKEND:\s*docker$/mu);
   assert.match(compose, /^\s+BEEP_SANDBOX_TOOL_PORTAL_ENABLED:\s*"1"$/mu);
   assert.match(compose, /^\s+BEEP_SANDBOX_IMAGE:\s*"\$\{BEEP_SANDBOX_IMAGE:-beep-sandbox:local\}"$/mu);
@@ -304,7 +305,9 @@ test("runtime compose declares the trusted host-loop service and sandbox boundar
   assert.match(compose, /"127\.0\.0\.1:13000-13099:3000-3099"/u);
   assert.match(compose, /beep-runtime-api:[\s\S]*<<: \*beep-runtime-common/u);
   assert.match(compose, /beep-runtime-api:[\s\S]*profiles:[\s\S]*legacy-api/u);
+  assert.match(compose, /beep-runtime-api:[\s\S]*depends_on:[\s\S]*hindsight:[\s\S]*condition: service_healthy/u);
   assert.match(compose, /beep-host-loop:[\s\S]*profiles:[\s\S]*api/u);
+  assert.doesNotMatch(compose, /beep-host-loop:[\s\S]*depends_on:[\s\S]*hindsight:/u);
 });
 
 test("local agentd script derives Docker socket group and host sandbox workspace", () => {
