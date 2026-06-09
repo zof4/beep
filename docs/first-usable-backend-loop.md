@@ -1,20 +1,22 @@
 # First Usable Backend Loop
 
-This backend loop ties together the host control plane, managed runtime,
-long-running Pi agent loop, Lossless Claw memory, and the local Hindsight memory
-path. It is the first usable operator path for backend work: operators enter
-through the control plane, while the managed runtime does agent and memory work
-inside the runtime house.
+This backend loop ties together the host control plane, managed trusted
+host-loop runtime, per-session Docker sandboxes, Lossless Claw memory, and the
+local Hindsight memory path. It is the first usable operator path for backend
+work: operators enter through the control plane, while the managed runtime owns
+the agent loop and memory work, and model-directed code execution happens in
+throwaway sandbox containers.
 
 ## Authority Boundaries
 
 - The control plane owns host authority: runtime lifecycle, operator auth,
   approvals and audit, model credential handoff, and the tool broker/proxy.
-- The runtime house owns `beep-agentd`, the Pi loop, request queue and events,
-  LCM context assembly and ingest, and Hindsight sidecar coordination.
-- The agent workspace remains less trusted and model-directed. It is where Pi
-  can run shell and file work, but it should not hold host authority or durable
-  credentials.
+- The trusted host-loop runtime owns `beep-agentd`, the Pi loop, request queue
+  and events, LCM context assembly and ingest, Hindsight sidecar coordination,
+  and Docker sandbox lifecycle.
+- The sandbox containers own model-directed shell and file work. They should
+  not receive host credentials, Docker socket access, Hindsight mounts, LCM
+  mounts, or control-plane tokens.
 
 ## Operator Workflow
 
@@ -103,6 +105,36 @@ curl -X POST "http://127.0.0.1:8788/api/runtimes/$runtime_id/start" \
   -H "authorization: Bearer $operator_token"
 ```
 
+## Host-Loop Docker Sandbox
+
+The default local-dev runtime service is `beep-host-loop`. It still runs in
+Docker for local and Oracle parity, but it is the trusted orchestrator
+container, not the untrusted execution sandbox. The service mounts the Docker
+socket and creates one sandbox container per Beep session on demand. Sandbox
+workspaces persist under `.beep-dev/workspace/sandboxes`, so a crashed sandbox
+can be replaced without losing the session files.
+
+`beep-host-loop` defaults Hindsight off through
+`BEEP_HOST_LOOP_HINDSIGHT_ENABLED=0`. This keeps a broken or missing Hindsight
+sidecar from making the agent loop unusable. Use
+`BEEP_HOST_LOOP_HINDSIGHT_ENABLED=1` only when the local Hindsight/Codex auth
+path is healthy and the memory sidecar is part of the test.
+
+Local Docker bring-up:
+
+```bash
+git submodule update --init --depth 1 vendor/pi vendor/lossless-claw vendor/openai-codex
+docker compose --env-file docker/hindsight-image.env \
+  -f docker/compose.runtime-dev.yml \
+  --profile api up --build -d beep-host-loop
+```
+
+Oracle can use the same shape first: a trusted `beep-host-loop` service with
+durable `.beep-dev` volumes and dynamically spawned sandbox containers. The
+next hardening step for Oracle is to put a Docker socket proxy in front of the
+trusted service, or move the trusted supervisor to `systemd` if Docker-daemon
+failure becomes the failure class being addressed.
+
 ## Memory Flow
 
 - The Pi agent loop handles queued work.
@@ -129,12 +161,26 @@ control-plane routes, while exercising compact and proving memory through
 request and status results. A runtime-proxy 502 from compact is tolerated by
 the script.
 
+`npm run test:host-loop` runs the host-loop static checks plus syntax
+validation for the sandbox smoke script.
+
+`./scripts/smoke-test-host-loop-sandbox.sh` is the live Docker sandbox proof.
+It starts an isolated temporary control plane, synchronously starts the managed
+`beep-host-loop` runtime, writes a proof file through the sandbox tool route,
+kills the sandbox container, verifies backend status still responds, then reads
+the proof file after the next tool call recreates the sandbox.
+
 ## Operational Notes
 
 - Set `BEEP_RUNTIME_AUTO_UPDATE=0` to avoid dependency refresh during manual
   smoke or token checks when desired. The first usable backend smoke already
   exports it.
+- `beep-host-loop` is host authority. Treat its Docker socket mount like host
+  root-equivalent access. Sandboxes are the isolation boundary for
+  model-directed code execution.
 - Direct runtime API curls are compatibility/debug paths. Backend operators
   should use the control-plane routes first.
 - Smoke output files are written under
   `${TMPDIR:-/tmp}/beep-first-usable-backend.*`.
+- Host-loop sandbox smoke output files are written under
+  `${TMPDIR:-/tmp}/beep-host-loop-sandbox-smoke.*`.

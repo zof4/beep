@@ -177,6 +177,37 @@ curl http://127.0.0.1:8787/agent/lcm/doctor \
   -H "authorization: Bearer $runtime_api_token"
 ```
 
+### Host-Loop Sandbox Mode
+
+The default managed runtime service is now `beep-host-loop`. It runs the trusted
+agent loop in Docker and executes Pi work tools in child sandbox containers.
+This keeps the local-dev shape close to the Oracle deployment shape while
+separating the failure domains: if a sandbox container crashes, the host-loop
+service can still answer health/status routes and recreate the sandbox on the
+next tool call.
+
+The host-loop service has Docker authority through `/var/run/docker.sock`.
+Treat it as host authority. The sandbox containers must not receive Docker
+socket access, Codex auth, control-plane tokens, Hindsight mounts, or LCM
+database mounts.
+
+Run the live sandbox proof with:
+
+```bash
+npm run test:host-loop
+./scripts/smoke-test-host-loop-sandbox.sh
+```
+
+The live smoke starts a temporary control plane on a dynamic loopback port,
+starts `beep-host-loop` through the control-plane lifecycle route, writes a file
+through the sandbox tool portal, kills the sandbox container, verifies backend
+status remains healthy, and confirms the proof file is still readable after a
+new sandbox generation is created.
+
+`beep-host-loop` defaults `BEEP_HOST_LOOP_HINDSIGHT_ENABLED=0` so Hindsight
+startup/auth failures do not block local agent-loop availability. Enable it
+only for memory-sidecar tests where Hindsight is known healthy.
+
 ### Updating Hindsight And LCM
 
 Use:
