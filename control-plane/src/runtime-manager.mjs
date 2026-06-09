@@ -1,16 +1,18 @@
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { verifyRuntimeHealthProof } from "../../runtime/src/runtime-api-auth.mjs";
 import {
   COMPOSE_FILE,
   CONTAINER_BASE_URL,
   ROOT_DIR,
+  RUNTIME_COMPOSE_SERVICE,
   RUNTIME_API_URL,
   RUNTIME_ID,
   RUNTIME_START_TIMEOUT_MS,
   RUNTIME_UPDATE_ENV_PATH,
+  SANDBOX_DOCKER_WORKSPACE_ROOT,
 } from "./config.mjs";
 
 function nowIso() {
@@ -22,6 +24,15 @@ function runtimeUpdateEpoch() {
   if (!existsSync(RUNTIME_UPDATE_ENV_PATH)) return "manual";
   const match = readFileSync(RUNTIME_UPDATE_ENV_PATH, "utf8").match(/^BEEP_RUNTIME_UPDATE_EPOCH=(.+)$/m);
   return match?.[1]?.trim() || "manual";
+}
+
+function dockerSocketGroupId(socketPath = process.env.BEEP_DOCKER_SOCKET_PATH || "/var/run/docker.sock") {
+  if (process.env.BEEP_DOCKER_GROUP_ID) return process.env.BEEP_DOCKER_GROUP_ID;
+  try {
+    const gid = statSync(socketPath).gid;
+    if (Number.isInteger(gid) && gid >= 0) return String(gid);
+  } catch {}
+  return "0";
 }
 
 function run(command, args, { cwd = ROOT_DIR, env = process.env } = {}) {
@@ -70,6 +81,8 @@ function composeEnv({ runtimeToken, runtimeApiToken, modelCredentialToken }) {
     BEEP_CONTROL_PLANE_RUNTIME_ID: RUNTIME_ID,
     BEEP_CONTROL_PLANE_RUNTIME_TOKEN: runtimeToken,
     BEEP_CONTROL_PLANE_TOOLS_ENABLED: process.env.BEEP_CONTROL_PLANE_TOOLS_ENABLED || "0",
+    BEEP_SANDBOX_DOCKER_WORKSPACE_ROOT: SANDBOX_DOCKER_WORKSPACE_ROOT,
+    BEEP_DOCKER_GROUP_ID: dockerSocketGroupId(),
   };
 }
 
@@ -109,14 +122,24 @@ function assertManagedRuntimeHealth(health, { challenge, runtimeApiToken }) {
 }
 
 export class RuntimeManager {
-  constructor({ store }) {
+  constructor({
+    store,
+    runCommand = run,
+    fetchRuntime: fetchRuntimeFn = fetchRuntime,
+    challengeFactory = randomUUID,
+    runtimeService = RUNTIME_COMPOSE_SERVICE,
+  } = {}) {
     this.store = store;
+    this.runCommand = runCommand;
+    this.fetchRuntime = fetchRuntimeFn;
+    this.challengeFactory = challengeFactory;
+    this.runtimeService = runtimeService;
   }
 
   async verifiedHealth() {
     const runtimeApiToken = this.store.ensureRuntimeApiToken();
-    const challenge = randomUUID();
-    const health = await fetchRuntime(runtimeHealthPath(challenge));
+    const challenge = this.challengeFactory();
+    const health = await this.fetchRuntime(runtimeHealthPath(challenge));
     assertManagedRuntimeHealth(health, { challenge, runtimeApiToken });
     return health;
   }
@@ -167,9 +190,13 @@ export class RuntimeManager {
       startedAt: nowIso(),
     });
 
-    await run("docker", composeArgs("-f", COMPOSE_FILE, "--profile", "api", "up", "--build", "-d", "beep-runtime-api"), {
-      env: composeEnv({ runtimeToken, runtimeApiToken, modelCredentialToken }),
-    });
+    await this.runCommand(
+      "docker",
+      composeArgs("-f", COMPOSE_FILE, "--profile", "api", "up", "--build", "-d", this.runtimeService),
+      {
+        env: composeEnv({ runtimeToken, runtimeApiToken, modelCredentialToken }),
+      },
+    );
     await this.waitUntilReady();
 
     this.store.upsertRuntime(RUNTIME_ID, {
@@ -184,7 +211,7 @@ export class RuntimeManager {
     const runtimeToken = this.store.ensureRuntimeToken();
     const runtimeApiToken = this.store.ensureRuntimeApiToken();
     const modelCredentialToken = this.store.ensureModelCredentialToken();
-    await run("docker", composeArgs("-f", COMPOSE_FILE, "--profile", "api", "stop", "beep-runtime-api"), {
+    await this.runCommand("docker", composeArgs("-f", COMPOSE_FILE, "--profile", "api", "stop", this.runtimeService), {
       env: composeEnv({ runtimeToken, runtimeApiToken, modelCredentialToken }),
     });
     this.store.upsertRuntime(RUNTIME_ID, {
@@ -215,6 +242,6 @@ export class RuntimeManager {
       ...(options.headers || {}),
       authorization: `Bearer ${this.store.ensureRuntimeApiToken()}`,
     };
-    return fetchRuntime(path, { ...options, headers });
+    return this.fetchRuntime(path, { ...options, headers });
   }
 }

@@ -1,36 +1,39 @@
+x-beep-runtime-env: &beep-runtime-env
+  BEEP_NO_API_KEY: "1"
+  BEEP_STATE_DIR: /state
+  BEEP_WORKSPACE_DIR: /workspace
+  BEEP_LCM_DIR: /lcm
+  BEEP_LCM_ROOT: /opt/lossless-claw
+  BEEP_LCM_DB: /lcm/beep-lcm.sqlite
+  BEEP_HINDSIGHT_ENABLED: "1"
+  BEEP_HINDSIGHT_API_URL: http://hindsight:8888
+  BEEP_HINDSIGHT_BANK_ID_PREFIX: beep
+  BEEP_HINDSIGHT_DEPLOYMENT_ID: local
+  BEEP_HINDSIGHT_USER_ID: default-user
+  BEEP_HINDSIGHT_PROJECT_ID: beep2
+  BEEP_HINDSIGHT_RECALL_BUDGET: high
+  BEEP_HINDSIGHT_RECALL_MAX_TOKENS: "4096"
+  BEEP_HINDSIGHT_RETAIN_ASYNC: "1"
+  BEEP_RUNTIME_API_TOKEN: "${BEEP_RUNTIME_API_TOKEN:-}"
+  BEEP_MODEL_GATEWAY_CREDENTIAL_URL: "${BEEP_MODEL_GATEWAY_CREDENTIAL_URL:-}"
+  BEEP_MODEL_GATEWAY_CAPABILITY_TOKEN: "${BEEP_MODEL_GATEWAY_CAPABILITY_TOKEN:-}"
+  BEEP_ALLOW_RUNTIME_CODEX_AUTH: "${BEEP_ALLOW_RUNTIME_CODEX_AUTH:-0}"
+  BEEP_CONTROL_PLANE_URL: "${BEEP_CONTROL_PLANE_URL:-}"
+  BEEP_CONTROL_PLANE_RUNTIME_ID: "${BEEP_CONTROL_PLANE_RUNTIME_ID:-local}"
+  BEEP_CONTROL_PLANE_RUNTIME_TOKEN: "${BEEP_CONTROL_PLANE_RUNTIME_TOKEN:-}"
+  BEEP_CONTROL_PLANE_TOOLS_ENABLED: "${BEEP_CONTROL_PLANE_TOOLS_ENABLED:-0}"
+  CODEX_HOME: /state/codex
+  HOME: /state/home
+  XDG_CACHE_HOME: /state/xdg-cache
+  XDG_CONFIG_HOME: /state/xdg-config
+  NPM_CONFIG_CACHE: /state/npm-cache
+
 x-beep-runtime-common: &beep-runtime-common
   build:
     context: ..
     dockerfile: docker/runtime.Dockerfile
   environment:
-    BEEP_NO_API_KEY: "1"
-    BEEP_STATE_DIR: /state
-    BEEP_WORKSPACE_DIR: /workspace
-    BEEP_LCM_DIR: /lcm
-    BEEP_LCM_ROOT: /opt/lossless-claw
-    BEEP_LCM_DB: /lcm/beep-lcm.sqlite
-    BEEP_HINDSIGHT_ENABLED: "1"
-    BEEP_HINDSIGHT_API_URL: http://hindsight:8888
-    BEEP_HINDSIGHT_BANK_ID_PREFIX: beep
-    BEEP_HINDSIGHT_DEPLOYMENT_ID: local
-    BEEP_HINDSIGHT_USER_ID: default-user
-    BEEP_HINDSIGHT_PROJECT_ID: beep2
-    BEEP_HINDSIGHT_RECALL_BUDGET: high
-    BEEP_HINDSIGHT_RECALL_MAX_TOKENS: "4096"
-    BEEP_HINDSIGHT_RETAIN_ASYNC: "1"
-    BEEP_RUNTIME_API_TOKEN: "${BEEP_RUNTIME_API_TOKEN:-}"
-    BEEP_MODEL_GATEWAY_CREDENTIAL_URL: "${BEEP_MODEL_GATEWAY_CREDENTIAL_URL:-}"
-    BEEP_MODEL_GATEWAY_CAPABILITY_TOKEN: "${BEEP_MODEL_GATEWAY_CAPABILITY_TOKEN:-}"
-    BEEP_ALLOW_RUNTIME_CODEX_AUTH: "${BEEP_ALLOW_RUNTIME_CODEX_AUTH:-0}"
-    BEEP_CONTROL_PLANE_URL: "${BEEP_CONTROL_PLANE_URL:-}"
-    BEEP_CONTROL_PLANE_RUNTIME_ID: "${BEEP_CONTROL_PLANE_RUNTIME_ID:-local}"
-    BEEP_CONTROL_PLANE_RUNTIME_TOKEN: "${BEEP_CONTROL_PLANE_RUNTIME_TOKEN:-}"
-    BEEP_CONTROL_PLANE_TOOLS_ENABLED: "${BEEP_CONTROL_PLANE_TOOLS_ENABLED:-0}"
-    CODEX_HOME: /state/codex
-    HOME: /state/home
-    XDG_CACHE_HOME: /state/xdg-cache
-    XDG_CONFIG_HOME: /state/xdg-config
-    NPM_CONFIG_CACHE: /state/npm-cache
+    <<: *beep-runtime-env
   volumes:
     - ../vendor:/vendor:ro
     - ../.beep-dev/workspace:/workspace
@@ -76,8 +79,43 @@ services:
     <<: *beep-runtime-common
     command: ["/runtime/bin/beep-agentd"]
     profiles:
+      - legacy-api
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8787:8787"
+      - "127.0.0.1:13000-13099:3000-3099"
+    depends_on:
+      hindsight:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8787/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+
+  beep-host-loop:
+    <<: *beep-runtime-common
+    command: ["/runtime/bin/beep-agentd"]
+    profiles:
       - api
     restart: unless-stopped
+    environment:
+      <<: *beep-runtime-env
+      BEEP_SANDBOX_TOOL_BACKEND: docker
+      BEEP_SANDBOX_TOOL_PORTAL_ENABLED: "1"
+      BEEP_SANDBOX_IMAGE: "${BEEP_SANDBOX_IMAGE:-beep-sandbox:local}"
+      BEEP_SANDBOX_WORKSPACE_ROOT: /workspace/sandboxes
+      BEEP_SANDBOX_DOCKER_WORKSPACE_ROOT: "${BEEP_SANDBOX_DOCKER_WORKSPACE_ROOT:-${PWD}/../.beep-dev/workspace/sandboxes}"
+    group_add:
+      - "${BEEP_DOCKER_GROUP_ID:-0}"
+    user: "${BEEP_HOST_LOOP_USER:-0:0}"
+    volumes:
+      - ../vendor:/vendor:ro
+      - ../.beep-dev/workspace:/workspace
+      - ../.beep-dev/lcm:/lcm
+      - ../.beep-dev/history:/history
+      - ../.beep-dev/state:/state
+      - /var/run/docker.sock:/var/run/docker.sock
     ports:
       - "127.0.0.1:8787:8787"
       - "127.0.0.1:13000-13099:3000-3099"

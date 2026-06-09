@@ -20,6 +20,7 @@ RUN apt-get update \
     bubblewrap \
     ca-certificates \
     curl \
+    docker.io \
     git \
     jq \
     ripgrep \

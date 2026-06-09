@@ -19,11 +19,14 @@ export const PUBLIC_BASE_URL = process.env.BEEP_CONTROL_PLANE_PUBLIC_URL || `htt
 export const CONTAINER_BASE_URL = process.env.BEEP_CONTAINER_CONTROL_PLANE_URL || `http://host.docker.internal:${PORT}`;
 
 export const COMPOSE_FILE = process.env.BEEP_RUNTIME_COMPOSE_FILE || join(ROOT_DIR, "docker/compose.runtime-dev.yml");
+export const RUNTIME_COMPOSE_SERVICE = process.env.BEEP_RUNTIME_COMPOSE_SERVICE || "beep-host-loop";
 export const RUNTIME_API_URL = process.env.BEEP_RUNTIME_API_URL || "http://127.0.0.1:8787";
 export const RUNTIME_AUTH_PATH =
   process.env.BEEP_CONTROL_PLANE_CODEX_AUTH_PATH || join(ROOT_DIR, ".beep-dev/state/codex/auth.json");
 export const RUNTIME_UPDATE_ENV_PATH =
   process.env.BEEP_RUNTIME_UPDATE_ENV_PATH || join(ROOT_DIR, ".beep-dev/update-state/runtime-update.env");
+export const SANDBOX_DOCKER_WORKSPACE_ROOT =
+  process.env.BEEP_SANDBOX_DOCKER_WORKSPACE_ROOT || join(ROOT_DIR, ".beep-dev/workspace/sandboxes");
 
 export const PREVIEW_CONTAINER_PORT_MIN = intEnv("BEEP_PREVIEW_CONTAINER_PORT_MIN", 3000);
 export const PREVIEW_CONTAINER_PORT_MAX = intEnv("BEEP_PREVIEW_CONTAINER_PORT_MAX", 3099);

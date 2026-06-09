@@ -7,6 +7,7 @@ import { RuntimeManager } from "../src/runtime-manager.mjs";
 import { StateStore } from "../src/state-store.mjs";
 
 const runtimeManagerSource = readFileSync(new URL("../src/runtime-manager.mjs", import.meta.url), "utf8");
+const runtimeConfigSource = readFileSync(new URL("../src/config.mjs", import.meta.url), "utf8");
 
 const requiredRuntimeBoundaryEnv = [
   "BEEP_RUNTIME_API_TOKEN",
@@ -114,6 +115,47 @@ test("runtime manager proxies to runtime with runtime API token", async () => {
   }
 });
 
+test("runtime manager starts and stops the configured host-loop compose service", async () => {
+  const calls = [];
+  const dir = mkdtempSync(join(tmpdir(), "beep-runtime-manager-service-test-"));
+  const store = new StateStore(dir);
+  const { createRuntimeHealthProof } = await import("../../runtime/src/runtime-api-auth.mjs");
+  try {
+    const manager = new RuntimeManager({
+      store,
+      runCommand: async (command, args, options = {}) => {
+        calls.push({ command, args, env: options.env || {} });
+        return { stdout: "", stderr: "" };
+      },
+      fetchRuntime: async () => ({
+        ok: true,
+        service: "beep-agentd",
+        runtimeId: "local",
+        managedProof: createRuntimeHealthProof({
+          challenge: "challenge",
+          runtimeApiToken: store.ensureRuntimeApiToken(),
+        }),
+      }),
+      challengeFactory: () => "challenge",
+      runtimeService: "beep-host-loop",
+    });
+
+    await manager.ensureRuntime({ rebuild: true });
+    await manager.stopRuntime();
+
+    const up = calls.find((call) => call.args.includes("up"));
+    const stop = calls.find((call) => call.args.includes("stop"));
+    assert.ok(up, "runtime manager should start compose");
+    assert.ok(stop, "runtime manager should stop compose");
+    assert.equal(up.args.at(-1), "beep-host-loop");
+    assert.equal(stop.args.at(-1), "beep-host-loop");
+    assert.match(up.env.BEEP_SANDBOX_DOCKER_WORKSPACE_ROOT, /\.beep-dev\/workspace\/sandboxes$/u);
+    assert.match(up.env.BEEP_DOCKER_GROUP_ID, /^\d+$/u);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("runtime manager attaches parsed upstream payloads to non-2xx proxy errors", async () => {
   const originalFetch = globalThis.fetch;
   const { store, manager, cleanup } = tempManager();
@@ -189,6 +231,50 @@ test("runtime compose publishes preview host port range for direct preview URLs"
     /"127\.0\.0\.1:13000-13099:3000-3099"/u,
     "compose should map preview host ports 13000-13099 to runtime container ports 3000-3099",
   );
+});
+
+test("runtime compose declares the trusted host-loop service and sandbox boundary", () => {
+  const compose = readFileSync(join(process.cwd(), "docker/compose.runtime-dev.yml"), "utf8");
+
+  assert.match(runtimeConfigSource, /RUNTIME_COMPOSE_SERVICE[\s\S]*\|\|\s*"beep-host-loop"/u);
+  assert.match(runtimeConfigSource, /SANDBOX_DOCKER_WORKSPACE_ROOT[\s\S]*\.beep-dev\/workspace\/sandboxes/u);
+  assert.match(runtimeManagerSource, /RUNTIME_COMPOSE_SERVICE/u);
+  assert.match(runtimeManagerSource, /BEEP_SANDBOX_DOCKER_WORKSPACE_ROOT:\s*SANDBOX_DOCKER_WORKSPACE_ROOT/u);
+  assert.match(runtimeManagerSource, /function dockerSocketGroupId\(/u);
+  assert.match(runtimeManagerSource, /BEEP_DOCKER_GROUP_ID:\s*dockerSocketGroupId\(\)/u);
+  assert.match(compose, /^x-beep-runtime-env:\s*&beep-runtime-env$/mu);
+  assert.match(compose, /^\s+beep-host-loop:/mu);
+  assert.match(compose, /^\s+BEEP_SANDBOX_TOOL_BACKEND:\s*docker$/mu);
+  assert.match(compose, /^\s+BEEP_SANDBOX_TOOL_PORTAL_ENABLED:\s*"1"$/mu);
+  assert.match(compose, /^\s+BEEP_SANDBOX_IMAGE:\s*"\$\{BEEP_SANDBOX_IMAGE:-beep-sandbox:local\}"$/mu);
+  assert.match(compose, /^\s+BEEP_SANDBOX_WORKSPACE_ROOT:\s*\/workspace\/sandboxes$/mu);
+  assert.match(
+    compose,
+    /^\s+BEEP_SANDBOX_DOCKER_WORKSPACE_ROOT:\s*"\$\{BEEP_SANDBOX_DOCKER_WORKSPACE_ROOT:-\$\{PWD\}\/\.\.\/\.beep-dev\/workspace\/sandboxes\}"$/mu,
+  );
+  assert.match(compose, /^\s+- \/var\/run\/docker\.sock:\/var\/run\/docker\.sock$/mu);
+  assert.match(compose, /^\s+- "\$\{BEEP_DOCKER_GROUP_ID:-0\}"$/mu);
+  assert.match(compose, /^\s+user:\s*"\$\{BEEP_HOST_LOOP_USER:-0:0\}"$/mu);
+  assert.match(compose, /"127\.0\.0\.1:13000-13099:3000-3099"/u);
+  assert.match(compose, /beep-runtime-api:[\s\S]*<<: \*beep-runtime-common/u);
+  assert.match(compose, /beep-runtime-api:[\s\S]*profiles:[\s\S]*legacy-api/u);
+  assert.match(compose, /beep-host-loop:[\s\S]*profiles:[\s\S]*api/u);
+});
+
+test("local agentd script derives Docker socket group and host sandbox workspace", () => {
+  const script = readFileSync(join(process.cwd(), "scripts/beep-agentd.sh"), "utf8");
+
+  assert.match(script, /stat -f "%g" \/var\/run\/docker\.sock/u);
+  assert.match(script, /stat -c "%g" \/var\/run\/docker\.sock/u);
+  assert.match(script, /export BEEP_DOCKER_GROUP_ID="\$\{BEEP_DOCKER_GROUP_ID:-0\}"/u);
+  assert.match(script, /BEEP_SANDBOX_DOCKER_WORKSPACE_ROOT:-\$ROOT_DIR\/\.beep-dev\/workspace\/sandboxes/u);
+  assert.match(script, /--profile api up --build "\$BEEP_RUNTIME_COMPOSE_SERVICE"/u);
+});
+
+test("runtime image installs Docker CLI for trusted host-loop sandbox management", () => {
+  const dockerfile = readFileSync(join(process.cwd(), "docker/runtime.Dockerfile"), "utf8");
+
+  assert.match(dockerfile, /\bdocker\.io\b/u);
 });
 
 test("runtime compose uses the published Hindsight image tag", () => {
