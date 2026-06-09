@@ -1,0 +1,26 @@
+#!/usr/bin/env node
+import { stdin, stdout, stderr, exit } from "node:process";
+import { executeSandboxTool } from "../src/sandbox-tool-executor.mjs";
+import { normalizeSandboxToolRequest } from "../src/sandbox-tool-protocol.mjs";
+
+async function readStdin() {
+  let input = "";
+  stdin.setEncoding("utf8");
+  for await (const chunk of stdin) input += chunk;
+  return input;
+}
+
+try {
+  const input = await readStdin();
+  const body = JSON.parse(input || "{}");
+  const request = normalizeSandboxToolRequest({
+    ...body,
+    cwd: body.cwd || process.env.BEEP_SANDBOX_WORKSPACE || "/workspace",
+  });
+  const result = await executeSandboxTool(request);
+  stdout.write(`${JSON.stringify(result)}\n`);
+  exit(result.ok ? 0 : 2);
+} catch (error) {
+  stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+  exit(1);
+}
