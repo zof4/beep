@@ -8,6 +8,7 @@
     "test:lcm": "node --test test/lcm-external-memory.test.mjs",
     "test:proof": "node --test test/proof-memory-lifecycle.test.mjs",
     "test:reconciliation": "node --test test/*.test.mjs control-plane/test/*.test.mjs",
+    "test:host-loop-static": "node --test test/sandbox-tool-protocol.test.mjs test/sandbox-tool-executor.test.mjs test/sandbox-tool-portal-extension.test.mjs test/sandbox-tool-runner.test.mjs test/runtime-integration-static.test.mjs",
     "test:runtime-static": "node --test test/runtime-integration-static.test.mjs"
   }
 }

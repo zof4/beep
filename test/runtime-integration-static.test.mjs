@@ -129,3 +129,11 @@ test("control-plane tools are fail closed by default and Pi env is sanitized", (
     "runtime tool token should be assigned inside the control-plane tools loaded guard",
   );
 });
+
+test("sandbox image copies the tool runner without credentials", () => {
+  const dockerfile = readFileSync(new URL("../docker/sandbox.Dockerfile", import.meta.url), "utf8");
+  assert.match(dockerfile, /COPY runtime\/bin\/beep-sandbox-tool-runner/u);
+  assert.match(dockerfile, /COPY runtime\/src\/sandbox-tool-/u);
+  assert.match(dockerfile, /USER beep/u);
+  assert.doesNotMatch(dockerfile, /CODEX_HOME|auth\.json|BEEP_RUNTIME_API_TOKEN|BEEP_CONTROL_PLANE_RUNTIME_TOKEN/u);
+});
