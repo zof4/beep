@@ -13,6 +13,8 @@ import {
   RUNTIME_START_TIMEOUT_MS,
   RUNTIME_UPDATE_ENV_PATH,
   SANDBOX_DOCKER_WORKSPACE_ROOT,
+  SANDBOX_DOCKERFILE,
+  SANDBOX_IMAGE,
 } from "./config.mjs";
 
 function nowIso() {
@@ -190,6 +192,8 @@ export class RuntimeManager {
       startedAt: nowIso(),
     });
 
+    await this.ensureSandboxImage();
+
     await this.runCommand(
       "docker",
       composeArgs("-f", COMPOSE_FILE, "--profile", "api", "up", "--build", "-d", this.runtimeService),
@@ -205,6 +209,13 @@ export class RuntimeManager {
       readyAt: nowIso(),
     });
     return this.status();
+  }
+
+  async ensureSandboxImage() {
+    await this.runCommand("docker", ["build", "-f", SANDBOX_DOCKERFILE, "-t", SANDBOX_IMAGE, "."], {
+      cwd: ROOT_DIR,
+      env: process.env,
+    });
   }
 
   async stopRuntime() {

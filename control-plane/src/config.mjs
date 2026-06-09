@@ -27,6 +27,8 @@ export const RUNTIME_UPDATE_ENV_PATH =
   process.env.BEEP_RUNTIME_UPDATE_ENV_PATH || join(ROOT_DIR, ".beep-dev/update-state/runtime-update.env");
 export const SANDBOX_DOCKER_WORKSPACE_ROOT =
   process.env.BEEP_SANDBOX_DOCKER_WORKSPACE_ROOT || join(ROOT_DIR, ".beep-dev/workspace/sandboxes");
+export const SANDBOX_IMAGE = process.env.BEEP_SANDBOX_IMAGE || "beep-sandbox:local";
+export const SANDBOX_DOCKERFILE = process.env.BEEP_SANDBOX_DOCKERFILE || "docker/sandbox.Dockerfile";
 
 export const PREVIEW_CONTAINER_PORT_MIN = intEnv("BEEP_PREVIEW_CONTAINER_PORT_MIN", 3000);
 export const PREVIEW_CONTAINER_PORT_MAX = intEnv("BEEP_PREVIEW_CONTAINER_PORT_MAX", 3099);

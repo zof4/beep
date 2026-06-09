@@ -156,6 +156,52 @@ test("runtime manager starts and stops the configured host-loop compose service"
   }
 });
 
+test("runtime manager builds the sandbox image before starting host loop", async () => {
+  const calls = [];
+  const dir = mkdtempSync(join(tmpdir(), "beep-runtime-manager-image-test-"));
+  const store = new StateStore(dir);
+  const { createRuntimeHealthProof } = await import("../../runtime/src/runtime-api-auth.mjs");
+  try {
+    const manager = new RuntimeManager({
+      store,
+      runCommand: async (command, args, options = {}) => {
+        calls.push({ command, args, cwd: options.cwd || null });
+        return { stdout: "", stderr: "" };
+      },
+      fetchRuntime: async () => ({
+        ok: true,
+        service: "beep-agentd",
+        runtimeId: "local",
+        managedProof: createRuntimeHealthProof({
+          challenge: "challenge",
+          runtimeApiToken: store.ensureRuntimeApiToken(),
+        }),
+      }),
+      challengeFactory: () => "challenge",
+      runtimeService: "beep-host-loop",
+    });
+
+    await manager.ensureRuntime({ rebuild: true });
+
+    const buildIndex = calls.findIndex((call) => {
+      return (
+        call.command === "docker" &&
+        call.args.includes("build") &&
+        call.args.includes("-f") &&
+        call.args.includes("docker/sandbox.Dockerfile") &&
+        call.args.includes("-t") &&
+        call.args.includes("beep-sandbox:local")
+      );
+    });
+    const upIndex = calls.findIndex((call) => call.command === "docker" && call.args.includes("up"));
+    assert.notEqual(buildIndex, -1, "runtime manager should build the sandbox image");
+    assert.notEqual(upIndex, -1, "runtime manager should start compose");
+    assert.ok(buildIndex < upIndex, "sandbox image build should happen before host-loop compose up");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("runtime manager attaches parsed upstream payloads to non-2xx proxy errors", async () => {
   const originalFetch = globalThis.fetch;
   const { store, manager, cleanup } = tempManager();
