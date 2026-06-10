@@ -1,16 +1,12 @@
-import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { renameSync, writeFileSync } from "node:fs";
+import { readCodexAuthJsonFile } from "../../runtime/src/codex-auth-file.mjs";
 
 const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 const TOKEN_URL = "https://auth.openai.com/oauth/token";
 const REFRESH_SKEW_SECONDS = 300;
 
 function readAuth(authPath) {
-  if (!existsSync(authPath)) {
-    const error = new Error(`Codex auth.json not found at ${authPath}.`);
-    error.status = 503;
-    throw error;
-  }
-  return JSON.parse(readFileSync(authPath, "utf8"));
+  return readCodexAuthJsonFile(authPath);
 }
 
 function writeAuth(authPath, auth) {

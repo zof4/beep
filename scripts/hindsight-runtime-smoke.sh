@@ -11,6 +11,8 @@ mkdir -p \
   "$ROOT_DIR/.beep-dev/state/codex" \
   "$ROOT_DIR/.beep-dev/hindsight"
 
+node "$ROOT_DIR/scripts/validate-codex-auth.mjs" "$ROOT_DIR/.beep-dev/state/codex/auth.json"
+
 compose=(
   docker compose
   --env-file "$ROOT_DIR/docker/hindsight-image.env"

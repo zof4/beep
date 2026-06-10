@@ -16,6 +16,16 @@ function tempAuthFile(auth) {
   };
 }
 
+function tempRawAuthFile(contents) {
+  const dir = mkdtempSync(join(tmpdir(), "beep-codex-token-test-"));
+  const authPath = join(dir, "auth.json");
+  writeFileSync(authPath, contents, { mode: 0o600 });
+  return {
+    authPath,
+    cleanup: () => rmSync(dir, { recursive: true, force: true }),
+  };
+}
+
 function fakeJwt(exp, extra = {}) {
   const header = Buffer.from(JSON.stringify({ alg: "none" })).toString("base64url");
   const payload = Buffer.from(JSON.stringify({ exp, ...extra })).toString("base64url");
@@ -103,6 +113,59 @@ test("control-plane credential preserves api-key fallback for explicit non-Codex
       source: "control-plane-api-key",
       expiresAt: null,
     });
+  } finally {
+    auth.cleanup();
+  }
+});
+
+test("control-plane credential reports missing auth with login guidance", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "beep-codex-token-test-"));
+  const authPath = join(dir, "missing-auth.json");
+  try {
+    await assert.rejects(
+      () => resolveCodexCredentialFromAuthPath(authPath),
+      (error) => {
+        assert.equal(error.status, 503);
+        assert.match(error.message, /Codex auth preflight failed: auth file not found/u);
+        assert.match(error.message, /Run \.\/scripts\/codex-runtime-login\.sh/u);
+        return true;
+      },
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("control-plane credential reports empty auth with login guidance", async () => {
+  const auth = tempRawAuthFile("");
+  try {
+    await assert.rejects(
+      () => resolveCodexCredentialFromAuthPath(auth.authPath),
+      (error) => {
+        assert.equal(error.status, 503);
+        assert.match(error.message, /auth file is empty/u);
+        assert.doesNotMatch(error.message, /Unexpected end of JSON input/u);
+        assert.match(error.message, /Run \.\/scripts\/codex-runtime-login\.sh/u);
+        return true;
+      },
+    );
+  } finally {
+    auth.cleanup();
+  }
+});
+
+test("control-plane credential reports malformed auth with login guidance", async () => {
+  const auth = tempRawAuthFile("{");
+  try {
+    await assert.rejects(
+      () => resolveCodexCredentialFromAuthPath(auth.authPath),
+      (error) => {
+        assert.equal(error.status, 503);
+        assert.match(error.message, /auth file is not valid JSON/u);
+        assert.match(error.message, /Run \.\/scripts\/codex-runtime-login\.sh/u);
+        return true;
+      },
+    );
   } finally {
     auth.cleanup();
   }
