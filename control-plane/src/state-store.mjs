@@ -124,6 +124,13 @@ function assertValidStateIdentity(value) {
   }
 }
 
+function assertValidToolPackageIdentityPart(value, label) {
+  assertValidStateIdentity(value);
+  if (value.includes("@")) {
+    throw new Error(`invalid tool package ${label}: must not contain @`);
+  }
+}
+
 function invalidStateShape(path, message) {
   throw new Error(`invalid state shape: ${path}: ${message}`);
 }
@@ -486,22 +493,24 @@ export class StateStore {
   }
 
   toolPackageVersionId({ packageId, version }) {
-    assertValidStateIdentity(packageId);
-    assertValidStateIdentity(version);
+    assertValidToolPackageIdentityPart(packageId, "packageId");
+    assertValidToolPackageIdentityPart(version, "version");
     return `${packageId}@${version}`;
   }
 
   installToolPackage(pkg) {
     const packageVersionId = this.toolPackageVersionId(pkg);
     const timestamp = nowIso();
+    const packageFields = { ...pkg };
+    delete packageFields.enabledTools;
     let installed = null;
     this.update((state) => {
       const existing = state.toolPackages[packageVersionId] || {};
       installed = {
-        ...pkg,
+        ...packageFields,
         packageVersionId,
         status: pkg.status || "installed",
-        enabledTools: pkg.enabledTools || existing.enabledTools || {},
+        enabledTools: existing.enabledTools || {},
         installedAt: existing.installedAt || pkg.installedAt || timestamp,
         updatedAt: timestamp,
       };

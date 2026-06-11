@@ -146,6 +146,13 @@ test("state store persists tool packages and enabled tool definitions", () => {
       packageHash: "sha256:abc123",
       source: "sandbox",
       installedAt: "2026-01-01T00:00:00.000Z",
+      enabledTools: {
+        demo_echo: {
+          enabled: true,
+          decidedBy: "package",
+          decidedAt: "2026-01-01T00:00:00.000Z",
+        },
+      },
       tools: [
         {
           name: "demo_echo",
@@ -167,6 +174,8 @@ test("state store persists tool packages and enabled tool definitions", () => {
 
     assert.equal(installed.packageVersionId, "demo_tools@1.0.0");
     assert.equal(installed.status, "installed");
+    assert.deepEqual(installed.enabledTools, {});
+    assert.deepEqual(store.listEnabledToolDefinitions(), []);
 
     const enabled = store.setToolPackageToolEnabled({
       packageId: "demo_tools",
@@ -193,11 +202,51 @@ test("state store persists tool packages and enabled tool definitions", () => {
       packageHash: "sha256:abc123",
       source: "sandbox",
       tools: installed.tools,
+      enabledTools: {
+        demo_echo: {
+          enabled: false,
+          decidedBy: "package",
+          decidedAt: "2026-01-02T00:00:00.000Z",
+        },
+      },
     });
 
     assert.equal(reinstalled.installedAt, firstInstalledAt);
-    assert.equal(reinstalled.enabledTools.demo_echo.enabled, true);
+    assert.deepEqual(reinstalled.enabledTools.demo_echo, enabled.enabledTools.demo_echo);
     assert.equal(Number.isNaN(Date.parse(reinstalled.updatedAt)), false);
+  } finally {
+    cleanup();
+  }
+});
+
+test("state store rejects ambiguous tool package identity components", () => {
+  const { store, cleanup } = tempStore();
+  try {
+    assert.throws(() => store.toolPackageVersionId({ packageId: "a@b", version: "c" }), /must not contain @/);
+    assert.throws(() => store.toolPackageVersionId({ packageId: "a", version: "b@c" }), /must not contain @/);
+    assert.throws(
+      () =>
+        store.installToolPackage({
+          packageId: "a@b",
+          version: "c",
+          packageHash: "sha256:abc123",
+          source: "sandbox",
+          tools: [],
+        }),
+      /must not contain @/,
+    );
+    assert.throws(
+      () =>
+        store.installToolPackage({
+          packageId: "a",
+          version: "b@c",
+          packageHash: "sha256:abc123",
+          source: "sandbox",
+          tools: [],
+        }),
+      /must not contain @/,
+    );
+    assert.deepEqual(store.listToolPackages(), []);
   } finally {
     cleanup();
   }
