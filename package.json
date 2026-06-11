@@ -10,6 +10,8 @@
     "test:reconciliation": "node --test test/*.test.mjs control-plane/test/*.test.mjs",
     "test:host-loop-static": "node --test test/sandbox-tool-protocol.test.mjs test/sandbox-tool-executor.test.mjs test/sandbox-tool-portal-extension.test.mjs test/sandbox-tool-runner.test.mjs test/runtime-integration-static.test.mjs",
     "test:host-loop": "npm run test:host-loop-static && bash -n scripts/smoke-test-host-loop-sandbox.sh",
-    "test:runtime-static": "node --test test/runtime-integration-static.test.mjs"
+    "test:runtime-static": "node --test test/runtime-integration-static.test.mjs",
+    "vendor:codex:update": "bash scripts/update-vendor-openai-codex.sh",
+    "test:tools": "node --test test/vendor-codex-sync-script.test.mjs test/dynamic-sandbox-cli-tool.test.mjs control-plane/test/tool-package-validator.test.mjs control-plane/test/tool-registry.test.mjs control-plane/test/openai-web-search.test.mjs control-plane/test/tool-package-routes.test.mjs test/runtime-control-plane-tools-extension.test.mjs"
   }
 }
