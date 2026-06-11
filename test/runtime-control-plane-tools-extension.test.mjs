@@ -540,32 +540,45 @@ test("extension removes disabled control-plane tools from active tools on refres
 });
 
 test("stale registered tool calls still return broker denial text", async () => {
-  await withManifestExec(async () => {
-    await withExtensionEnv(async () => {
-      const originalFetch = globalThis.fetch;
-      globalThis.fetch = async () => ({
-        ok: true,
-        statusText: "OK",
-        json: async () => ({
-          ok: false,
-          status: "denied",
-          error: "Unknown tool action: beep.tools.demo_tools.demo_echo",
-        }),
-      });
+  const firstTools = manifestTools();
+  const secondTools = firstTools.filter((tool) => tool.name !== "demo_echo");
 
-      try {
+  await withManifestSequence(
+    async () => {
+      await withExtensionEnv(async () => {
         const runtime = await loadedExtensionPi();
         const tool = runtime.tools.find((candidate) => candidate.name === "demo_echo");
         assert.ok(tool, "demo_echo should be registered from startup manifest");
 
-        const result = await tool.execute("tool-call-stale", { text: "hello" });
+        await runtime.emit("before_agent_start", { prompt: "Next request.", systemPrompt: "", systemPromptOptions: {} });
 
-        assert.match(textFromResult(result), /Unknown tool action/u);
-        assert.equal(result.details.ok, false);
-        assert.equal(result.details.status, "denied");
-      } finally {
-        globalThis.fetch = originalFetch;
-      }
-    });
-  });
+        assert.equal(runtime.activeToolNames.includes("demo_echo"), false);
+
+        const originalFetch = globalThis.fetch;
+        globalThis.fetch = async () => ({
+          ok: true,
+          statusText: "OK",
+          json: async () => ({
+            ok: false,
+            status: "denied",
+            error: "Unknown tool action: beep.tools.demo_tools.demo_echo",
+          }),
+        });
+
+        try {
+          const result = await tool.execute("tool-call-stale", { text: "hello" });
+
+          assert.match(textFromResult(result), /Unknown tool action/u);
+          assert.equal(result.details.ok, false);
+          assert.equal(result.details.status, "denied");
+        } finally {
+          globalThis.fetch = originalFetch;
+        }
+      });
+    },
+    [
+      { ok: true, payload: { ok: true, revision: "sha256:first", tools: firstTools } },
+      { ok: true, payload: { ok: true, revision: "sha256:second", tools: secondTools } },
+    ],
+  );
 });
