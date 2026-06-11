@@ -219,6 +219,15 @@ function operatorOwnedEnabledTools(enabledTools, knownToolNames) {
   return filtered;
 }
 
+function sanitizedToolPackageRecord(pkg) {
+  const tools = Array.isArray(pkg.tools) ? pkg.tools : [];
+  const knownToolNames = new Set(tools.map((tool) => tool?.name));
+  return {
+    ...pkg,
+    enabledTools: operatorOwnedEnabledTools(pkg.enabledTools, knownToolNames),
+  };
+}
+
 function normalizeStateShape(state, path) {
   if (!isPlainObject(state)) {
     invalidStateShape(path, "top-level state must be an object");
@@ -568,12 +577,13 @@ export class StateStore {
   }
 
   listToolPackages() {
-    return Object.values(this.readState().toolPackages || {});
+    return Object.values(this.readState().toolPackages || {}).map((pkg) => sanitizedToolPackageRecord(pkg));
   }
 
   getToolPackage(packageId, version) {
     const packageVersionId = this.toolPackageVersionId({ packageId, version });
-    return this.readState().toolPackages?.[packageVersionId] || null;
+    const pkg = this.readState().toolPackages?.[packageVersionId] || null;
+    return pkg ? sanitizedToolPackageRecord(pkg) : null;
   }
 
   setToolPackageToolEnabled({ packageId, version, toolName, enabled, decidedBy = "operator" }) {
@@ -616,10 +626,9 @@ export class StateStore {
 
   listEnabledToolDefinitions() {
     return this.listToolPackages().flatMap((pkg) => {
-      const enabledTools = pkg.enabledTools || {};
       const tools = Array.isArray(pkg.tools) ? pkg.tools : [];
       return tools
-        .filter((tool) => enabledTools[tool.name]?.enabled === true)
+        .filter((tool) => pkg.enabledTools[tool.name]?.enabled === true)
         .map((tool) => ({
           ...tool,
           packageId: pkg.packageId,

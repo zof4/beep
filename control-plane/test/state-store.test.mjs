@@ -295,6 +295,86 @@ test("state store rejects ambiguous tool package identity components", () => {
   }
 });
 
+test("state store ignores legacy non-operator enabled tools when listing definitions", () => {
+  const { dir, store, cleanup } = tempStore();
+  try {
+    const statePath = join(dir, "state.json");
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      statePath,
+      `${JSON.stringify({
+        schemaVersion: 1,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+        toolPackages: {
+          "demo_tools@1.0.0": {
+            packageVersionId: "demo_tools@1.0.0",
+            packageId: "demo_tools",
+            version: "1.0.0",
+            packageHash: "sha256:abc123",
+            source: "sandbox",
+            status: "installed",
+            installedAt: "2026-01-01T00:00:00.000Z",
+            updatedAt: "2026-01-01T00:00:00.000Z",
+            enabledTools: {
+              demo_echo: {
+                enabled: true,
+                decidedBy: "operator",
+                decidedAt: "2026-01-02T00:00:00.000Z",
+              },
+              demo_package_owned: {
+                enabled: true,
+                decidedBy: "package",
+                decidedAt: "2026-01-02T00:00:00.000Z",
+              },
+              demo_malformed: {
+                enabled: true,
+                decidedBy: "operator",
+              },
+              demo_false: {
+                enabled: false,
+                decidedBy: "operator",
+                decidedAt: "2026-01-02T00:00:00.000Z",
+              },
+            },
+            tools: [
+              {
+                name: "demo_echo",
+                action: "beep.tools.demo_tools.demo_echo",
+                target: "sandbox",
+              },
+              {
+                name: "demo_package_owned",
+                action: "beep.tools.demo_tools.demo_package_owned",
+                target: "sandbox",
+              },
+              {
+                name: "demo_malformed",
+                action: "beep.tools.demo_tools.demo_malformed",
+                target: "sandbox",
+              },
+              {
+                name: "demo_false",
+                action: "beep.tools.demo_tools.demo_false",
+                target: "sandbox",
+              },
+            ],
+          },
+        },
+        audit: [],
+      })}\n`,
+      { mode: 0o600 },
+    );
+
+    assert.deepEqual(
+      store.listEnabledToolDefinitions().map((tool) => tool.action),
+      ["beep.tools.demo_tools.demo_echo"],
+    );
+  } finally {
+    cleanup();
+  }
+});
+
 test("state store separates runtime, runtime API, model credential, and operator tokens", () => {
   const { store, cleanup } = tempStore();
   try {
