@@ -18,18 +18,23 @@ async function loadExtension() {
       Optional(schema) { return { optional: true, schema }; },
     };`,
   );
-  const moduleUrl = `data:text/javascript;charset=utf-8,${encodeURIComponent(sourceWithTypeShim)}#${Date.now()}-${Math.random()}`;
+  const sourceWithExecFileShim = sourceWithTypeShim.replace(
+    /^import \{ execFileSync \} from "node:child_process";$/m,
+    `const execFileSync = globalThis.__BEEP_TEST_EXEC_FILE_SYNC__;`,
+  );
+  const moduleUrl = `data:text/javascript;charset=utf-8,${encodeURIComponent(sourceWithExecFileShim)}#${Date.now()}-${Math.random()}`;
   return import(moduleUrl);
 }
 
 async function registeredTools() {
   const { default: extension } = await loadExtension();
   const tools = [];
-  await extension({
+  const result = extension({
     registerTool(tool) {
       tools.push(tool);
     },
   });
+  assert.equal(result, undefined, "extension setup should complete synchronously");
   return tools;
 }
 
@@ -50,7 +55,7 @@ function withExtensionEnv(callback, options = {}) {
   } else {
     process.env.BEEP_CONTROL_PLANE_TOOLS_ENABLED = toolsEnabled;
   }
-  process.env.BEEP_CONTROL_PLANE_URL = "http://control-plane.test/root/";
+  process.env.BEEP_CONTROL_PLANE_URL = options.controlPlaneUrl || "http://control-plane.test/root/";
   process.env.BEEP_CONTROL_PLANE_RUNTIME_ID = "runtime-alpha";
   process.env.BEEP_CONTROL_PLANE_RUNTIME_TOKEN = "runtime-token";
   process.env.BEEP_CONTROL_PLANE_OPERATOR_TOKEN = "operator-token";
@@ -125,12 +130,25 @@ function manifestTools() {
   ];
 }
 
-function manifestResponse({ ok = true, tools = manifestTools() } = {}) {
-  return {
-    ok,
-    statusText: ok ? "OK" : "Server Error",
-    json: async () => ({ ok, tools }),
+async function withManifestExec(callback, { ok = true, tools = manifestTools(), throws = false } = {}) {
+  const originalExecFileSync = globalThis.__BEEP_TEST_EXEC_FILE_SYNC__;
+  const calls = [];
+  globalThis.__BEEP_TEST_EXEC_FILE_SYNC__ = (file, args, options = {}) => {
+    const request = JSON.parse(options.input);
+    calls.push({ file, args, options, request });
+    if (throws) throw new Error("manifest unavailable");
+    return JSON.stringify({ ok, payload: { ok, tools } });
   };
+
+  try {
+    return await callback({ calls });
+  } finally {
+    if (originalExecFileSync === undefined) {
+      delete globalThis.__BEEP_TEST_EXEC_FILE_SYNC__;
+    } else {
+      globalThis.__BEEP_TEST_EXEC_FILE_SYNC__ = originalExecFileSync;
+    }
+  }
 }
 
 test("extension defaults off when tools enabled env is unset", async () => {
@@ -144,24 +162,19 @@ test("extension defaults off when tools enabled env is unset", async () => {
 });
 
 test("extension registers tools when explicitly enabled", async () => {
-  await withExtensionEnv(async () => {
-    const originalFetch = globalThis.fetch;
-    const calls = [];
-    globalThis.fetch = async (url, options = {}) => {
-      calls.push({ url: String(url), options });
-      return manifestResponse();
-    };
-
-    try {
+  await withManifestExec(async ({ calls }) => {
+    await withExtensionEnv(async () => {
       const tools = await registeredTools();
       assert.deepEqual(
         tools.map((tool) => tool.name).sort(),
         ["demo_echo", "web_run"],
       );
       assert.equal(calls.length, 1);
-      assert.equal(calls[0].url, "http://control-plane.test/root/api/tools");
-      assert.equal(calls[0].options.method, "GET");
-      assert.equal(calls[0].options.headers.authorization, "Bearer runtime-token");
+      assert.equal(calls[0].request.url, "http://control-plane.test/root/api/tools");
+      assert.equal(calls[0].request.token, "runtime-token");
+      assert.equal(calls[0].request.timeoutMs, 15_000);
+      assert.deepEqual(calls[0].args.slice(0, 2), ["--input-type=module", "--eval"]);
+      assert.equal(calls[0].options.stdio[2], "ignore");
 
       const webRun = tools.find((tool) => tool.name === "web_run");
       assert.equal(webRun.label, "Web Search");
@@ -177,21 +190,17 @@ test("extension registers tools when explicitly enabled", async () => {
       assert.equal(demoEcho.parameters.schema.text.type, "string");
       assert.equal(demoEcho.parameters.schema.loud.optional, true);
       assert.equal(demoEcho.parameters.schema.count.optional, true);
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
+    });
   });
 });
 
 test("manifest tool posts to internal tools call with runtime token and request body", async () => {
-  await withExtensionEnv(async () => {
+  await withManifestExec(async ({ calls: manifestCalls }) => {
+    await withExtensionEnv(async () => {
     const originalFetch = globalThis.fetch;
     const calls = [];
     globalThis.fetch = async (url, options = {}) => {
       calls.push({ url: String(url), options });
-      if (String(url).endsWith("/api/tools")) {
-        return manifestResponse();
-      }
       return {
         ok: true,
         statusText: "OK",
@@ -216,14 +225,14 @@ test("manifest tool posts to internal tools call with runtime token and request 
 
       const result = await tool.execute("tool-call-1", { text: "hello" });
 
-      assert.equal(calls.length, 2);
-      assert.equal(calls[0].url, "http://control-plane.test/root/api/tools");
-      assert.equal(calls[1].url, "http://control-plane.test/root/internal/tools/call");
-      assert.equal(calls[1].options.method, "POST");
-      assert.equal(calls[1].options.headers.authorization, "Bearer runtime-token");
-      assert.notEqual(calls[1].options.headers.authorization, "Bearer operator-token");
-      assert.notEqual(calls[1].options.headers.authorization, "Bearer model-token");
-      assert.deepEqual(JSON.parse(calls[1].options.body), {
+      assert.deepEqual(manifestCalls.map((call) => call.request.url), ["http://control-plane.test/root/api/tools"]);
+      assert.equal(calls.length, 1);
+      assert.equal(calls[0].url, "http://control-plane.test/root/internal/tools/call");
+      assert.equal(calls[0].options.method, "POST");
+      assert.equal(calls[0].options.headers.authorization, "Bearer runtime-token");
+      assert.notEqual(calls[0].options.headers.authorization, "Bearer operator-token");
+      assert.notEqual(calls[0].options.headers.authorization, "Bearer model-token");
+      assert.deepEqual(JSON.parse(calls[0].options.body), {
         runtimeId: "runtime-alpha",
         action: "beep.tools.demo_tools.demo_echo",
         args: { text: "hello" },
@@ -234,14 +243,15 @@ test("manifest tool posts to internal tools call with runtime token and request 
     } finally {
       globalThis.fetch = originalFetch;
     }
+    });
   });
 });
 
 test("manifest tool normalizes needs_review and denied payloads into text results", async () => {
-  await withExtensionEnv(async () => {
+  await withManifestExec(async () => {
+    await withExtensionEnv(async () => {
     const originalFetch = globalThis.fetch;
     const responses = [
-      manifestResponse(),
       {
         ok: true,
         statusText: "OK",
@@ -281,18 +291,17 @@ test("manifest tool normalizes needs_review and denied payloads into text result
     } finally {
       globalThis.fetch = originalFetch;
     }
+    });
   });
 });
 
 test("tool execute normalizes fetch failures into structured text results", async () => {
-  await withExtensionEnv(async () => {
+  await withManifestExec(async () => {
+    await withExtensionEnv(async () => {
     const originalFetch = globalThis.fetch;
     let calls = 0;
-    globalThis.fetch = async (url) => {
+    globalThis.fetch = async () => {
       calls += 1;
-      if (String(url).endsWith("/api/tools")) {
-        return manifestResponse();
-      }
       throw new Error("network down");
     };
 
@@ -301,50 +310,34 @@ test("tool execute normalizes fetch failures into structured text results", asyn
       const tool = tools.find((candidate) => candidate.name === "web_run");
       const result = await tool.execute("tool-call-4", { search_query: [{ q: "beep" }] });
 
-      assert.equal(calls, 2);
+      assert.equal(calls, 1);
       assert.match(textFromResult(result), /web_run failed: network down/u);
       assert.equal(result.details.ok, false);
       assert.equal(result.details.status, "request_failed");
     } finally {
       globalThis.fetch = originalFetch;
     }
+    });
   });
 });
 
 test("extension registers nothing when manifest fetch fails or tools payload is invalid", async () => {
-  await withExtensionEnv(async () => {
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = async () => {
-      throw new Error("manifest unavailable");
-    };
-
-    try {
+  await withManifestExec(async () => {
+    await withExtensionEnv(async () => {
       assert.deepEqual(await registeredTools(), []);
       assert.equal(process.env.BEEP_CONTROL_PLANE_RUNTIME_TOKEN, undefined);
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-  });
+    });
+  }, { throws: true });
 
-  await withExtensionEnv(async () => {
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = async () => manifestResponse({ ok: false });
-
-    try {
+  await withManifestExec(async () => {
+    await withExtensionEnv(async () => {
       assert.deepEqual(await registeredTools(), []);
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-  });
+    });
+  }, { ok: false });
 
-  await withExtensionEnv(async () => {
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = async () => manifestResponse({ tools: { web_run: {} } });
-
-    try {
+  await withManifestExec(async () => {
+    await withExtensionEnv(async () => {
       assert.deepEqual(await registeredTools(), []);
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-  });
+    });
+  }, { tools: { web_run: {} } });
 });

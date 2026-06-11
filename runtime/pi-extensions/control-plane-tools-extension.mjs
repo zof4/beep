@@ -1,4 +1,5 @@
 import { Type } from "@earendil-works/pi-ai";
+import { execFileSync } from "node:child_process";
 
 function boolEnv(name, fallback = false) {
   const value = process.env[name];
@@ -39,24 +40,6 @@ async function postJson(url, body, { token, timeoutMs }) {
         "content-type": "application/json",
       },
       body: JSON.stringify(body),
-      signal: controller.signal,
-    });
-    const payload = await response.json().catch(() => ({}));
-    return { response, payload };
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
-async function getJson(url, { token, timeoutMs }) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const response = await fetch(url, {
-      method: "GET",
-      headers: {
-        authorization: `Bearer ${token}`,
-      },
       signal: controller.signal,
     });
     const payload = await response.json().catch(() => ({}));
@@ -113,16 +96,52 @@ async function callControlPlaneTool(config, action, args, toolCallId) {
   }
 }
 
-async function fetchToolManifest(config) {
+function fetchToolManifest(config) {
   const { controlPlaneUrl, token, timeoutMs } = config;
   if (!controlPlaneUrl || !token) return [];
 
   try {
-    const { response, payload } = await getJson(`${controlPlaneUrl.replace(/\/+$/u, "")}/api/tools`, {
-      token,
-      timeoutMs,
-    });
-    if (!response?.ok || payload?.ok === false || !Array.isArray(payload?.tools)) return [];
+    const output = execFileSync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "--eval",
+        `
+          let input = "";
+          process.stdin.setEncoding("utf8");
+          for await (const chunk of process.stdin) input += chunk;
+          const { url, token, timeoutMs } = JSON.parse(input);
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), timeoutMs);
+          try {
+            const response = await fetch(url, {
+              method: "GET",
+              headers: { authorization: \`Bearer \${token}\` },
+              signal: controller.signal,
+            });
+            const payload = await response.json().catch(() => ({}));
+            process.stdout.write(JSON.stringify({ ok: response.ok, payload }));
+          } catch (error) {
+            process.stdout.write(JSON.stringify({ ok: false, payload: {} }));
+          } finally {
+            clearTimeout(timeout);
+          }
+        `,
+      ],
+      {
+        input: JSON.stringify({
+          url: `${controlPlaneUrl.replace(/\/+$/u, "")}/api/tools`,
+          token,
+          timeoutMs,
+        }),
+        encoding: "utf8",
+        maxBuffer: 1024 * 1024,
+        stdio: ["pipe", "pipe", "ignore"],
+        timeout: timeoutMs + 1000,
+      },
+    );
+    const { ok, payload } = JSON.parse(output || "{}");
+    if (!ok || payload?.ok === false || !Array.isArray(payload?.tools)) return [];
     return payload.tools.filter((tool) => tool && typeof tool === "object");
   } catch {
     return [];
@@ -236,11 +255,11 @@ function validToolDefinition(definition) {
   );
 }
 
-export default async function beepControlPlaneToolsExtension(pi) {
+export default function beepControlPlaneToolsExtension(pi) {
   const config = readControlPlaneConfig();
   if (!config.enabled) return;
 
-  const definitions = await fetchToolManifest(config);
+  const definitions = fetchToolManifest(config);
   for (const definition of definitions) {
     if (!validToolDefinition(definition)) continue;
     pi.registerTool({
