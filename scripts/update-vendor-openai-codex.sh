@@ -12,4 +12,4 @@ git -C "$CODEX_VENDOR_DIR" fetch --depth 1 origin main
 git -C "$CODEX_VENDOR_DIR" checkout --detach FETCH_HEAD
 
 echo "vendor/openai-codex now points at $(git -C "$CODEX_VENDOR_DIR" rev-parse HEAD)"
-npm run test:tools
+npm --prefix "$ROOT_DIR" run test:tools

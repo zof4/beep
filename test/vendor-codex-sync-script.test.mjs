@@ -6,7 +6,8 @@ test("Codex vendor update script pins vendor/openai-codex to upstream main", () 
   const script = readFileSync("scripts/update-vendor-openai-codex.sh", "utf8");
   assert.match(script, /git -C "\$CODEX_VENDOR_DIR" fetch --depth 1 origin main/u);
   assert.match(script, /git -C "\$CODEX_VENDOR_DIR" checkout --detach FETCH_HEAD/u);
-  assert.match(script, /npm run test:tools/u);
+  assert.match(script, /npm --prefix "\$ROOT_DIR" run test:tools/u);
+  assert.doesNotMatch(script, /(?:^|\n)npm run test:tools(?:\n|$)/u);
   assert.doesNotMatch(script, /git submodule update --remote/u);
 });
 
