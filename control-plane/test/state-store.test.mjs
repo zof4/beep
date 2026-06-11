@@ -145,6 +145,7 @@ test("state store persists tool packages and enabled tool definitions", () => {
       version: "1.0.0",
       packageHash: "sha256:abc123",
       source: "sandbox",
+      installedAt: "2026-01-01T00:00:00.000Z",
       tools: [
         {
           name: "demo_echo",
@@ -184,6 +185,19 @@ test("state store persists tool packages and enabled tool definitions", () => {
     const state = store.readState();
     assert.ok(state.audit.some((event) => event.kind === "tool_package_install"));
     assert.ok(state.audit.some((event) => event.kind === "tool_enable"));
+
+    const firstInstalledAt = installed.installedAt;
+    const reinstalled = store.installToolPackage({
+      packageId: "demo_tools",
+      version: "1.0.0",
+      packageHash: "sha256:abc123",
+      source: "sandbox",
+      tools: installed.tools,
+    });
+
+    assert.equal(reinstalled.installedAt, firstInstalledAt);
+    assert.equal(reinstalled.enabledTools.demo_echo.enabled, true);
+    assert.equal(Number.isNaN(Date.parse(reinstalled.updatedAt)), false);
   } finally {
     cleanup();
   }

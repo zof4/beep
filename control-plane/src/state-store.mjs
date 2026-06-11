@@ -496,12 +496,13 @@ export class StateStore {
     const timestamp = nowIso();
     let installed = null;
     this.update((state) => {
+      const existing = state.toolPackages[packageVersionId] || {};
       installed = {
         ...pkg,
         packageVersionId,
         status: pkg.status || "installed",
-        enabledTools: pkg.enabledTools || {},
-        installedAt: pkg.installedAt || timestamp,
+        enabledTools: pkg.enabledTools || existing.enabledTools || {},
+        installedAt: existing.installedAt || pkg.installedAt || timestamp,
         updatedAt: timestamp,
       };
       state.toolPackages[packageVersionId] = installed;
