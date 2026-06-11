@@ -308,6 +308,33 @@ test("extension refreshes changed control-plane tools before the next agent star
   );
 });
 
+test("extension restores current active tools on same-revision refresh without re-registering", async () => {
+  const tools = manifestTools();
+
+  await withManifestSequence(
+    async ({ calls }) => {
+      await withExtensionEnv(async () => {
+        const runtime = await loadedExtensionPi();
+        const registeredCount = runtime.tools.length;
+        const removedIndex = runtime.activeToolNames.indexOf("demo_echo");
+        assert.notEqual(removedIndex, -1, "demo_echo should start active");
+        runtime.activeToolNames.splice(removedIndex, 1);
+        assert.equal(runtime.activeToolNames.includes("demo_echo"), false);
+
+        await runtime.emit("before_agent_start", { prompt: "Next request.", systemPrompt: "", systemPromptOptions: {} });
+
+        assert.ok(runtime.activeToolNames.includes("demo_echo"));
+        assert.equal(runtime.tools.length, registeredCount);
+        assert.equal(calls.length, 2);
+      });
+    },
+    [
+      { ok: true, payload: { ok: true, revision: "sha256:same", tools } },
+      { ok: true, payload: { ok: true, revision: "sha256:same", tools } },
+    ],
+  );
+});
+
 test("manifest tool posts to internal tools call with runtime token and request body", async () => {
   await withManifestExec(async ({ calls: manifestCalls }) => {
     await withExtensionEnv(async () => {
@@ -454,6 +481,33 @@ test("extension registers nothing when manifest fetch fails or tools payload is 
       assert.deepEqual(await registeredTools(), []);
     });
   }, { tools: { web_run: {} } });
+});
+
+test("extension no-ops active-tool reconciliation when Pi active tool methods throw", async () => {
+  await withManifestExec(async () => {
+    await withExtensionEnv(async () => {
+      const { default: extension } = await loadExtension();
+      const tools = [];
+      const pi = {
+        registerTool(tool) {
+          tools.push(tool);
+        },
+        on() {},
+        getActiveTools() {
+          throw new Error("not initialized");
+        },
+        setActiveTools() {
+          throw new Error("not initialized");
+        },
+      };
+
+      assert.doesNotThrow(() => extension(pi));
+      assert.deepEqual(
+        tools.map((tool) => tool.name).sort(),
+        ["demo_echo", "web_run"],
+      );
+    });
+  });
 });
 
 test("extension removes disabled control-plane tools from active tools on refresh", async () => {

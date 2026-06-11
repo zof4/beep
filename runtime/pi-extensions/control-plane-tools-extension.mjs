@@ -279,17 +279,21 @@ function toolFingerprint(definition) {
 }
 
 function reconcileActiveTools(pi, previousBeepToolNames, nextBeepToolNames) {
-  if (typeof pi.getActiveTools !== "function" || typeof pi.setActiveTools !== "function") return;
-  const active = pi.getActiveTools();
-  if (!Array.isArray(active)) return;
+  try {
+    if (typeof pi.getActiveTools !== "function" || typeof pi.setActiveTools !== "function") return;
+    const active = pi.getActiveTools();
+    if (!Array.isArray(active)) return;
 
-  const previousBeep = new Set(previousBeepToolNames);
-  const nextBeep = new Set(nextBeepToolNames);
-  const preserved = active.filter((name) => !previousBeep.has(name) || nextBeep.has(name));
-  for (const name of nextBeep) {
-    if (!preserved.includes(name)) preserved.push(name);
+    const previousBeep = new Set(previousBeepToolNames);
+    const nextBeep = new Set(nextBeepToolNames);
+    const preserved = active.filter((name) => !previousBeep.has(name) || nextBeep.has(name));
+    for (const name of nextBeep) {
+      if (!preserved.includes(name)) preserved.push(name);
+    }
+    pi.setActiveTools([...new Set(preserved)]);
+  } catch {
+    return;
   }
-  pi.setActiveTools([...new Set(preserved)]);
 }
 
 function makePiTool(config, definition) {
@@ -318,7 +322,10 @@ export default function beepControlPlaneToolsExtension(pi) {
 
   function applyManifest(manifest) {
     if (!manifest?.ok) return false;
-    if (manifest.revision && manifest.revision === state.revision) return false;
+    if (manifest.revision && manifest.revision === state.revision) {
+      reconcileActiveTools(pi, state.beepToolNames, state.beepToolNames);
+      return false;
+    }
 
     const previousNames = state.beepToolNames;
     const nextFingerprints = new Map();
