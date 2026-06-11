@@ -226,10 +226,11 @@ test("broker forwards enabled dynamic sandbox tool definitions to sandboxToolCal
     assert.deepEqual(result.result, { echoed: "hello" });
     assert.equal(calls.length, 1);
     assert.equal(calls[0].action, "beep.tools.demo_tools.demo_echo");
+    assert.equal(calls[0].toolName, "dynamic_cli");
     assert.equal(calls[0].toolCallId, "call_sandbox");
     assert.deepEqual(calls[0].args, { text: "hello" });
     assert.equal(calls[0].timeoutMs, 7000);
-    assert.deepEqual(calls[0].definition.command, {
+    assert.deepEqual(calls[0].dynamicTool.command, {
       argv: ["node", ".beep/tools/demo_tools/bin/echo.mjs"],
       input: "json-stdin",
       timeoutMs: 7000,
@@ -268,8 +269,10 @@ test("approved review-mode sandbox tools execute through sandboxToolCaller", asy
     assert.deepEqual(result, { approved: true, text: "approved" });
     assert.equal(calls.length, 1);
     assert.equal(calls[0].action, "beep.tools.demo_tools.demo_echo");
+    assert.equal(calls[0].toolName, "dynamic_cli");
     assert.equal(calls[0].toolCallId, "call_review_sandbox");
     assert.equal(calls[0].timeoutMs, 9000);
+    assert.equal(calls[0].dynamicTool.action, "beep.tools.demo_tools.demo_echo");
   } finally {
     cleanup();
   }

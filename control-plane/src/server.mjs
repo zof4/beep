@@ -32,7 +32,7 @@ export function createDefaultComponents() {
       body: JSON.stringify(body),
     });
   const toolBroker = new ToolBroker({ store, gatekeeper, registry, webSearch, sandboxToolCaller });
-  return { store, runtimeManager, gatekeeper, registry, toolBroker };
+  return { store, runtimeManager, gatekeeper, registry, webSearch, toolBroker };
 }
 
 async function proxyLocalPort(request, response, hostPort, suffixPath) {

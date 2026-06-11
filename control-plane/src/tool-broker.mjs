@@ -326,10 +326,11 @@ export class ToolBroker {
       await this.sandboxToolCaller({
         runtimeId,
         toolCallId,
+        toolName: "dynamic_cli",
         action,
         args,
         timeoutMs: Number.isInteger(commandTimeoutMs) && commandTimeoutMs > 0 ? commandTimeoutMs : 15_000,
-        definition,
+        dynamicTool: definition,
       }),
       "Sandbox tool failed.",
     );
