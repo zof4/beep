@@ -167,6 +167,7 @@ export function createWebRunExecutor({
           input: commandPrompt(args),
           tools: [tool],
           tool_choice: "required",
+          include: ["web_search_call.action.sources"],
         }),
       });
       const payload = await readResponseJson(response);

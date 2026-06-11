@@ -38,6 +38,7 @@ test("web.run maps search_query to a Responses API web_search request", async ()
   const body = JSON.parse(seen.options.body);
   assert.equal(body.model, "gpt-test");
   assert.equal(body.tool_choice, "required");
+  assert.deepEqual(body.include, ["web_search_call.action.sources"]);
   assert.deepEqual(body.tools, [{ type: "web_search", filters: { allowed_domains: ["docs.openclaw.ai"] } }]);
   assert.match(body.input, /OpenClaw tools docs/u);
 });

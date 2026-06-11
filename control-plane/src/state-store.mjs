@@ -145,6 +145,12 @@ function notFoundError(message) {
   return error;
 }
 
+function conflictError(message) {
+  const error = new Error(message);
+  error.status = 409;
+  return error;
+}
+
 function validateStateIdentity(value, path, label) {
   if (!isValidStateIdentity(value)) {
     invalidStateShape(path, `${label} must be a non-empty safe string`);
@@ -598,6 +604,18 @@ export class StateStore {
       if (!tool) throw notFoundError(`tool not found in package ${packageVersionId}: ${toolName}`);
 
       const decidedAt = nowIso();
+      if (enabled) {
+        for (const [otherPackageVersionId, otherPackage] of Object.entries(state.toolPackages || {})) {
+          if (otherPackageVersionId === packageVersionId) continue;
+          const otherTools = Array.isArray(otherPackage.tools) ? otherPackage.tools : [];
+          const conflictingTool = otherTools.find(
+            (candidate) => candidate?.action === tool.action && otherPackage.enabledTools?.[candidate.name]?.enabled === true,
+          );
+          if (conflictingTool) {
+            throw conflictError(`tool action already enabled in package ${otherPackageVersionId}: ${tool.action}`);
+          }
+        }
+      }
       next = {
         ...current,
         enabledTools: {

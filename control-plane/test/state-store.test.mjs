@@ -295,6 +295,68 @@ test("state store rejects ambiguous tool package identity components", () => {
   }
 });
 
+test("state store rejects enabling duplicate tool actions across package versions", () => {
+  const { store, cleanup } = tempStore();
+  try {
+    const tool = {
+      name: "demo_echo",
+      action: "beep.tools.demo_tools.demo_echo",
+      namespace: "beep_tools",
+      description: "Echo text from the sandbox.",
+      inputSchema: { type: "object", additionalProperties: false, properties: {} },
+      target: "sandbox",
+      command: {
+        argv: ["node", ".beep/tools/demo_tools/bin/echo.mjs"],
+        input: "json-stdin",
+        timeoutMs: 5000,
+      },
+      scopes: ["sandbox.tool.execute"],
+      defaultDecision: "review",
+    };
+
+    store.installToolPackage({
+      packageId: "demo_tools",
+      version: "1.0.0",
+      packageHash: "sha256:v1",
+      source: "sandbox",
+      tools: [tool],
+    });
+    store.installToolPackage({
+      packageId: "demo_tools",
+      version: "2.0.0",
+      packageHash: "sha256:v2",
+      source: "sandbox",
+      tools: [tool],
+    });
+
+    store.setToolPackageToolEnabled({
+      packageId: "demo_tools",
+      version: "1.0.0",
+      toolName: "demo_echo",
+      enabled: true,
+      decidedBy: "operator",
+    });
+
+    assert.throws(
+      () =>
+        store.setToolPackageToolEnabled({
+          packageId: "demo_tools",
+          version: "2.0.0",
+          toolName: "demo_echo",
+          enabled: true,
+          decidedBy: "operator",
+        }),
+      /tool action already enabled in package demo_tools@1\.0\.0/u,
+    );
+    assert.deepEqual(
+      store.listEnabledToolDefinitions().map((enabledTool) => enabledTool.packageVersionId),
+      ["demo_tools@1.0.0"],
+    );
+  } finally {
+    cleanup();
+  }
+});
+
 test("state store ignores legacy non-operator enabled tools when listing definitions", () => {
   const { dir, store, cleanup } = tempStore();
   try {
