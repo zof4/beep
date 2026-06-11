@@ -214,6 +214,9 @@ test("full-stack E2E npm script syntax-checks each shell script explicitly", () 
 
 test("full-stack E2E covers generated tool package install, enable, manifest visibility, and execution", () => {
   const source = scriptSource("test-full-stack-e2e.sh");
+  const dynamicToolScriptIndex = source.indexOf('toolCallId: "full_stack_dynamic_tool_write"');
+  const installIndex = source.indexOf("/api/tools/packages", dynamicToolScriptIndex);
+  const dynamicToolScriptBlock = source.slice(dynamicToolScriptIndex, installIndex);
 
   assert.match(source, /\/api\/tools\/packages/u);
   assert.match(source, /demo_tools/u);
@@ -221,4 +224,5 @@ test("full-stack E2E covers generated tool package install, enable, manifest vis
   assert.match(source, /beep\.tools\.demo_tools\.demo_echo/u);
   assert.match(source, /\/internal\/tools\/call/u);
   assert.match(source, /web\.run/u);
+  assert.doesNotMatch(dynamicToolScriptBlock, /sessionId/u);
 });

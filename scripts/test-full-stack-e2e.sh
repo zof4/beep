@@ -326,7 +326,7 @@ DYNAMIC_TOOL_SCRIPT_OUTPUT_FILE="$OUTPUT_DIR/dynamic-tool-script-write.json"
 TOOL_PACKAGE_BODY_FILE="$OUTPUT_DIR/tool-package-install-request.json"
 TOOL_PACKAGE_CALL_BODY_FILE="$OUTPUT_DIR/dynamic-tool-call-request.json"
 
-SESSION_ID="$SESSION_ID" node --input-type=module >"$DYNAMIC_TOOL_SCRIPT_BODY_FILE" <<'NODE'
+node --input-type=module >"$DYNAMIC_TOOL_SCRIPT_BODY_FILE" <<'NODE'
 const script = [
   "#!/usr/bin/env node",
   "let input = '';",
@@ -339,7 +339,6 @@ const script = [
   "",
 ].join("\n");
 const body = {
-  sessionId: process.env.SESSION_ID,
   toolCallId: "full_stack_dynamic_tool_write",
   toolName: "write",
   args: {
