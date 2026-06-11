@@ -16,6 +16,6 @@ test("package.json exposes Codex vendor update and tool tests", () => {
   assert.equal(pkg.scripts["vendor:codex:update"], "bash scripts/update-vendor-openai-codex.sh");
   assert.equal(
     pkg.scripts["test:tools"],
-    "node --test test/vendor-codex-sync-script.test.mjs test/dynamic-sandbox-cli-tool.test.mjs control-plane/test/tool-package-validator.test.mjs control-plane/test/tool-registry.test.mjs control-plane/test/openai-web-search.test.mjs control-plane/test/tool-package-routes.test.mjs test/runtime-control-plane-tools-extension.test.mjs",
+    "node --test test/vendor-codex-sync-script.test.mjs test/dynamic-sandbox-cli-tool.test.mjs control-plane/test/tool-package-validator.test.mjs control-plane/test/tool-registry.test.mjs control-plane/test/openai-web-search.test.mjs control-plane/test/tool-package-routes.test.mjs test/runtime-control-plane-tools-extension.test.mjs test/full-stack-e2e-script.test.mjs",
   );
 });
