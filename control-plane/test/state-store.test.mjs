@@ -169,6 +169,36 @@ test("state store persists tool packages and enabled tool definitions", () => {
           scopes: ["sandbox.tool.execute"],
           defaultDecision: "review",
         },
+        {
+          name: "demo_package_owned",
+          action: "beep.tools.demo_tools.demo_package_owned",
+          namespace: "beep_tools",
+          description: "Package-owned legacy enablement should not survive reinstall.",
+          inputSchema: { type: "object", additionalProperties: false, properties: {} },
+          target: "sandbox",
+          command: {
+            argv: ["node", ".beep/tools/demo_tools/bin/package-owned.mjs"],
+            input: "json-stdin",
+            timeoutMs: 5000,
+          },
+          scopes: ["sandbox.tool.execute"],
+          defaultDecision: "review",
+        },
+        {
+          name: "demo_removed",
+          action: "beep.tools.demo_tools.demo_removed",
+          namespace: "beep_tools",
+          description: "Removed tool enablement should not survive reinstall.",
+          inputSchema: { type: "object", additionalProperties: false, properties: {} },
+          target: "sandbox",
+          command: {
+            argv: ["node", ".beep/tools/demo_tools/bin/removed.mjs"],
+            input: "json-stdin",
+            timeoutMs: 5000,
+          },
+          scopes: ["sandbox.tool.execute"],
+          defaultDecision: "review",
+        },
       ],
     });
 
@@ -195,13 +225,26 @@ test("state store persists tool packages and enabled tool definitions", () => {
     assert.ok(state.audit.some((event) => event.kind === "tool_package_install"));
     assert.ok(state.audit.some((event) => event.kind === "tool_enable"));
 
+    store.update((currentState) => {
+      currentState.toolPackages["demo_tools@1.0.0"].enabledTools.demo_package_owned = {
+        enabled: true,
+        decidedBy: "package",
+        decidedAt: "2026-01-02T00:00:00.000Z",
+      };
+      currentState.toolPackages["demo_tools@1.0.0"].enabledTools.demo_removed = {
+        enabled: true,
+        decidedBy: "operator",
+        decidedAt: "2026-01-02T00:00:00.000Z",
+      };
+    });
+
     const firstInstalledAt = installed.installedAt;
     const reinstalled = store.installToolPackage({
       packageId: "demo_tools",
       version: "1.0.0",
       packageHash: "sha256:abc123",
       source: "sandbox",
-      tools: installed.tools,
+      tools: installed.tools.filter((tool) => tool.name !== "demo_removed"),
       enabledTools: {
         demo_echo: {
           enabled: false,
@@ -212,7 +255,7 @@ test("state store persists tool packages and enabled tool definitions", () => {
     });
 
     assert.equal(reinstalled.installedAt, firstInstalledAt);
-    assert.deepEqual(reinstalled.enabledTools.demo_echo, enabled.enabledTools.demo_echo);
+    assert.deepEqual(reinstalled.enabledTools, { demo_echo: enabled.enabledTools.demo_echo });
     assert.equal(Number.isNaN(Date.parse(reinstalled.updatedAt)), false);
   } finally {
     cleanup();
@@ -568,6 +611,50 @@ test("state store fails closed for malformed nested map records", () => {
     {
       name: "exposure invalid container port",
       value: { exposures: { "local:3000": { runtimeId: "local", containerPort: "03000" } }, audit: [] },
+    },
+    {
+      name: "tool package package id contains at",
+      value: {
+        toolPackages: {
+          "a@b@1.0.0": { packageVersionId: "a@b@1.0.0", packageId: "a@b", version: "1.0.0" },
+        },
+        audit: [],
+      },
+    },
+    {
+      name: "tool package version contains at",
+      value: {
+        toolPackages: {
+          "demo_tools@1@0": { packageVersionId: "demo_tools@1@0", packageId: "demo_tools", version: "1@0" },
+        },
+        audit: [],
+      },
+    },
+    {
+      name: "tool package packageVersionId mismatch",
+      value: {
+        toolPackages: {
+          "demo_tools@1.0.0": {
+            packageVersionId: "demo_tools@2.0.0",
+            packageId: "demo_tools",
+            version: "1.0.0",
+          },
+        },
+        audit: [],
+      },
+    },
+    {
+      name: "tool package key mismatch",
+      value: {
+        toolPackages: {
+          "other_tools@1.0.0": {
+            packageVersionId: "other_tools@1.0.0",
+            packageId: "demo_tools",
+            version: "1.0.0",
+          },
+        },
+        audit: [],
+      },
     },
   ];
 

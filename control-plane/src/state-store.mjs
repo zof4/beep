@@ -131,6 +131,10 @@ function assertValidToolPackageIdentityPart(value, label) {
   }
 }
 
+function isValidToolPackageIdentityPart(value) {
+  return isValidStateIdentity(value) && !value.includes("@");
+}
+
 function invalidStateShape(path, message) {
   throw new Error(`invalid state shape: ${path}: ${message}`);
 }
@@ -147,6 +151,12 @@ function validateStateIdentity(value, path, label) {
   }
 }
 
+function validateToolPackageIdentityPart(value, path, label) {
+  if (!isValidToolPackageIdentityPart(value)) {
+    invalidStateShape(path, `${label} must be a non-empty safe string without @`);
+  }
+}
+
 function validateStateMapRecords(state, field, path) {
   const idField = STATE_MAP_ID_FIELDS[field];
   for (const [key, record] of Object.entries(state[field])) {
@@ -159,6 +169,7 @@ function validateStateMapRecords(state, field, path) {
       invalidStateShape(path, `${field}.${key}.${idField} must match map key`);
     }
     if (field === "exposures") validateExposureRecord(key, record, path);
+    if (field === "toolPackages") validateToolPackageRecord(key, record, path);
   }
 }
 
@@ -177,6 +188,35 @@ function validateExposureRecord(key, record, path) {
   if (`${record.runtimeId}:${containerPort}` !== key) {
     invalidStateShape(path, `exposures.${key} key must match runtimeId and containerPort`);
   }
+}
+
+function validateToolPackageRecord(key, record, path) {
+  validateToolPackageIdentityPart(record.packageId, path, `toolPackages.${key}.packageId`);
+  validateToolPackageIdentityPart(record.version, path, `toolPackages.${key}.version`);
+  validateStateIdentity(record.packageVersionId, path, `toolPackages.${key}.packageVersionId`);
+  const expectedKey = `${record.packageId}@${record.version}`;
+  if (key !== expectedKey) {
+    invalidStateShape(path, `toolPackages.${key} key must match packageId and version`);
+  }
+  if (record.packageVersionId !== key) {
+    invalidStateShape(path, `toolPackages.${key}.packageVersionId must match map key`);
+  }
+}
+
+function operatorOwnedEnabledTools(enabledTools, knownToolNames) {
+  if (!isPlainObject(enabledTools)) return {};
+  const filtered = {};
+  for (const [toolName, entry] of Object.entries(enabledTools)) {
+    if (!isValidStateIdentity(toolName) || !knownToolNames.has(toolName) || !isPlainObject(entry)) continue;
+    if (entry.decidedBy !== "operator" || typeof entry.enabled !== "boolean") continue;
+    if (typeof entry.decidedAt !== "string" || entry.decidedAt.trim() === "") continue;
+    filtered[toolName] = {
+      enabled: entry.enabled,
+      decidedBy: entry.decidedBy,
+      decidedAt: entry.decidedAt,
+    };
+  }
+  return filtered;
 }
 
 function normalizeStateShape(state, path) {
@@ -506,11 +546,12 @@ export class StateStore {
     let installed = null;
     this.update((state) => {
       const existing = state.toolPackages[packageVersionId] || {};
+      const knownToolNames = new Set((Array.isArray(pkg.tools) ? pkg.tools : []).map((tool) => tool?.name));
       installed = {
         ...packageFields,
         packageVersionId,
         status: pkg.status || "installed",
-        enabledTools: existing.enabledTools || {},
+        enabledTools: operatorOwnedEnabledTools(existing.enabledTools, knownToolNames),
         installedAt: existing.installedAt || pkg.installedAt || timestamp,
         updatedAt: timestamp,
       };
