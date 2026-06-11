@@ -6,6 +6,7 @@ import test from "node:test";
 import { PREVIEW_HOST_PORT_BASE, PUBLIC_BASE_URL, RUNTIME_ID } from "../src/config.mjs";
 import { StateStore } from "../src/state-store.mjs";
 import { ToolBroker } from "../src/tool-broker.mjs";
+import { ToolRegistry } from "../src/tool-registry.mjs";
 
 function tempStore() {
   const dir = mkdtempSync(join(tmpdir(), "beep-tool-broker-test-"));
@@ -14,6 +15,47 @@ function tempStore() {
     store,
     cleanup: () => rmSync(dir, { recursive: true, force: true }),
   };
+}
+
+function installEnabledSandboxTool(store, { defaultDecision = "allow", timeoutMs = 7000 } = {}) {
+  store.installToolPackage({
+    packageId: "demo_tools",
+    version: "1.0.0",
+    packageHash: "sha256:abc123",
+    source: "sandbox",
+    tools: [
+      {
+        name: "demo_echo",
+        action: "beep.tools.demo_tools.demo_echo",
+        namespace: "beep_tools",
+        label: "Demo Echo",
+        description: "Echo text from the sandbox.",
+        promptSnippet: "Use demo_echo to echo text through the sandbox.",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            text: { type: "string" },
+          },
+        },
+        target: "sandbox",
+        command: {
+          argv: ["node", ".beep/tools/demo_tools/bin/echo.mjs"],
+          input: "json-stdin",
+          timeoutMs,
+        },
+        scopes: ["sandbox.tool.execute"],
+        defaultDecision,
+      },
+    ],
+  });
+  store.setToolPackageToolEnabled({
+    packageId: "demo_tools",
+    version: "1.0.0",
+    toolName: "demo_echo",
+    enabled: true,
+    decidedBy: "operator",
+  });
 }
 
 test("preview port exposure preserves path-only preview URLs", async () => {
@@ -100,6 +142,134 @@ test("preview port exposure cannot return external URLs from scheme-like paths",
       assert.equal(new URL(exposure.url).origin, new URL(PUBLIC_BASE_URL).origin);
       assert.equal(new URL(exposure.directUrl).origin, `http://127.0.0.1:${PREVIEW_HOST_PORT_BASE}`);
     }
+  } finally {
+    cleanup();
+  }
+});
+
+test("broker executes registry-backed web.run through injected webSearch.run", async () => {
+  const { store, cleanup } = tempStore();
+  try {
+    const calls = [];
+    const broker = new ToolBroker({
+      store,
+      registry: new ToolRegistry({ store }),
+      webSearch: {
+        async run(args) {
+          calls.push(args);
+          return { ok: true, result: { text: "search result", sources: [{ url: "https://example.test" }] } };
+        },
+      },
+    });
+
+    const result = await broker.call({
+      runtimeId: RUNTIME_ID,
+      toolCallId: "call_web",
+      action: "web.run",
+      args: { search_query: [{ q: "beep tools" }], response_length: "short" },
+    });
+
+    assert.equal(result.ok, true);
+    assert.deepEqual(calls, [{ search_query: [{ q: "beep tools" }], response_length: "short" }]);
+    assert.equal(result.result.text, "search result");
+  } finally {
+    cleanup();
+  }
+});
+
+test("web.run without configured webSearch returns structured broker failure", async () => {
+  const { store, cleanup } = tempStore();
+  try {
+    const broker = new ToolBroker({
+      store,
+      registry: new ToolRegistry({ store }),
+    });
+
+    const result = await broker.call({
+      runtimeId: RUNTIME_ID,
+      toolCallId: "call_missing_web",
+      action: "web.run",
+      args: { search_query: [{ q: "beep tools" }] },
+    });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.status, "denied");
+    assert.equal(result.decision, "deny");
+    assert.match(result.error, /web search.*not configured/iu);
+  } finally {
+    cleanup();
+  }
+});
+
+test("broker forwards enabled dynamic sandbox tool definitions to sandboxToolCaller", async () => {
+  const { store, cleanup } = tempStore();
+  try {
+    installEnabledSandboxTool(store, { defaultDecision: "allow", timeoutMs: 7000 });
+    const calls = [];
+    const broker = new ToolBroker({
+      store,
+      registry: new ToolRegistry({ store }),
+      sandboxToolCaller: async (body) => {
+        calls.push(body);
+        return { ok: true, result: { echoed: body.args.text } };
+      },
+    });
+
+    const result = await broker.call({
+      runtimeId: RUNTIME_ID,
+      toolCallId: "call_sandbox",
+      action: "beep.tools.demo_tools.demo_echo",
+      args: { text: "hello" },
+    });
+
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.result, { echoed: "hello" });
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].action, "beep.tools.demo_tools.demo_echo");
+    assert.equal(calls[0].toolCallId, "call_sandbox");
+    assert.deepEqual(calls[0].args, { text: "hello" });
+    assert.equal(calls[0].timeoutMs, 7000);
+    assert.deepEqual(calls[0].definition.command, {
+      argv: ["node", ".beep/tools/demo_tools/bin/echo.mjs"],
+      input: "json-stdin",
+      timeoutMs: 7000,
+    });
+  } finally {
+    cleanup();
+  }
+});
+
+test("approved review-mode sandbox tools execute through sandboxToolCaller", async () => {
+  const { store, cleanup } = tempStore();
+  try {
+    installEnabledSandboxTool(store, { defaultDecision: "review", timeoutMs: 9000 });
+    const calls = [];
+    const broker = new ToolBroker({
+      store,
+      registry: new ToolRegistry({ store }),
+      sandboxToolCaller: async (body) => {
+        calls.push(body);
+        return { ok: true, result: { approved: true, text: body.args.text } };
+      },
+    });
+    const approval = store.createApproval({
+      runtimeId: RUNTIME_ID,
+      toolCallId: "call_review_sandbox",
+      action: "beep.tools.demo_tools.demo_echo",
+      args: { text: "approved" },
+      risk: "high",
+      prompt: "Approve Demo Echo?",
+      reason: "Tool is configured for review.",
+    });
+    const executing = store.updateApproval(approval.approvalId, { status: "executing" });
+
+    const result = await broker.executeApprovedApproval(executing);
+
+    assert.deepEqual(result, { approved: true, text: "approved" });
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].action, "beep.tools.demo_tools.demo_echo");
+    assert.equal(calls[0].toolCallId, "call_review_sandbox");
+    assert.equal(calls[0].timeoutMs, 9000);
   } finally {
     cleanup();
   }
