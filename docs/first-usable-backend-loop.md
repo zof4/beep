@@ -184,3 +184,17 @@ the proof file after the next tool call recreates the sandbox.
   `${TMPDIR:-/tmp}/beep-first-usable-backend.*`.
 - Host-loop sandbox smoke output files are written under
   `${TMPDIR:-/tmp}/beep-host-loop-sandbox-smoke.*`.
+
+## Control-Plane Tool Refresh
+
+Pi learns Beep control-plane tools from `GET /api/tools`. The runtime
+control-plane tools extension fetches the manifest at startup and again before
+each user-submitted agent request starts. Refresh uses Pi's existing extension
+tool registry path, so new or changed tools become visible to the model on the
+next request, not during an active response.
+
+Tool removal is enforced by active-tool reconciliation. The extension removes
+disabled Beep tool names from Pi's active tool list while preserving unrelated
+Pi tools such as built-in filesystem and shell tools. The control-plane broker
+remains authoritative for execution, so stale tool calls are denied if the
+action is no longer enabled.
