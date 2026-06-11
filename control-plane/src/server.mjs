@@ -12,6 +12,7 @@ import { handleRuntimeAgentRoute, unsafeRuntimeAgentRequestTargetError } from ".
 import { RuntimeManager } from "./runtime-manager.mjs";
 import { handleSiteRoute } from "./site-routes.mjs";
 import { StateStore } from "./state-store.mjs";
+import { handleToolPackageRoute } from "./tool-package-routes.mjs";
 import { ToolBroker, hostPortForContainerPort, validatePreviewPort } from "./tool-broker.mjs";
 import { createWebRunExecutor } from "./openai-web-search.mjs";
 import { Gatekeeper } from "./gatekeeper/index.mjs";
@@ -133,6 +134,18 @@ export function createControlPlaneHandler({ store, runtimeManager, toolBroker, l
         ok: true,
         service: "beep-control-plane",
         runtimeId: RUNTIME_ID,
+      });
+      return;
+    }
+
+    if (pathname === "/api/tools/packages" || pathname.startsWith("/api/tools/packages/")) {
+      await handleToolPackageRoute({
+        request,
+        response,
+        pathname,
+        url,
+        store,
+        requireOperatorAuth,
       });
       return;
     }
