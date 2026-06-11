@@ -455,3 +455,32 @@ test("extension registers nothing when manifest fetch fails or tools payload is 
     });
   }, { tools: { web_run: {} } });
 });
+
+test("extension removes disabled control-plane tools from active tools on refresh", async () => {
+  const firstTools = manifestTools();
+  const secondTools = firstTools.filter((tool) => tool.name !== "demo_echo");
+
+  await withManifestSequence(
+    async () => {
+      await withExtensionEnv(async () => {
+        const runtime = await loadedExtensionPi();
+        runtime.activeToolNames.push("read", "bash");
+        assert.ok(runtime.activeToolNames.includes("demo_echo"));
+
+        await runtime.emit("before_agent_start", { prompt: "Next request.", systemPrompt: "", systemPromptOptions: {} });
+
+        assert.deepEqual(
+          runtime.activeToolNames.filter((name) => name.startsWith("demo")),
+          [],
+        );
+        assert.ok(runtime.activeToolNames.includes("web_run"));
+        assert.ok(runtime.activeToolNames.includes("read"));
+        assert.ok(runtime.activeToolNames.includes("bash"));
+      });
+    },
+    [
+      { ok: true, payload: { ok: true, revision: "sha256:first", tools: firstTools } },
+      { ok: true, payload: { ok: true, revision: "sha256:second", tools: secondTools } },
+    ],
+  );
+});

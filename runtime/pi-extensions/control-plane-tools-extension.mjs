@@ -278,6 +278,20 @@ function toolFingerprint(definition) {
   return stableJson(definition);
 }
 
+function reconcileActiveTools(pi, previousBeepToolNames, nextBeepToolNames) {
+  if (typeof pi.getActiveTools !== "function" || typeof pi.setActiveTools !== "function") return;
+  const active = pi.getActiveTools();
+  if (!Array.isArray(active)) return;
+
+  const previousBeep = new Set(previousBeepToolNames);
+  const nextBeep = new Set(nextBeepToolNames);
+  const preserved = active.filter((name) => !previousBeep.has(name) || nextBeep.has(name));
+  for (const name of nextBeep) {
+    if (!preserved.includes(name)) preserved.push(name);
+  }
+  pi.setActiveTools([...new Set(preserved)]);
+}
+
 function makePiTool(config, definition) {
   return {
     name: definition.name,
@@ -306,6 +320,7 @@ export default function beepControlPlaneToolsExtension(pi) {
     if (!manifest?.ok) return false;
     if (manifest.revision && manifest.revision === state.revision) return false;
 
+    const previousNames = state.beepToolNames;
     const nextFingerprints = new Map();
     const nextToolNames = new Set();
     for (const definition of manifest.tools) {
@@ -319,6 +334,7 @@ export default function beepControlPlaneToolsExtension(pi) {
       pi.registerTool(makePiTool(config, definition));
     }
 
+    reconcileActiveTools(pi, previousNames, nextToolNames);
     state.revision = manifest.revision;
     state.fingerprints = nextFingerprints;
     state.beepToolNames = nextToolNames;
