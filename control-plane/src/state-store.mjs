@@ -24,6 +24,7 @@ const STATE_OBJECT_MAP_FIELDS = [
   "approvals",
   "gatekeeperReviews",
   "sites",
+  "toolPackages",
 ];
 const STATE_MAP_ID_FIELDS = {
   agentRequests: "requestId",
@@ -31,6 +32,7 @@ const STATE_MAP_ID_FIELDS = {
   gatekeeperReviews: "reviewId",
   runtimes: "runtimeId",
   sites: "siteId",
+  toolPackages: "packageVersionId",
 };
 const UNSAFE_STATE_MAP_KEYS = new Set(["__proto__", "prototype", "constructor"]);
 const sleepArray = new Int32Array(new SharedArrayBuffer(4));
@@ -73,6 +75,7 @@ function initialState() {
     approvals: {},
     gatekeeperReviews: {},
     sites: {},
+    toolPackages: {},
     audit: [],
   };
 }
@@ -123,6 +126,12 @@ function assertValidStateIdentity(value) {
 
 function invalidStateShape(path, message) {
   throw new Error(`invalid state shape: ${path}: ${message}`);
+}
+
+function notFoundError(message) {
+  const error = new Error(message);
+  error.status = 404;
+  return error;
 }
 
 function validateStateIdentity(value, path, label) {
@@ -474,6 +483,100 @@ export class StateStore {
       .filter((site) => !status || site.status === status)
       .sort((left, right) => String(right.updatedAt).localeCompare(String(left.updatedAt)))
       .slice(0, limit);
+  }
+
+  toolPackageVersionId({ packageId, version }) {
+    assertValidStateIdentity(packageId);
+    assertValidStateIdentity(version);
+    return `${packageId}@${version}`;
+  }
+
+  installToolPackage(pkg) {
+    const packageVersionId = this.toolPackageVersionId(pkg);
+    const timestamp = nowIso();
+    let installed = null;
+    this.update((state) => {
+      installed = {
+        ...pkg,
+        packageVersionId,
+        status: pkg.status || "installed",
+        enabledTools: pkg.enabledTools || {},
+        installedAt: pkg.installedAt || timestamp,
+        updatedAt: timestamp,
+      };
+      state.toolPackages[packageVersionId] = installed;
+      appendAuditEvent(state, {
+        kind: "tool_package_install",
+        packageVersionId,
+        packageId: pkg.packageId,
+        version: pkg.version,
+        packageHash: pkg.packageHash,
+      });
+    });
+    return installed;
+  }
+
+  listToolPackages() {
+    return Object.values(this.readState().toolPackages || {});
+  }
+
+  getToolPackage(packageId, version) {
+    const packageVersionId = this.toolPackageVersionId({ packageId, version });
+    return this.readState().toolPackages?.[packageVersionId] || null;
+  }
+
+  setToolPackageToolEnabled({ packageId, version, toolName, enabled, decidedBy = "operator" }) {
+    const packageVersionId = this.toolPackageVersionId({ packageId, version });
+    assertValidStateIdentity(toolName);
+    let next = null;
+    this.update((state) => {
+      const current = state.toolPackages[packageVersionId];
+      if (!current) throw notFoundError(`tool package not found: ${packageVersionId}`);
+
+      const tool = Array.isArray(current.tools) ? current.tools.find((candidate) => candidate?.name === toolName) : null;
+      if (!tool) throw notFoundError(`tool not found in package ${packageVersionId}: ${toolName}`);
+
+      const decidedAt = nowIso();
+      next = {
+        ...current,
+        enabledTools: {
+          ...(current.enabledTools || {}),
+          [toolName]: {
+            enabled: Boolean(enabled),
+            decidedBy,
+            decidedAt,
+          },
+        },
+        updatedAt: decidedAt,
+      };
+      state.toolPackages[packageVersionId] = next;
+      appendAuditEvent(state, {
+        kind: enabled ? "tool_enable" : "tool_disable",
+        packageVersionId,
+        packageId,
+        version,
+        toolName,
+        action: tool.action,
+        decidedBy,
+      });
+    });
+    return next;
+  }
+
+  listEnabledToolDefinitions() {
+    return this.listToolPackages().flatMap((pkg) => {
+      const enabledTools = pkg.enabledTools || {};
+      const tools = Array.isArray(pkg.tools) ? pkg.tools : [];
+      return tools
+        .filter((tool) => enabledTools[tool.name]?.enabled === true)
+        .map((tool) => ({
+          ...tool,
+          packageId: pkg.packageId,
+          version: pkg.version,
+          packageVersionId: pkg.packageVersionId,
+          packageHash: pkg.packageHash,
+        }));
+    });
   }
 
   createApproval(approval) {

@@ -137,6 +137,58 @@ test("state store create methods ignore caller-supplied reserved fields", () => 
   }
 });
 
+test("state store persists tool packages and enabled tool definitions", () => {
+  const { store, cleanup } = tempStore();
+  try {
+    const installed = store.installToolPackage({
+      packageId: "demo_tools",
+      version: "1.0.0",
+      packageHash: "sha256:abc123",
+      source: "sandbox",
+      tools: [
+        {
+          name: "demo_echo",
+          action: "beep.tools.demo_tools.demo_echo",
+          namespace: "beep_tools",
+          description: "Echo text from the sandbox.",
+          inputSchema: { type: "object", additionalProperties: false, properties: {} },
+          target: "sandbox",
+          command: {
+            argv: ["node", ".beep/tools/demo_tools/bin/echo.mjs"],
+            input: "json-stdin",
+            timeoutMs: 5000,
+          },
+          scopes: ["sandbox.tool.execute"],
+          defaultDecision: "review",
+        },
+      ],
+    });
+
+    assert.equal(installed.packageVersionId, "demo_tools@1.0.0");
+    assert.equal(installed.status, "installed");
+
+    const enabled = store.setToolPackageToolEnabled({
+      packageId: "demo_tools",
+      version: "1.0.0",
+      toolName: "demo_echo",
+      enabled: true,
+      decidedBy: "operator",
+    });
+
+    assert.equal(enabled.enabledTools.demo_echo.enabled, true);
+    assert.deepEqual(
+      store.listEnabledToolDefinitions().map((tool) => tool.action),
+      ["beep.tools.demo_tools.demo_echo"],
+    );
+
+    const state = store.readState();
+    assert.ok(state.audit.some((event) => event.kind === "tool_package_install"));
+    assert.ok(state.audit.some((event) => event.kind === "tool_enable"));
+  } finally {
+    cleanup();
+  }
+});
+
 test("state store separates runtime, runtime API, model credential, and operator tokens", () => {
   const { store, cleanup } = tempStore();
   try {
