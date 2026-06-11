@@ -48,6 +48,24 @@ async function postJson(url, body, { token, timeoutMs }) {
   }
 }
 
+async function getJson(url, { token, timeoutMs }) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, {
+      method: "GET",
+      headers: {
+        authorization: `Bearer ${token}`,
+      },
+      signal: controller.signal,
+    });
+    const payload = await response.json().catch(() => ({}));
+    return { response, payload };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 function textResult(text, details = {}) {
   return {
     content: [{ type: "text", text }],
@@ -95,6 +113,96 @@ async function callControlPlaneTool(config, action, args, toolCallId) {
   }
 }
 
+async function fetchToolManifest(config) {
+  const { controlPlaneUrl, token, timeoutMs } = config;
+  if (!controlPlaneUrl || !token) return [];
+
+  try {
+    const { response, payload } = await getJson(`${controlPlaneUrl.replace(/\/+$/u, "")}/api/tools`, {
+      token,
+      timeoutMs,
+    });
+    if (!response?.ok || payload?.ok === false || !Array.isArray(payload?.tools)) return [];
+    return payload.tools.filter((tool) => tool && typeof tool === "object");
+  } catch {
+    return [];
+  }
+}
+
+function schemaOptions(schema) {
+  if (!schema || typeof schema !== "object") return {};
+  const options = {};
+  for (const key of [
+    "description",
+    "minimum",
+    "maximum",
+    "minLength",
+    "maxLength",
+    "enum",
+    "default",
+  ]) {
+    if (schema[key] !== undefined) options[key] = schema[key];
+  }
+  return options;
+}
+
+function typeArray(Type, itemSchema, options) {
+  if (typeof Type.Array === "function") return Type.Array(itemSchema, options);
+  return Type.Object({});
+}
+
+function typeBoolean(Type, options) {
+  if (typeof Type.Boolean === "function") return Type.Boolean(options);
+  return Type.String(options);
+}
+
+function typeNumber(Type, options) {
+  if (typeof Type.Number === "function") return Type.Number(options);
+  return Type.Integer(options);
+}
+
+function typeOptional(Type, schema) {
+  if (typeof Type.Optional === "function") return Type.Optional(schema);
+  return schema;
+}
+
+function schemaToType(Type, schema) {
+  if (!schema || typeof schema !== "object") return Type.Object({});
+
+  const options = schemaOptions(schema);
+  switch (schema.type) {
+    case "object": {
+      const required = new Set(Array.isArray(schema.required) ? schema.required : []);
+      const properties = schema.properties && typeof schema.properties === "object" ? schema.properties : {};
+      const converted = {};
+      for (const [name, propertySchema] of Object.entries(properties)) {
+        const propertyType = schemaToType(Type, propertySchema);
+        converted[name] = required.has(name) ? propertyType : typeOptional(Type, propertyType);
+      }
+      return Type.Object(converted, options);
+    }
+    case "string":
+      return Type.String(options);
+    case "integer":
+      return Type.Integer(options);
+    case "number":
+      return typeNumber(Type, options);
+    case "boolean":
+      return typeBoolean(Type, options);
+    case "array":
+      return typeArray(Type, schemaToType(Type, schema.items || {}), options);
+    default:
+      return Type.Object({});
+  }
+}
+
+function genericSuccessText(payload) {
+  if (typeof payload?.result?.text === "string") return payload.result.text;
+  const value = payload?.result !== undefined ? payload.result : payload;
+  const serialized = JSON.stringify(value, null, 2);
+  return serialized === undefined ? String(value) : serialized;
+}
+
 function resultFromToolPayload(toolName, response, payload, successText) {
   if (payload?.status === "needs_review") {
     return textResult(
@@ -114,78 +222,37 @@ function resultFromToolPayload(toolName, response, payload, successText) {
       ok: false,
     });
   }
-  return textResult(successText(payload.result), payload);
+  return textResult(successText(payload), payload);
 }
 
-export default function beepControlPlaneToolsExtension(pi) {
+function validToolDefinition(definition) {
+  return (
+    definition &&
+    typeof definition === "object" &&
+    typeof definition.name === "string" &&
+    definition.name.length > 0 &&
+    typeof definition.action === "string" &&
+    definition.action.length > 0
+  );
+}
+
+export default async function beepControlPlaneToolsExtension(pi) {
   const config = readControlPlaneConfig();
   if (!config.enabled) return;
 
-  pi.registerTool({
-    name: "preview_port_expose",
-    label: "Expose Preview Port",
-    description:
-      "Expose an HTTP dev server running inside the runtime container so it can be tested from the local browser.",
-    promptSnippet:
-      "Use preview_port_expose after starting a local web server inside the runtime container on a 3000-3099 port.",
-    promptGuidelines: [
-      "Start browser-testable dev servers on 0.0.0.0, not localhost, before exposing the port.",
-      "Only use preview_port_expose for HTTP preview servers that should be visible to the local control surface.",
-    ],
-    parameters: Type.Object({
-      port: Type.Integer({
-        minimum: 3000,
-        maximum: 3099,
-        description: "Container port where the dev server is listening.",
-      }),
-      path: Type.Optional(Type.String({ description: "Optional initial path to open." })),
-      label: Type.Optional(Type.String({ description: "Optional short label for the preview." })),
-    }),
-    async execute(toolCallId, params) {
-      const { response, payload } = await callControlPlaneTool(config, "preview.port.expose", params, toolCallId);
-      return resultFromToolPayload("preview_port_expose", response, payload, (result) =>
-        [
-          `Preview exposed: ${result.url}`,
-          `Direct mapped URL: ${result.directUrl}`,
-          result.note,
-        ].join("\n"),
-      );
-    },
-  });
-
-  pi.registerTool({
-    name: "preview_container_create_static_site",
-    label: "Create Static Preview Container",
-    description:
-      "Request a managed static-site preview container for a directory already created inside the runtime workspace.",
-    promptSnippet:
-      "Use preview_container_create_static_site when a static site directory is ready and should run in its own managed preview container.",
-    promptGuidelines: [
-      "Only request a static-site container for directories inside /workspace.",
-      "Create an index.html in the source directory before requesting the preview container.",
-      "This tool requires user/operator approval before the container is created.",
-    ],
-    parameters: Type.Object({
-      siteName: Type.String({ description: "Short site name for labels and display." }),
-      sourcePath: Type.String({
-        description:
-          "Absolute runtime path to the static site directory, for example /workspace/api-sessions/agent_beep/site.",
-      }),
-    }),
-    async execute(toolCallId, params) {
-      const { response, payload } = await callControlPlaneTool(
-        config,
-        "preview.container.createStaticSite",
-        params,
-        toolCallId,
-      );
-      return resultFromToolPayload("preview_container_create_static_site", response, payload, (result) =>
-        [
-          `Static preview container created: ${result.proxyUrl}`,
-          `Direct mapped URL: ${result.directUrl}`,
-          `siteId: ${result.siteId}`,
-        ].join("\n"),
-      );
-    },
-  });
+  const definitions = await fetchToolManifest(config);
+  for (const definition of definitions) {
+    if (!validToolDefinition(definition)) continue;
+    pi.registerTool({
+      name: definition.name,
+      label: definition.label || definition.name,
+      description: definition.description || definition.label || definition.name,
+      promptSnippet: definition.promptSnippet || definition.description || definition.label || definition.name,
+      parameters: schemaToType(Type, definition.inputSchema),
+      async execute(toolCallId, params) {
+        const { response, payload } = await callControlPlaneTool(config, definition.action, params, toolCallId);
+        return resultFromToolPayload(definition.name, response, payload, genericSuccessText);
+      },
+    });
+  }
 }
