@@ -90,3 +90,43 @@ test("registry adds enabled generated sandbox tools", () => {
     cleanup();
   }
 });
+
+test("registry manifest includes a stable revision for identical public tools", () => {
+  const { store, cleanup } = tempStore();
+  try {
+    installEnabledDemoTool(store);
+    const first = new ToolRegistry({ store }).manifest();
+    const second = new ToolRegistry({ store }).manifest();
+
+    assert.equal(typeof first.revision, "string");
+    assert.match(first.revision, /^sha256:[a-f0-9]{64}$/u);
+    assert.equal(second.revision, first.revision);
+  } finally {
+    cleanup();
+  }
+});
+
+test("registry manifest revision changes when generated tool enablement changes", () => {
+  const { store, cleanup } = tempStore();
+  try {
+    const registry = new ToolRegistry({ store });
+    const before = registry.manifest();
+
+    installEnabledDemoTool(store);
+    const afterEnable = registry.manifest();
+
+    store.setToolPackageToolEnabled({
+      packageId: "demo_tools",
+      version: "1.0.0",
+      toolName: "demo_echo",
+      enabled: false,
+      decidedBy: "operator",
+    });
+    const afterDisable = registry.manifest();
+
+    assert.notEqual(afterEnable.revision, before.revision);
+    assert.equal(afterDisable.revision, before.revision);
+  } finally {
+    cleanup();
+  }
+});
