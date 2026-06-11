@@ -98,7 +98,8 @@ async function callControlPlaneTool(config, action, args, toolCallId) {
 
 function fetchToolManifest(config) {
   const { controlPlaneUrl, token, timeoutMs } = config;
-  if (!controlPlaneUrl || !token) return [];
+  const failedManifest = { ok: false, revision: null, tools: [] };
+  if (!controlPlaneUrl || !token) return failedManifest;
 
   try {
     const output = execFileSync(
@@ -141,10 +142,14 @@ function fetchToolManifest(config) {
       },
     );
     const { ok, payload } = JSON.parse(output || "{}");
-    if (!ok || payload?.ok === false || !Array.isArray(payload?.tools)) return [];
-    return payload.tools.filter((tool) => tool && typeof tool === "object");
+    if (!ok || payload?.ok === false || !Array.isArray(payload?.tools)) return failedManifest;
+    return {
+      ok: true,
+      revision: typeof payload.revision === "string" ? payload.revision : null,
+      tools: payload.tools.filter((tool) => tool && typeof tool === "object"),
+    };
   } catch {
-    return [];
+    return failedManifest;
   }
 }
 
@@ -255,23 +260,76 @@ function validToolDefinition(definition) {
   );
 }
 
+function stableJson(value) {
+  if (Array.isArray(value)) {
+    return `[${value.map((entry) => stableJson(entry)).join(",")}]`;
+  }
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`)
+      .join(",")}}`;
+  }
+  const serialized = JSON.stringify(value);
+  return serialized === undefined ? "undefined" : serialized;
+}
+
+function toolFingerprint(definition) {
+  return stableJson(definition);
+}
+
+function makePiTool(config, definition) {
+  return {
+    name: definition.name,
+    label: definition.label || definition.name,
+    description: definition.description || definition.label || definition.name,
+    promptSnippet: definition.promptSnippet || definition.description || definition.label || definition.name,
+    parameters: schemaToType(Type, definition.inputSchema),
+    async execute(toolCallId, params) {
+      const { response, payload } = await callControlPlaneTool(config, definition.action, params, toolCallId);
+      return resultFromToolPayload(definition.name, response, payload, genericSuccessText);
+    },
+  };
+}
+
 export default function beepControlPlaneToolsExtension(pi) {
   const config = readControlPlaneConfig();
   if (!config.enabled) return;
 
-  const definitions = fetchToolManifest(config);
-  for (const definition of definitions) {
-    if (!validToolDefinition(definition)) continue;
-    pi.registerTool({
-      name: definition.name,
-      label: definition.label || definition.name,
-      description: definition.description || definition.label || definition.name,
-      promptSnippet: definition.promptSnippet || definition.description || definition.label || definition.name,
-      parameters: schemaToType(Type, definition.inputSchema),
-      async execute(toolCallId, params) {
-        const { response, payload } = await callControlPlaneTool(config, definition.action, params, toolCallId);
-        return resultFromToolPayload(definition.name, response, payload, genericSuccessText);
-      },
+  const state = {
+    revision: null,
+    fingerprints: new Map(),
+    beepToolNames: new Set(),
+  };
+
+  function applyManifest(manifest) {
+    if (!manifest?.ok) return false;
+    if (manifest.revision && manifest.revision === state.revision) return false;
+
+    const nextFingerprints = new Map();
+    const nextToolNames = new Set();
+    for (const definition of manifest.tools) {
+      if (!validToolDefinition(definition)) continue;
+
+      nextToolNames.add(definition.name);
+      const fingerprint = toolFingerprint(definition);
+      nextFingerprints.set(definition.name, fingerprint);
+      if (state.fingerprints.get(definition.name) === fingerprint) continue;
+
+      pi.registerTool(makePiTool(config, definition));
+    }
+
+    state.revision = manifest.revision;
+    state.fingerprints = nextFingerprints;
+    state.beepToolNames = nextToolNames;
+    return true;
+  }
+
+  applyManifest(fetchToolManifest(config));
+
+  if (typeof pi.on === "function") {
+    pi.on("before_agent_start", () => {
+      applyManifest(fetchToolManifest(config));
     });
   }
 }

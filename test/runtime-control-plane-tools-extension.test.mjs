@@ -38,6 +38,47 @@ async function registeredTools() {
   return tools;
 }
 
+async function loadedExtensionPi() {
+  const { default: extension } = await loadExtension();
+  const tools = [];
+  const handlers = new Map();
+  const activeToolNames = [];
+  const pi = {
+    registerTool(tool) {
+      const existingIndex = tools.findIndex((candidate) => candidate.name === tool.name);
+      if (existingIndex === -1) {
+        tools.push(tool);
+      } else {
+        tools[existingIndex] = tool;
+      }
+      if (!activeToolNames.includes(tool.name)) activeToolNames.push(tool.name);
+    },
+    on(event, handler) {
+      const list = handlers.get(event) || [];
+      list.push(handler);
+      handlers.set(event, list);
+    },
+    getActiveTools() {
+      return [...activeToolNames];
+    },
+    setActiveTools(nextNames) {
+      activeToolNames.splice(0, activeToolNames.length, ...nextNames);
+    },
+  };
+  const result = extension(pi);
+  assert.equal(result, undefined, "extension setup should complete synchronously");
+  return {
+    tools,
+    pi,
+    activeToolNames,
+    async emit(event, payload = {}) {
+      for (const handler of handlers.get(event) || []) {
+        await handler({ type: event, ...payload }, pi);
+      }
+    },
+  };
+}
+
 function withExtensionEnv(callback, options = {}) {
   const toolsEnabled = Object.hasOwn(options, "toolsEnabled") ? options.toolsEnabled : "1";
   const keys = [
@@ -151,6 +192,30 @@ async function withManifestExec(callback, { ok = true, tools = manifestTools(), 
   }
 }
 
+async function withManifestSequence(callback, responses) {
+  const originalExecFileSync = globalThis.__BEEP_TEST_EXEC_FILE_SYNC__;
+  const calls = [];
+  let index = 0;
+  globalThis.__BEEP_TEST_EXEC_FILE_SYNC__ = (file, args, options = {}) => {
+    const request = JSON.parse(options.input);
+    calls.push({ file, args, options, request });
+    if (index >= responses.length) throw new Error("manifest sequence exhausted");
+    const response = responses[index];
+    index += 1;
+    return JSON.stringify(response);
+  };
+
+  try {
+    return await callback({ calls });
+  } finally {
+    if (originalExecFileSync === undefined) {
+      delete globalThis.__BEEP_TEST_EXEC_FILE_SYNC__;
+    } else {
+      globalThis.__BEEP_TEST_EXEC_FILE_SYNC__ = originalExecFileSync;
+    }
+  }
+}
+
 test("extension defaults off when tools enabled env is unset", async () => {
   await withExtensionEnv(
     async () => {
@@ -192,6 +257,55 @@ test("extension registers tools when explicitly enabled", async () => {
       assert.equal(demoEcho.parameters.schema.count.optional, true);
     });
   });
+});
+
+test("extension refreshes changed control-plane tools before the next agent start", async () => {
+  const firstTools = [
+    {
+      name: "web_run",
+      action: "web.run",
+      label: "Web Search",
+      description: "Search current public web content.",
+      promptSnippet: "Use web_run when current public web information is required.",
+      inputSchema: { type: "object", properties: {} },
+    },
+  ];
+  const secondTools = [
+    ...firstTools,
+    {
+      name: "demo_echo",
+      action: "beep.tools.demo_tools.demo_echo",
+      label: "Demo Echo",
+      description: "Echo text through a generated sandbox tool.",
+      promptSnippet: "Use demo_echo to echo text.",
+      inputSchema: {
+        type: "object",
+        required: ["text"],
+        properties: { text: { type: "string" } },
+      },
+    },
+  ];
+  await withManifestSequence(
+    async ({ calls }) => {
+      await withExtensionEnv(async () => {
+        const runtime = await loadedExtensionPi();
+        assert.deepEqual(runtime.tools.map((tool) => tool.name), ["web_run"]);
+
+        await runtime.emit("before_agent_start", { prompt: "Use any tools.", systemPrompt: "", systemPromptOptions: {} });
+
+        assert.deepEqual(
+          runtime.tools.map((tool) => tool.name).sort(),
+          ["demo_echo", "web_run"],
+        );
+        assert.deepEqual(runtime.activeToolNames.sort(), ["demo_echo", "web_run"]);
+        assert.equal(calls.length, 2);
+      });
+    },
+    [
+      { ok: true, payload: { ok: true, revision: "sha256:first", tools: firstTools } },
+      { ok: true, payload: { ok: true, revision: "sha256:second", tools: secondTools } },
+    ],
+  );
 });
 
 test("manifest tool posts to internal tools call with runtime token and request body", async () => {
