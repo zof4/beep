@@ -241,11 +241,17 @@ export function injectCodexWebSearchTool(payload, webSearchTool) {
   }
 
   const existingTools = Array.isArray(payload.tools) ? payload.tools : [];
+  const existingWebSearchTools = existingTools.filter((tool) => tool?.type === "web_search");
   const retainedTools = existingTools.filter((tool) => tool?.type !== "web_search");
-  const removed = existingTools.length - retainedTools.length;
+  const removed = existingWebSearchTools.length;
   const normalizedTool = normalizeWebSearchTool(webSearchTool);
   const nextTools = normalizedTool ? [...retainedTools, normalizedTool] : retainedTools;
-  const unchanged = Array.isArray(payload.tools) && isDeepStrictEqual(existingTools, nextTools);
+  const unchanged =
+    Array.isArray(payload.tools) &&
+    (isDeepStrictEqual(existingTools, nextTools) ||
+      (normalizedTool !== null &&
+        existingWebSearchTools.length === 1 &&
+        isDeepStrictEqual(existingWebSearchTools[0], normalizedTool)));
 
   if (unchanged) {
     return {

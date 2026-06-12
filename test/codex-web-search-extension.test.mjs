@@ -93,6 +93,14 @@ test("extension returns undefined when hosted web_search is already correct", as
   assert.equal(result, undefined);
 });
 
+test("extension returns undefined when already-correct hosted web_search precedes other tools", async () => {
+  const result = await runHook(
+    {},
+    codexPayload({ tools: [{ type: "web_search", external_web_access: true }, { type: "function", name: "demo_echo" }] }),
+  );
+  assert.equal(result, undefined);
+});
+
 test("extension returns undefined when payload does not look like Codex Responses", async () => {
   const result = await runHook({}, { model: "gpt-5.5", messages: [{ role: "user", content: "hello" }] });
   assert.equal(result, undefined);

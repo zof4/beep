@@ -131,6 +131,19 @@ test("injector leaves already-correct web_search tools unchanged", () => {
   assert.equal(result.payload, payload);
 });
 
+test("injector leaves already-correct web_search tools unchanged regardless of position", () => {
+  const payload = codexPayload({
+    tools: [{ type: "web_search", external_web_access: true }, { type: "function", name: "demo_echo" }],
+  });
+  const tool = buildCodexWebSearchTool(readCodexWebSearchConfig({}));
+  const result = injectCodexWebSearchTool(payload, tool);
+
+  assert.equal(result.changed, false);
+  assert.equal(result.injected, true);
+  assert.equal(result.removed, 0);
+  assert.equal(result.payload, payload);
+});
+
 test("injector removes existing web_search when config is disabled", () => {
   const payload = codexPayload({
     tools: [{ type: "function", name: "demo_echo" }, { type: "web_search", external_web_access: true }],
