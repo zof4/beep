@@ -49,6 +49,22 @@ const LCM_CONTEXT_URL = process.env.BEEP_LCM_CONTEXT_URL || `http://127.0.0.1:${
 const LCM_CONTEXT_TOKEN = process.env.BEEP_LCM_CONTEXT_TOKEN || randomUUID();
 const LCM_CONTEXT_TOKEN_BUDGET = process.env.BEEP_LCM_CONTEXT_TOKEN_BUDGET || "128000";
 const LCM_CONTEXT_TIMEOUT_MS = process.env.BEEP_LCM_CONTEXT_TIMEOUT_MS || "15000";
+const CODEX_WEB_SEARCH_EXTENSION_ENABLED =
+  !["0", "false", "no", "off"].includes(String(process.env.BEEP_CODEX_WEB_SEARCH_EXTENSION_ENABLED || "1").toLowerCase());
+const CODEX_WEB_SEARCH_ENABLED =
+  !["0", "false", "no", "off"].includes(String(process.env.BEEP_CODEX_WEB_SEARCH_ENABLED || "1").toLowerCase());
+const CODEX_WEB_SEARCH_EXTENSION_PATH =
+  process.env.BEEP_CODEX_WEB_SEARCH_EXTENSION_PATH || "/runtime/pi-extensions/codex-web-search-extension.mjs";
+const CODEX_WEB_SEARCH_MODE = process.env.BEEP_CODEX_WEB_SEARCH_MODE || "live";
+const CODEX_WEB_SEARCH_OPTIONAL_ENV_KEYS = [
+  "BEEP_CODEX_WEB_SEARCH_ALLOWED_DOMAINS",
+  "BEEP_CODEX_WEB_SEARCH_CONTEXT_SIZE",
+  "BEEP_CODEX_WEB_SEARCH_CONTENT_TYPES",
+  "BEEP_CODEX_WEB_SEARCH_LOCATION_COUNTRY",
+  "BEEP_CODEX_WEB_SEARCH_LOCATION_REGION",
+  "BEEP_CODEX_WEB_SEARCH_LOCATION_CITY",
+  "BEEP_CODEX_WEB_SEARCH_LOCATION_TIMEZONE",
+];
 const CONTROL_PLANE_TOOLS_ENABLED =
   !["0", "false", "no", "off"].includes(String(process.env.BEEP_CONTROL_PLANE_TOOLS_ENABLED || "0").toLowerCase());
 const CONTROL_PLANE_TOOLS_EXTENSION_PATH =
@@ -312,7 +328,7 @@ function validateThinking(thinking) {
   }
 }
 
-function buildPiChildEnv(session, { lcmContextExtensionLoaded, controlPlaneToolsExtensionLoaded, sandboxToolPortalExtensionLoaded }) {
+function buildPiChildEnv(session, { lcmContextExtensionLoaded, codexWebSearchExtensionLoaded, controlPlaneToolsExtensionLoaded, sandboxToolPortalExtensionLoaded }) {
   const env = {
     PATH: process.env.PATH || "",
     HOME: process.env.HOME || join(STATE_DIR, "home"),
@@ -328,9 +344,18 @@ function buildPiChildEnv(session, { lcmContextExtensionLoaded, controlPlaneTools
     BEEP_LCM_RUNTIME_SESSION_ID: session.id,
     BEEP_LCM_CONTEXT_TOKEN_BUDGET: LCM_CONTEXT_TOKEN_BUDGET,
     BEEP_LCM_CONTEXT_TIMEOUT_MS: LCM_CONTEXT_TIMEOUT_MS,
+    BEEP_CODEX_WEB_SEARCH_ENABLED: codexWebSearchExtensionLoaded && CODEX_WEB_SEARCH_ENABLED ? "1" : "0",
     BEEP_CONTROL_PLANE_TOOLS_ENABLED: controlPlaneToolsExtensionLoaded ? "1" : "0",
     BEEP_SANDBOX_TOOL_PORTAL_ENABLED: sandboxToolPortalExtensionLoaded ? "1" : "0",
   };
+
+  if (codexWebSearchExtensionLoaded) {
+    env.BEEP_CODEX_WEB_SEARCH_MODE = CODEX_WEB_SEARCH_MODE;
+    for (const key of CODEX_WEB_SEARCH_OPTIONAL_ENV_KEYS) {
+      const value = process.env[key];
+      if (value) env[key] = value;
+    }
+  }
 
   if (sandboxToolPortalExtensionLoaded) {
     env.BEEP_SANDBOX_TOOL_PORTAL_URL = SANDBOX_TOOL_PORTAL_URL;
@@ -456,6 +481,10 @@ class PiRpcSession {
     if (lcmContextExtensionLoaded) {
       args.push("--extension", LCM_CONTEXT_EXTENSION_PATH);
     }
+    const codexWebSearchExtensionLoaded = CODEX_WEB_SEARCH_EXTENSION_ENABLED && existsSync(CODEX_WEB_SEARCH_EXTENSION_PATH);
+    if (codexWebSearchExtensionLoaded) {
+      args.push("--extension", CODEX_WEB_SEARCH_EXTENSION_PATH);
+    }
     const sandboxToolPortalExtensionLoaded =
       SANDBOX_TOOL_PORTAL_ENABLED && Boolean(RUNTIME_API_TOKEN) && existsSync(SANDBOX_TOOL_PORTAL_EXTENSION_PATH);
     if (sandboxToolPortalExtensionLoaded) {
@@ -490,6 +519,17 @@ class PiRpcSession {
         tokenBudget: Number(LCM_CONTEXT_TOKEN_BUDGET),
         timeoutMs: Number(LCM_CONTEXT_TIMEOUT_MS),
       },
+      codexWebSearch: {
+        enabled: CODEX_WEB_SEARCH_ENABLED,
+        extensionEnabled: CODEX_WEB_SEARCH_EXTENSION_ENABLED,
+        extensionPath: CODEX_WEB_SEARCH_EXTENSION_PATH,
+        extensionLoaded: codexWebSearchExtensionLoaded,
+        mode: CODEX_WEB_SEARCH_MODE,
+        allowedDomainsConfigured: Boolean(process.env.BEEP_CODEX_WEB_SEARCH_ALLOWED_DOMAINS),
+        contextSizeConfigured: Boolean(process.env.BEEP_CODEX_WEB_SEARCH_CONTEXT_SIZE),
+        contentTypesConfigured: Boolean(process.env.BEEP_CODEX_WEB_SEARCH_CONTENT_TYPES),
+        userLocationConfigured: CODEX_WEB_SEARCH_OPTIONAL_ENV_KEYS.some((key) => key.startsWith("BEEP_CODEX_WEB_SEARCH_LOCATION_") && Boolean(process.env[key])),
+      },
       sandboxToolPortal: {
         enabled: SANDBOX_TOOL_PORTAL_ENABLED,
         extensionPath: SANDBOX_TOOL_PORTAL_EXTENSION_PATH,
@@ -511,6 +551,7 @@ class PiRpcSession {
 
     const env = buildPiChildEnv(this, {
       lcmContextExtensionLoaded,
+      codexWebSearchExtensionLoaded,
       controlPlaneToolsExtensionLoaded,
       sandboxToolPortalExtensionLoaded,
     });
@@ -1469,6 +1510,16 @@ async function handleCapabilities(_req, res) {
       tokenBudget: Number(LCM_CONTEXT_TOKEN_BUDGET),
       timeoutMs: Number(LCM_CONTEXT_TIMEOUT_MS),
       route: "POST /internal/lcm/context",
+    },
+    codexWebSearch: {
+      enabled: CODEX_WEB_SEARCH_ENABLED,
+      extensionEnabled: CODEX_WEB_SEARCH_EXTENSION_ENABLED,
+      extensionPath: CODEX_WEB_SEARCH_EXTENSION_PATH,
+      mode: CODEX_WEB_SEARCH_MODE,
+      allowedDomainsConfigured: Boolean(process.env.BEEP_CODEX_WEB_SEARCH_ALLOWED_DOMAINS),
+      contextSizeConfigured: Boolean(process.env.BEEP_CODEX_WEB_SEARCH_CONTEXT_SIZE),
+      contentTypesConfigured: Boolean(process.env.BEEP_CODEX_WEB_SEARCH_CONTENT_TYPES),
+      userLocationConfigured: CODEX_WEB_SEARCH_OPTIONAL_ENV_KEYS.some((key) => key.startsWith("BEEP_CODEX_WEB_SEARCH_LOCATION_") && Boolean(process.env[key])),
     },
     controlPlaneTools: {
       enabled: CONTROL_PLANE_TOOLS_ENABLED,
