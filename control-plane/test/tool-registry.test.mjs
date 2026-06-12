@@ -57,7 +57,9 @@ function installEnabledDemoTool(store) {
 
 test("default manifest hides legacy web.run but keeps default scopes and broker lookup", () => {
   const { store, cleanup } = tempStore();
+  const previous = process.env.BEEP_LEGACY_WEB_RUN_TOOL_ENABLED;
   try {
+    delete process.env.BEEP_LEGACY_WEB_RUN_TOOL_ENABLED;
     const registry = new ToolRegistry({ store });
     const manifest = registry.manifest();
 
@@ -68,6 +70,11 @@ test("default manifest hides legacy web.run but keeps default scopes and broker 
     assert.ok(manifest.tools.find((tool) => tool.action === "preview.port.expose"));
     assert.equal(registry.get("web.run")?.action, "web.run");
   } finally {
+    if (previous === undefined) {
+      delete process.env.BEEP_LEGACY_WEB_RUN_TOOL_ENABLED;
+    } else {
+      process.env.BEEP_LEGACY_WEB_RUN_TOOL_ENABLED = previous;
+    }
     cleanup();
   }
 });
