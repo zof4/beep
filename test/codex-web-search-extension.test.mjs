@@ -45,23 +45,47 @@ async function loadExtension() {
   return import(url.href);
 }
 
-async function runHook(env, payload) {
+async function withCapturedConsoleError(callback) {
+  const previous = console.error;
+  const logs = [];
+  console.error = (...args) => {
+    logs.push(args);
+  };
+  try {
+    return await callback(logs);
+  } finally {
+    console.error = previous;
+  }
+}
+
+async function withExtensionHarness(env, callback) {
   return withEnv(env, async () => {
-    const { default: extension } = await loadExtension();
-    const handlers = [];
-    const pi = {
-      on(event, handler) {
-        handlers.push({ event, handler });
-      },
-    };
-    const result = extension(pi);
-    assert.equal(result, undefined);
-    assert.deepEqual(
-      handlers.map((entry) => entry.event),
-      ["before_provider_request"],
-    );
-    return handlers[0].handler({ type: "before_provider_request", payload }, pi);
+    return withCapturedConsoleError(async (logs) => {
+      const { default: extension } = await loadExtension();
+      const handlers = [];
+      const pi = {
+        on(event, handler) {
+          handlers.push({ event, handler });
+        },
+      };
+      const result = extension(pi);
+      assert.equal(result, undefined);
+      assert.deepEqual(
+        handlers.map((entry) => entry.event),
+        ["before_provider_request"],
+      );
+      return callback({
+        logs,
+        invoke(payload) {
+          return handlers[0].handler({ type: "before_provider_request", payload }, pi);
+        },
+      });
+    });
   });
+}
+
+async function runHook(env, payload) {
+  return withExtensionHarness(env, ({ invoke }) => invoke(payload));
 }
 
 test("extension injects hosted web_search into Codex provider payload", async () => {
@@ -89,16 +113,23 @@ test("extension replaces stale web_search entries instead of duplicating them", 
 });
 
 test("extension returns undefined when hosted web_search is already correct", async () => {
-  const result = await runHook({}, codexPayload({ tools: [{ type: "web_search", external_web_access: true }] }));
-  assert.equal(result, undefined);
+  await withExtensionHarness({}, ({ invoke, logs }) => {
+    const result = invoke(codexPayload({ tools: [{ type: "web_search", external_web_access: true }] }));
+    assert.equal(result, undefined);
+    assert.deepEqual(logs, []);
+  });
 });
 
 test("extension returns undefined when already-correct hosted web_search precedes other tools", async () => {
-  const result = await runHook(
-    {},
-    codexPayload({ tools: [{ type: "web_search", external_web_access: true }, { type: "function", name: "demo_echo" }] }),
-  );
-  assert.equal(result, undefined);
+  await withExtensionHarness({}, ({ invoke, logs }) => {
+    const result = invoke(
+      codexPayload({
+        tools: [{ type: "web_search", external_web_access: true }, { type: "function", name: "demo_echo" }],
+      }),
+    );
+    assert.equal(result, undefined);
+    assert.deepEqual(logs, []);
+  });
 });
 
 test("extension returns undefined when payload does not look like Codex Responses", async () => {
@@ -112,6 +143,20 @@ test("extension removes existing hosted search when disabled", async () => {
     codexPayload({ tools: [{ type: "function", name: "demo_echo" }, { type: "web_search", external_web_access: true }] }),
   );
   assert.deepEqual(result.tools, [{ type: "function", name: "demo_echo" }]);
+});
+
+test("extension logs only once for multiple changed payloads on one instance", async () => {
+  await withExtensionHarness({}, ({ invoke, logs }) => {
+    const first = invoke(codexPayload({ tools: [{ type: "function", name: "demo_echo" }] }));
+    const second = invoke(codexPayload());
+
+    assert.deepEqual(first.tools, [
+      { type: "function", name: "demo_echo" },
+      { type: "web_search", external_web_access: true },
+    ]);
+    assert.deepEqual(second.tools, [{ type: "web_search", external_web_access: true }]);
+    assert.deepEqual(logs, [["[beep-codex-web-search] injected hosted web_search mode=live removed=0"]]);
+  });
 });
 
 test("extension fails setup on invalid web-search config", async () => {
