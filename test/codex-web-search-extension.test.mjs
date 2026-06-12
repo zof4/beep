@@ -88,6 +88,11 @@ test("extension replaces stale web_search entries instead of duplicating them", 
   ]);
 });
 
+test("extension returns undefined when hosted web_search is already correct", async () => {
+  const result = await runHook({}, codexPayload({ tools: [{ type: "web_search", external_web_access: true }] }));
+  assert.equal(result, undefined);
+});
+
 test("extension returns undefined when payload does not look like Codex Responses", async () => {
   const result = await runHook({}, { model: "gpt-5.5", messages: [{ role: "user", content: "hello" }] });
   assert.equal(result, undefined);

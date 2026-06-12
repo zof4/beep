@@ -1,3 +1,5 @@
+import { isDeepStrictEqual } from "node:util";
+
 export const CODEX_WEB_SEARCH_ACKNOWLEDGED_FIELDS = [
   "type",
   "external_web_access",
@@ -243,6 +245,17 @@ export function injectCodexWebSearchTool(payload, webSearchTool) {
   const removed = existingTools.length - retainedTools.length;
   const normalizedTool = normalizeWebSearchTool(webSearchTool);
   const nextTools = normalizedTool ? [...retainedTools, normalizedTool] : retainedTools;
+  const unchanged = Array.isArray(payload.tools) && isDeepStrictEqual(existingTools, nextTools);
+
+  if (unchanged) {
+    return {
+      changed: false,
+      injected: normalizedTool !== null,
+      removed: 0,
+      payload,
+    };
+  }
+
   const changed = removed > 0 || normalizedTool !== null;
 
   if (!changed) {
