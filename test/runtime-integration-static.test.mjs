@@ -219,7 +219,7 @@ test("trusted Pi loop wires the hosted Codex web-search extension into spawn, en
   );
   assert.match(
     apiSource,
-    /if \(codexWebSearchExtensionLoaded\) \{[\s\S]*env\.BEEP_CODEX_WEB_SEARCH_MODE = CODEX_WEB_SEARCH_MODE[\s\S]*for \(const key of CODEX_WEB_SEARCH_OPTIONAL_ENV_KEYS\) \{[\s\S]*const value = process\.env\[key\][\s\S]*if \(value\) env\[key\] = value[\s\S]*\}/,
+    /if \(codexWebSearchExtensionLoaded && CODEX_WEB_SEARCH_ENABLED\) \{[\s\S]*env\.BEEP_CODEX_WEB_SEARCH_MODE = CODEX_WEB_SEARCH_MODE[\s\S]*for \(const key of CODEX_WEB_SEARCH_OPTIONAL_ENV_KEYS\) \{[\s\S]*const value = process\.env\[key\][\s\S]*if \(value\) env\[key\] = value[\s\S]*\}/,
     "web-search mode and optional env keys should only be copied through an explicit whitelist",
   );
   assert.doesNotMatch(apiSource, /\.\.\.process\.env/, "Pi child env must remain sanitized");
@@ -246,7 +246,7 @@ test("trusted Pi loop wires the hosted Codex web-search extension into spawn, en
   assert.match(apiSource, /args\.push\("--extension", CODEX_WEB_SEARCH_EXTENSION_PATH\)/);
   assert.match(
     apiSource,
-    /codexWebSearch: \{[\s\S]*enabled: CODEX_WEB_SEARCH_ENABLED[\s\S]*extensionEnabled: CODEX_WEB_SEARCH_EXTENSION_ENABLED[\s\S]*extensionPath: CODEX_WEB_SEARCH_EXTENSION_PATH[\s\S]*extensionLoaded: codexWebSearchExtensionLoaded[\s\S]*mode: CODEX_WEB_SEARCH_MODE[\s\S]*allowedDomainsConfigured: Boolean\(process\.env\.BEEP_CODEX_WEB_SEARCH_ALLOWED_DOMAINS\)[\s\S]*contextSizeConfigured: Boolean\(process\.env\.BEEP_CODEX_WEB_SEARCH_CONTEXT_SIZE\)[\s\S]*contentTypesConfigured: Boolean\(process\.env\.BEEP_CODEX_WEB_SEARCH_CONTENT_TYPES\)[\s\S]*userLocationConfigured: CODEX_WEB_SEARCH_OPTIONAL_ENV_KEYS\.some\(\(key\) => key\.startsWith\("BEEP_CODEX_WEB_SEARCH_LOCATION_"\) && Boolean\(process\.env\[key\]\)\)/,
+    /codexWebSearch: \{[\s\S]*enabled: CODEX_WEB_SEARCH_ENABLED[\s\S]*extensionEnabled: CODEX_WEB_SEARCH_EXTENSION_ENABLED[\s\S]*extensionPath: CODEX_WEB_SEARCH_EXTENSION_PATH[\s\S]*extensionLoaded: codexWebSearchExtensionLoaded[\s\S]*effectiveEnabled: CODEX_WEB_SEARCH_ENABLED && codexWebSearchExtensionLoaded[\s\S]*mode: CODEX_WEB_SEARCH_MODE[\s\S]*allowedDomainsConfigured: Boolean\(process\.env\.BEEP_CODEX_WEB_SEARCH_ALLOWED_DOMAINS\)[\s\S]*contextSizeConfigured: Boolean\(process\.env\.BEEP_CODEX_WEB_SEARCH_CONTEXT_SIZE\)[\s\S]*contentTypesConfigured: Boolean\(process\.env\.BEEP_CODEX_WEB_SEARCH_CONTENT_TYPES\)[\s\S]*userLocationConfigured: CODEX_WEB_SEARCH_OPTIONAL_ENV_KEYS\.some\(\(key\) => key\.startsWith\("BEEP_CODEX_WEB_SEARCH_LOCATION_"\) && Boolean\(process\.env\[key\]\)\)/,
   );
   assert.match(
     apiSource,
@@ -258,7 +258,7 @@ test("trusted Pi loop wires the hosted Codex web-search extension into spawn, en
 test("runtime capabilities surface high-level Codex web-search status", () => {
   assert.match(
     apiSource,
-    /codexWebSearch: \{[\s\S]*enabled: CODEX_WEB_SEARCH_ENABLED[\s\S]*extensionEnabled: CODEX_WEB_SEARCH_EXTENSION_ENABLED[\s\S]*extensionPath: CODEX_WEB_SEARCH_EXTENSION_PATH[\s\S]*mode: CODEX_WEB_SEARCH_MODE[\s\S]*allowedDomainsConfigured: Boolean\(process\.env\.BEEP_CODEX_WEB_SEARCH_ALLOWED_DOMAINS\)[\s\S]*contextSizeConfigured: Boolean\(process\.env\.BEEP_CODEX_WEB_SEARCH_CONTEXT_SIZE\)[\s\S]*contentTypesConfigured: Boolean\(process\.env\.BEEP_CODEX_WEB_SEARCH_CONTENT_TYPES\)[\s\S]*userLocationConfigured: CODEX_WEB_SEARCH_OPTIONAL_ENV_KEYS\.some\(\(key\) => key\.startsWith\("BEEP_CODEX_WEB_SEARCH_LOCATION_"\) && Boolean\(process\.env\[key\]\)\)/,
+    /codexWebSearch: \{[\s\S]*enabled: CODEX_WEB_SEARCH_ENABLED[\s\S]*extensionEnabled: CODEX_WEB_SEARCH_EXTENSION_ENABLED[\s\S]*extensionPath: CODEX_WEB_SEARCH_EXTENSION_PATH[\s\S]*extensionAvailable: CODEX_WEB_SEARCH_EXTENSION_ENABLED && existsSync\(CODEX_WEB_SEARCH_EXTENSION_PATH\)[\s\S]*effectiveEnabled: CODEX_WEB_SEARCH_ENABLED && CODEX_WEB_SEARCH_EXTENSION_ENABLED && existsSync\(CODEX_WEB_SEARCH_EXTENSION_PATH\)[\s\S]*mode: CODEX_WEB_SEARCH_MODE[\s\S]*allowedDomainsConfigured: Boolean\(process\.env\.BEEP_CODEX_WEB_SEARCH_ALLOWED_DOMAINS\)[\s\S]*contextSizeConfigured: Boolean\(process\.env\.BEEP_CODEX_WEB_SEARCH_CONTEXT_SIZE\)[\s\S]*contentTypesConfigured: Boolean\(process\.env\.BEEP_CODEX_WEB_SEARCH_CONTENT_TYPES\)[\s\S]*userLocationConfigured: CODEX_WEB_SEARCH_OPTIONAL_ENV_KEYS\.some\(\(key\) => key\.startsWith\("BEEP_CODEX_WEB_SEARCH_LOCATION_"\) && Boolean\(process\.env\[key\]\)\)/,
   );
 });
 

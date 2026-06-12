@@ -349,7 +349,7 @@ function buildPiChildEnv(session, { lcmContextExtensionLoaded, codexWebSearchExt
     BEEP_SANDBOX_TOOL_PORTAL_ENABLED: sandboxToolPortalExtensionLoaded ? "1" : "0",
   };
 
-  if (codexWebSearchExtensionLoaded) {
+  if (codexWebSearchExtensionLoaded && CODEX_WEB_SEARCH_ENABLED) {
     env.BEEP_CODEX_WEB_SEARCH_MODE = CODEX_WEB_SEARCH_MODE;
     for (const key of CODEX_WEB_SEARCH_OPTIONAL_ENV_KEYS) {
       const value = process.env[key];
@@ -524,6 +524,7 @@ class PiRpcSession {
         extensionEnabled: CODEX_WEB_SEARCH_EXTENSION_ENABLED,
         extensionPath: CODEX_WEB_SEARCH_EXTENSION_PATH,
         extensionLoaded: codexWebSearchExtensionLoaded,
+        effectiveEnabled: CODEX_WEB_SEARCH_ENABLED && codexWebSearchExtensionLoaded,
         mode: CODEX_WEB_SEARCH_MODE,
         allowedDomainsConfigured: Boolean(process.env.BEEP_CODEX_WEB_SEARCH_ALLOWED_DOMAINS),
         contextSizeConfigured: Boolean(process.env.BEEP_CODEX_WEB_SEARCH_CONTEXT_SIZE),
@@ -1515,6 +1516,8 @@ async function handleCapabilities(_req, res) {
       enabled: CODEX_WEB_SEARCH_ENABLED,
       extensionEnabled: CODEX_WEB_SEARCH_EXTENSION_ENABLED,
       extensionPath: CODEX_WEB_SEARCH_EXTENSION_PATH,
+      extensionAvailable: CODEX_WEB_SEARCH_EXTENSION_ENABLED && existsSync(CODEX_WEB_SEARCH_EXTENSION_PATH),
+      effectiveEnabled: CODEX_WEB_SEARCH_ENABLED && CODEX_WEB_SEARCH_EXTENSION_ENABLED && existsSync(CODEX_WEB_SEARCH_EXTENSION_PATH),
       mode: CODEX_WEB_SEARCH_MODE,
       allowedDomainsConfigured: Boolean(process.env.BEEP_CODEX_WEB_SEARCH_ALLOWED_DOMAINS),
       contextSizeConfigured: Boolean(process.env.BEEP_CODEX_WEB_SEARCH_CONTEXT_SIZE),
