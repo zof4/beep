@@ -55,7 +55,7 @@ function installEnabledDemoTool(store) {
   });
 }
 
-test("registry includes built-in web.run and preview tools", () => {
+test("default manifest hides legacy web.run but keeps default scopes and broker lookup", () => {
   const { store, cleanup } = tempStore();
   try {
     const registry = new ToolRegistry({ store });
@@ -63,10 +63,30 @@ test("registry includes built-in web.run and preview tools", () => {
 
     assert.equal(manifest.schemaVersion, 2);
     assert.ok(manifest.defaultAllowedScopes.includes("web.search"));
-    assert.ok(manifest.defaultAllowedScopes.includes("sandbox.tool.execute"));
-    assert.ok(manifest.tools.find((tool) => tool.action === "web.run"));
+    assert.ok(manifest.defaultAllowedScopes.includes("preview.port.expose"));
+    assert.equal(manifest.tools.find((tool) => tool.action === "web.run"), undefined);
     assert.ok(manifest.tools.find((tool) => tool.action === "preview.port.expose"));
+    assert.equal(registry.get("web.run")?.action, "web.run");
   } finally {
+    cleanup();
+  }
+});
+
+test("manifest includes legacy web.run when explicitly enabled by env", () => {
+  const { store, cleanup } = tempStore();
+  const previous = process.env.BEEP_LEGACY_WEB_RUN_TOOL_ENABLED;
+  try {
+    process.env.BEEP_LEGACY_WEB_RUN_TOOL_ENABLED = "1";
+    const registry = new ToolRegistry({ store });
+    const manifest = registry.manifest();
+
+    assert.ok(manifest.tools.find((tool) => tool.action === "web.run"));
+  } finally {
+    if (previous === undefined) {
+      delete process.env.BEEP_LEGACY_WEB_RUN_TOOL_ENABLED;
+    } else {
+      process.env.BEEP_LEGACY_WEB_RUN_TOOL_ENABLED = previous;
+    }
     cleanup();
   }
 });

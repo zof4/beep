@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { RUNTIME_ID } from "./config.mjs";
-import { BUILTIN_TOOL_MANIFEST, DEFAULT_ALLOWED_SCOPES } from "./tool-manifest.mjs";
+import { BUILTIN_TOOL_MANIFEST, DEFAULT_ALLOWED_SCOPES, publicManifestTool } from "./tool-manifest.mjs";
 
 function stableJson(value) {
   if (Array.isArray(value)) {
@@ -64,7 +64,7 @@ export class ToolRegistry {
       schemaVersion: 2,
       runtimeId: RUNTIME_ID,
       defaultAllowedScopes: DEFAULT_ALLOWED_SCOPES,
-      tools: this.tools().map((tool) => publicToolDefinition(tool)),
+      tools: this.tools().filter((tool) => publicManifestTool(tool)).map((tool) => publicToolDefinition(tool)),
     };
     return {
       ...manifest,

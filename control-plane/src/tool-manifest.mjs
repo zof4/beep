@@ -150,3 +150,14 @@ export const BUILTIN_TOOL_MANIFEST = [
 ];
 
 export const TOOL_MANIFEST = BUILTIN_TOOL_MANIFEST;
+
+export function legacyWebRunToolEnabled(env = process.env) {
+  return ["1", "true", "yes", "on"].includes(
+    String(env.BEEP_LEGACY_WEB_RUN_TOOL_ENABLED || "0").toLowerCase(),
+  );
+}
+
+export function publicManifestTool(tool, env = process.env) {
+  if (tool?.action === "web.run") return legacyWebRunToolEnabled(env);
+  return true;
+}
