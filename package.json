@@ -10,6 +10,8 @@
     "test:reconciliation": "node --test test/*.test.mjs control-plane/test/*.test.mjs",
     "test:host-loop-static": "node --test test/sandbox-tool-protocol.test.mjs test/sandbox-tool-executor.test.mjs test/sandbox-tool-portal-extension.test.mjs test/sandbox-tool-runner.test.mjs test/runtime-integration-static.test.mjs",
     "test:host-loop": "npm run test:host-loop-static && bash -n scripts/smoke-test-host-loop-sandbox.sh",
-    "test:runtime-static": "node --test test/runtime-integration-static.test.mjs"
+    "test:runtime-static": "node --test test/runtime-integration-static.test.mjs",
+    "test:notes-backbone": "node --test control-plane/test/notes-*.test.mjs",
+    "test:notes-backbone-static": "node --test control-plane/test/notes-workspace-domain.test.mjs control-plane/test/notes-workspace-store.test.mjs control-plane/test/notes-pipeline-engine.test.mjs control-plane/test/notes-beep-gateway.test.mjs control-plane/test/notes-routes.test.mjs control-plane/test/notes-demo-web.test.mjs && bash -n scripts/smoke-test-beep-notes-backbone.sh"
   }
 }
