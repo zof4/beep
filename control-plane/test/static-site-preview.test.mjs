@@ -377,6 +377,138 @@ test("static site execution rejection reports invalid evidence and traversal lim
   );
 });
 
+function dockerSpawnStubForUpdate({ oldContainerName, newContainerPrefix, port = 49152, failOnRun = false, rmFailures = new Map() }) {
+  const calls = [];
+  return {
+    calls,
+    spawn(command, args, options) {
+      assert.equal(command, "docker");
+      assert.deepEqual(options.stdio, ["ignore", "pipe", "pipe"]);
+      calls.push(args);
+      const child = new EventEmitter();
+      child.stdout = new PassThrough();
+      child.stderr = new PassThrough();
+      process.nextTick(() => {
+        const subcommand = args[0];
+        if (subcommand === "run") {
+          const nameIndex = args.indexOf("--name");
+          const containerName = nameIndex === -1 ? "" : args[nameIndex + 1];
+          assert.match(containerName, new RegExp(`^${newContainerPrefix}`));
+          if (failOnRun) {
+            child.stderr.write("replacement container failed\n");
+            child.stderr.end();
+            child.emit("close", 1);
+            return;
+          }
+          child.stdout.write("new-container-id\n");
+          child.stdout.end();
+          child.emit("close", 0);
+          return;
+        }
+        if (subcommand === "port") {
+          child.stdout.write(`127.0.0.1:${port}\n`);
+          child.stdout.end();
+          child.emit("close", 0);
+          return;
+        }
+        if (subcommand === "rm") {
+          const containerName = args[2];
+          const failure = rmFailures.get(containerName);
+          if (failure) {
+            child.stderr.write(failure);
+            child.stderr.end();
+            child.emit("close", 1);
+            return;
+          }
+          assert.equal(args[1], "-f");
+          assert.equal(containerName === oldContainerName || containerName.startsWith(newContainerPrefix), true);
+          child.stdout.write(containerName);
+          child.stdout.end();
+          child.emit("close", 0);
+          return;
+        }
+        child.stderr.write(`unexpected docker args: ${args.join(" ")}\n`);
+        child.stderr.end();
+        child.emit("close", 1);
+      });
+      return child;
+    },
+  };
+}
+
+test("static site update preserves site id and swaps to a fresh snapshot and container", async () => {
+  const originalSpawn = childProcess.spawn;
+  const siteId = `update-${process.pid}-${Date.now()}`;
+  const oldContainerName = `beep-preview-${siteId}`;
+  const { dir, cleanup } = tempDir();
+  const source = join(dir, "workspace-site");
+  const oldSnapshotPath = join(STATE_DIR, "static-site-snapshots", `${siteId}-old`);
+  try {
+    mkdirSync(source, { recursive: true });
+    writeFileSync(join(source, "index.html"), "<h1>updated</h1>\n");
+    mkdirSync(oldSnapshotPath, { recursive: true });
+    writeFileSync(join(oldSnapshotPath, "index.html"), "<h1>old</h1>\n");
+
+    const upserts = [];
+    const store = {
+      upsertSite(site, auditEvent) {
+        upserts.push({ site, auditEvent });
+      },
+    };
+    const stub = dockerSpawnStubForUpdate({
+      oldContainerName,
+      newContainerPrefix: `beep-preview-${siteId}-r2-`,
+      port: 49177,
+    });
+    childProcess.spawn = stub.spawn;
+    syncBuiltinESMExports();
+
+    const { updateStaticSitePreview } = await import(
+      `../src/static-site-preview.mjs?update-success=${Date.now()}`
+    );
+    const updated = await updateStaticSitePreview({
+      runtimeId: "local",
+      site: {
+        siteId,
+        runtimeId: "local",
+        status: "running",
+        sourcePath: "/workspace/api-sessions/agent_beep/site",
+        snapshotPath: oldSnapshotPath,
+        snapshotFileCount: 1,
+        snapshotTotalBytes: 13,
+        containerName: oldContainerName,
+        containerId: "old-container-id",
+        hostPort: 49170,
+        proxyUrl: `http://127.0.0.1:8788/sites/${siteId}/`,
+        directUrl: "http://127.0.0.1:49170/",
+        revision: 1,
+      },
+      args: { sourcePath: "/workspace/api-sessions/agent_beep/site" },
+      store,
+      sourceHostPath: source,
+      trustedRoot: source,
+    });
+
+    assert.equal(updated.siteId, siteId);
+    assert.equal(updated.revision, 2);
+    assert.equal(updated.proxyUrl, `http://127.0.0.1:8788/sites/${siteId}/`);
+    assert.equal(updated.directUrl, "http://127.0.0.1:49177/");
+    assert.equal(updated.previousContainerName, oldContainerName);
+    assert.equal(updated.previousSnapshotPath, oldSnapshotPath);
+    assert.equal(readFileSync(join(updated.snapshotPath, "index.html"), "utf8"), "<h1>updated</h1>\n");
+    assert.equal(existsSync(oldSnapshotPath), false);
+    assert.equal(upserts.length, 2);
+    assert.equal(upserts[0].auditEvent, undefined);
+    assert.equal(upserts[1].auditEvent.kind, "site_updated");
+    assert.equal(upserts[1].auditEvent.cleanup.oldContainerRemoval, "removed");
+  } finally {
+    childProcess.spawn = originalSpawn;
+    syncBuiltinESMExports();
+    rmSync(oldSnapshotPath, { recursive: true, force: true });
+    cleanup();
+  }
+});
+
 test("static site removal cleans up stale missing docker containers", async () => {
   const originalSpawn = childProcess.spawn;
   const siteId = `stale-${process.pid}-${Date.now()}`;

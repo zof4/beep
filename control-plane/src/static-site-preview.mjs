@@ -359,6 +359,105 @@ function isMissingDockerContainerError(error) {
   return /No such (?:container|object)/iu.test(message);
 }
 
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function nextSiteRevision(site) {
+  const currentRevision = Number.isInteger(site?.revision) && site.revision > 0 ? site.revision : 1;
+  return currentRevision + 1;
+}
+
+function staticPreviewContainerName({ siteId, revision }) {
+  return `beep-preview-${siteId}-r${revision}-${randomBytes(3).toString("hex")}`;
+}
+
+function snapshotIdForUpdate({ siteId, revision }) {
+  return `${siteId}-r${revision}-${randomBytes(4).toString("hex")}`;
+}
+
+async function startStaticSiteContainer({ runtimeId, siteId, approvalId, revision, snapshotPath, containerName }) {
+  const runResult = await run("docker", [
+    "run",
+    "-d",
+    "--name",
+    containerName,
+    "--label",
+    "beep.managed=true",
+    "--label",
+    `beep.runtime_id=${runtimeId}`,
+    "--label",
+    `beep.site_id=${siteId}`,
+    "--label",
+    `beep.site_revision=${revision}`,
+    "--label",
+    `beep.approval_id=${approvalId || "operator"}`,
+    "--read-only",
+    "--tmpfs",
+    "/tmp:size=64m,mode=1777",
+    "-p",
+    "127.0.0.1::8080",
+    "-v",
+    `${snapshotPath}:/site:ro`,
+    STATIC_SITE_IMAGE,
+    "node",
+    "-e",
+    staticServerScript(),
+  ]);
+  const containerId = runResult.stdout.trim();
+  const portResult = await run("docker", ["port", containerName, "8080/tcp"]);
+  const portMatch = portResult.stdout.match(/127[.]0[.]0[.]1:(\d+)/u);
+  if (!portMatch) {
+    throw new ToolBrokerError(`Could not determine mapped site port for ${containerName}.`, 500);
+  }
+  return {
+    containerId,
+    hostPort: Number(portMatch[1]),
+  };
+}
+
+async function removeStaticSiteContainer(containerName) {
+  try {
+    await run("docker", ["rm", "-f", containerName]);
+    return { removal: "removed", error: null };
+  } catch (error) {
+    if (!isMissingDockerContainerError(error)) throw error;
+    return {
+      removal: "container_missing",
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+async function cleanupOldStaticSiteAssets(site) {
+  const cleanup = {
+    oldContainerRemoval: "not_attempted",
+    oldContainerError: null,
+    oldSnapshotRemoval: "not_attempted",
+    oldSnapshotError: null,
+  };
+  if (site.containerName) {
+    try {
+      const removed = await removeStaticSiteContainer(site.containerName);
+      cleanup.oldContainerRemoval = removed.removal;
+      cleanup.oldContainerError = removed.error;
+    } catch (error) {
+      cleanup.oldContainerRemoval = "failed";
+      cleanup.oldContainerError = error instanceof Error ? error.message : String(error);
+    }
+  }
+  if (site.snapshotPath) {
+    try {
+      removeStaticSiteSnapshot(site.snapshotPath);
+      cleanup.oldSnapshotRemoval = "removed";
+    } catch (error) {
+      cleanup.oldSnapshotRemoval = "failed";
+      cleanup.oldSnapshotError = error instanceof Error ? error.message : String(error);
+    }
+  }
+  return cleanup;
+}
+
 function staticServerScript() {
   return `
 const http = require("node:http");
@@ -426,39 +525,15 @@ export async function createStaticSitePreview({ runtimeId, args, approvalId, sto
 
   let containerStarted = false;
   try {
-    const runResult = await run("docker", [
-      "run",
-      "-d",
-      "--name",
+    const started = await startStaticSiteContainer({
+      runtimeId,
+      siteId,
+      approvalId,
+      revision: 1,
+      snapshotPath: snapshot.snapshotPath,
       containerName,
-      "--label",
-      "beep.managed=true",
-      "--label",
-      `beep.runtime_id=${runtimeId}`,
-      "--label",
-      `beep.site_id=${siteId}`,
-      "--label",
-      `beep.approval_id=${approvalId}`,
-      "--read-only",
-      "--tmpfs",
-      "/tmp:size=64m,mode=1777",
-      "-p",
-      "127.0.0.1::8080",
-      "-v",
-      `${snapshot.snapshotPath}:/site:ro`,
-      STATIC_SITE_IMAGE,
-      "node",
-      "-e",
-      staticServerScript(),
-    ]);
+    });
     containerStarted = true;
-    const containerId = runResult.stdout.trim();
-    const portResult = await run("docker", ["port", containerName, "8080/tcp"]);
-    const portMatch = portResult.stdout.match(/127[.]0[.]0[.]1:(\d+)/u);
-    if (!portMatch) {
-      throw new ToolBrokerError(`Could not determine mapped site port for ${containerName}.`, 500);
-    }
-    const hostPort = Number(portMatch[1]);
     const site = {
       siteId,
       runtimeId,
@@ -470,16 +545,111 @@ export async function createStaticSitePreview({ runtimeId, args, approvalId, sto
       snapshotFileCount: snapshot.fileCount,
       snapshotTotalBytes: snapshot.totalBytes,
       containerName,
-      containerId,
+      containerId: started.containerId,
       image: STATIC_SITE_IMAGE,
-      hostPort,
+      hostPort: started.hostPort,
       proxyUrl: `${PUBLIC_BASE_URL}/sites/${siteId}/`,
-      directUrl: `http://127.0.0.1:${hostPort}/`,
+      directUrl: `http://127.0.0.1:${started.hostPort}/`,
+      revision: 1,
+      createdAt: nowIso(),
     };
     store.upsertSite(site);
     return site;
   } catch (error) {
     if (containerStarted) {
+      await run("docker", ["rm", "-f", containerName]).catch(() => null);
+    }
+    removeStaticSiteSnapshot(snapshot.snapshotPath);
+    throw error;
+  }
+}
+
+export async function updateStaticSitePreview({ runtimeId, site, args, store, sourceHostPath = null, trustedRoot = null }) {
+  if (runtimeId !== RUNTIME_ID) {
+    throw new ToolBrokerError(`Unknown runtimeId: ${runtimeId}`, 404);
+  }
+  if (!site?.siteId) {
+    throw new ToolBrokerError("Static preview update requires an existing site.", 400);
+  }
+  if (site.runtimeId !== runtimeId) {
+    throw new ToolBrokerError(`Site ${site.siteId} does not belong to runtime ${runtimeId}.`, 404);
+  }
+  if (site.status === "stopped") {
+    throw new ToolBrokerError(`Site is stopped: ${site.siteId}`, 410);
+  }
+
+  const evidence =
+    sourceHostPath && trustedRoot
+      ? { ok: true, hostPath: sourceHostPath, workspaceRoot: trustedRoot }
+      : validateStaticSiteSourceForExecution(args);
+  const revision = nextSiteRevision(site);
+  const snapshotSiteId = snapshotIdForUpdate({ siteId: site.siteId, revision });
+  const containerName = staticPreviewContainerName({ siteId: site.siteId, revision });
+  const snapshot = createStaticSiteSnapshot({
+    sourceHostPath: evidence.hostPath,
+    siteId: snapshotSiteId,
+    trustedRoot: evidence.workspaceRoot,
+  });
+
+  let replacementStarted = false;
+  try {
+    const started = await startStaticSiteContainer({
+      runtimeId,
+      siteId: site.siteId,
+      approvalId: site.approvalId || "operator",
+      revision,
+      snapshotPath: snapshot.snapshotPath,
+      containerName,
+    });
+    replacementStarted = true;
+    const updatedAt = nowIso();
+    const updated = {
+      ...site,
+      runtimeId,
+      siteId: site.siteId,
+      status: "running",
+      sourcePath: args.sourcePath || site.sourcePath,
+      snapshotPath: snapshot.snapshotPath,
+      snapshotFileCount: snapshot.fileCount,
+      snapshotTotalBytes: snapshot.totalBytes,
+      containerName,
+      containerId: started.containerId,
+      image: STATIC_SITE_IMAGE,
+      hostPort: started.hostPort,
+      proxyUrl: `${PUBLIC_BASE_URL}/sites/${site.siteId}/`,
+      directUrl: `http://127.0.0.1:${started.hostPort}/`,
+      previousContainerName: site.containerName,
+      previousSnapshotPath: site.snapshotPath,
+      revision,
+      updatedAt,
+      lastUpdate: {
+        sourcePath: args.sourcePath || site.sourcePath,
+        snapshotFileCount: snapshot.fileCount,
+        snapshotTotalBytes: snapshot.totalBytes,
+        updatedAt,
+      },
+    };
+
+    store.upsertSite(updated);
+    const cleanup = await cleanupOldStaticSiteAssets(site);
+    const finalUpdated = {
+      ...updated,
+      cleanup,
+    };
+    store.upsertSite(finalUpdated, {
+      kind: "site_updated",
+      siteId: site.siteId,
+      runtimeId,
+      previousContainerName: site.containerName || null,
+      containerName,
+      revision,
+      cleanup,
+    });
+    return {
+      ...finalUpdated,
+    };
+  } catch (error) {
+    if (replacementStarted) {
       await run("docker", ["rm", "-f", containerName]).catch(() => null);
     }
     removeStaticSiteSnapshot(snapshot.snapshotPath);
@@ -494,17 +664,7 @@ export async function removeStaticSitePreview({ site, store }) {
   if (site.status === "stopped") {
     return site;
   }
-  let dockerRemoval = "removed";
-  let dockerError = null;
-  try {
-    await run("docker", ["rm", "-f", site.containerName]);
-  } catch (error) {
-    if (!isMissingDockerContainerError(error)) {
-      throw error;
-    }
-    dockerRemoval = "container_missing";
-    dockerError = error instanceof Error ? error.message : String(error);
-  }
+  const removed = await removeStaticSiteContainer(site.containerName);
   const stopped = {
     ...site,
     status: "stopped",
@@ -515,8 +675,8 @@ export async function removeStaticSitePreview({ site, store }) {
     siteId: site.siteId,
     runtimeId: site.runtimeId,
     containerName: site.containerName,
-    dockerRemoval,
-    dockerError,
+    dockerRemoval: removed.removal,
+    dockerError: removed.error,
   });
   removeStaticSiteSnapshot(site.snapshotPath);
   return stopped;
