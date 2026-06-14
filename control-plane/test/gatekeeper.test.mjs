@@ -254,6 +254,68 @@ test("gatekeeper does not treat an ambiguous path update as static preview updat
   }
 });
 
+test("gatekeeper does not treat an html path name as static preview create authorization", async () => {
+  const { store, cleanup } = tempStore();
+  try {
+    const gatekeeper = new Gatekeeper({
+      store,
+      mode: "auto_review",
+      collectContext: async () => ({
+        ok: true,
+        errors: [],
+        authorizationText: "Create /workspace/site-html.",
+        text: "Create /workspace/site-html.",
+      }),
+      collectEvidence: () => validStaticSiteEvidence({ sourcePath: "/workspace/site-html" }),
+    });
+
+    const review = await gatekeeper.review({
+      runtimeId: "local",
+      toolCallId: "call_create_html_path",
+      action: "preview.container.createStaticSite",
+      args: { siteName: "site-html", sourcePath: "/workspace/site-html" },
+      definition: staticSiteDefinition(),
+      classification: { risk: "high", reason: "Tool is configured for review." },
+    });
+
+    assert.equal(review.decision.outcome, "escalate_to_user");
+    assert.notEqual(review.decision.userAuthorization, "medium");
+  } finally {
+    cleanup();
+  }
+});
+
+test("gatekeeper does not treat a website path name as static preview update authorization", async () => {
+  const { store, cleanup } = tempStore();
+  try {
+    const gatekeeper = new Gatekeeper({
+      store,
+      mode: "auto_review",
+      collectContext: async () => ({
+        ok: true,
+        errors: [],
+        authorizationText: "Update /workspace/website.",
+        text: "Update /workspace/website.",
+      }),
+      collectEvidence: () => validStaticSiteEvidence({ sourcePath: "/workspace/website" }),
+    });
+
+    const review = await gatekeeper.review({
+      runtimeId: "local",
+      toolCallId: "call_update_website_path",
+      action: "preview.container.updateStaticSite",
+      args: { siteId: "website-site", sourcePath: "/workspace/website" },
+      definition: staticSiteUpdateDefinition(),
+      classification: { risk: "high", reason: "Tool is configured for review." },
+    });
+
+    assert.equal(review.decision.outcome, "escalate_to_user");
+    assert.notEqual(review.decision.userAuthorization, "medium");
+  } finally {
+    cleanup();
+  }
+});
+
 test("gatekeeper treats explicit static preview denial as a hard deny", async () => {
   const { store, cleanup } = tempStore();
   try {

@@ -75,6 +75,10 @@ function textReferencesAnyWorkspacePath(text) {
   return /\/workspace(?:\/[^\s"'`,)]*)?/iu.test(String(text || ""));
 }
 
+function withoutWorkspacePaths(text) {
+  return String(text || "").replace(/\/workspace(?:\/[^\s"'`,)]*)?/giu, " ");
+}
+
 function hasStrongStaticPreviewPhrase(text) {
   return includesAny(text, [
     "static preview container",
@@ -85,17 +89,16 @@ function hasStrongStaticPreviewPhrase(text) {
 }
 
 function hasStaticPreviewTargetAndOperation(text) {
+  const naturalLanguageText = withoutWorkspacePaths(text);
   return (
-    includesAny(text, ["static site", "website", "web page", "html"]) &&
-    includesAny(text, [
+    includesAny(naturalLanguageText, ["static site", "website", "web page", "html"]) &&
+    includesAny(naturalLanguageText, [
       "preview",
       "container",
       "publish",
       "serve",
       "show it",
       "expose",
-      "create",
-      "update",
       "redeploy",
       "live url",
     ])
