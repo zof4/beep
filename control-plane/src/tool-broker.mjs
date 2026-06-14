@@ -5,7 +5,7 @@ import {
   PUBLIC_BASE_URL,
   RUNTIME_ID,
 } from "./config.mjs";
-import { createStaticSitePreview } from "./static-site-preview.mjs";
+import { createStaticSitePreview, updateStaticSitePreview } from "./static-site-preview.mjs";
 import { DEFAULT_ALLOWED_SCOPES, TOOL_MANIFEST } from "./tool-manifest.mjs";
 import { ToolBrokerError } from "./tool-broker-error.mjs";
 
@@ -53,13 +53,18 @@ export function validatePreviewPort(port) {
 }
 
 export class ToolBroker {
-  constructor({ store, gatekeeper = null }) {
+  constructor({ store, gatekeeper = null, registry = null, webSearch = null, sandboxToolCaller = null }) {
     this.store = store;
     this.gatekeeper = gatekeeper;
+    this.registry = registry;
+    this.webSearch = webSearch;
+    this.sandboxToolCaller = sandboxToolCaller;
+    this.updateStaticSitePreview = updateStaticSitePreview;
     this.toolsByAction = new Map(TOOL_MANIFEST.map((tool) => [tool.action, tool]));
   }
 
   manifest() {
+    if (this.registry) return this.registry.manifest();
     return {
       schemaVersion: 1,
       runtimeId: RUNTIME_ID,
@@ -79,7 +84,7 @@ export class ToolBroker {
       };
     }
 
-    const definition = this.toolsByAction.get(requestedAction);
+    const definition = this.getDefinition(requestedAction);
     if (!definition) {
       return this.finish({
         runtimeId,
@@ -91,7 +96,7 @@ export class ToolBroker {
       });
     }
 
-    const missingScope = definition.scopes.find((scope) => !DEFAULT_ALLOWED_SCOPES.includes(scope));
+    const missingScope = (definition.scopes || []).find((scope) => !this.defaultAllowedScopes().includes(scope));
     if (missingScope) {
       return this.reviewRestrictedCall({
         runtimeId,
@@ -118,8 +123,14 @@ export class ToolBroker {
       });
     }
 
-    if (requestedAction === "preview.port.expose") {
-      const result = this.exposePreviewPort(runtimeId, args);
+    try {
+      const result = await this.executeToolDefinition({
+        runtimeId,
+        toolCallId,
+        action: requestedAction,
+        args,
+        definition,
+      });
       return this.finish({
         runtimeId,
         toolCallId,
@@ -128,16 +139,24 @@ export class ToolBroker {
         status: "ok",
         result,
       });
+    } catch (error) {
+      return this.finish({
+        runtimeId,
+        toolCallId,
+        action: requestedAction,
+        decision: "deny",
+        status: "denied",
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
+  }
 
-    return this.finish({
-      runtimeId,
-      toolCallId,
-      action: requestedAction,
-      decision: "deny",
-      status: "denied",
-      error: `No broker implementation for ${requestedAction}.`,
-    });
+  defaultAllowedScopes() {
+    return this.registry?.manifest?.()?.defaultAllowedScopes || DEFAULT_ALLOWED_SCOPES;
+  }
+
+  getDefinition(action) {
+    return this.registry ? this.registry.get(action) : this.toolsByAction.get(action);
   }
 
   createApproval({ runtimeId, toolCallId, action, args, risk, prompt, reason, ...extra }) {
@@ -279,6 +298,45 @@ export class ToolBroker {
     return exposure;
   }
 
+  async executeToolDefinition({ runtimeId, toolCallId, action, args, definition }) {
+    if (action === "preview.port.expose") {
+      return this.exposePreviewPort(runtimeId, args);
+    }
+    if (action === "web.run") {
+      return this.executeWebRun(args);
+    }
+    if (definition?.target === "sandbox") {
+      return this.executeSandboxTool({ runtimeId, toolCallId, action, args, definition });
+    }
+    throw new ToolBrokerError(`No broker implementation for ${action}.`, 400);
+  }
+
+  async executeWebRun(args) {
+    if (typeof this.webSearch?.run !== "function") {
+      throw new ToolBrokerError("Web search is not configured.", 503);
+    }
+    return unwrapBrokerExecutorResult(await this.webSearch.run(args), "Web search failed.");
+  }
+
+  async executeSandboxTool({ runtimeId, toolCallId, action, args, definition }) {
+    if (typeof this.sandboxToolCaller !== "function") {
+      throw new ToolBrokerError("Sandbox tool caller is not configured.", 503);
+    }
+    const commandTimeoutMs = Number(definition?.command?.timeoutMs);
+    return unwrapBrokerExecutorResult(
+      await this.sandboxToolCaller({
+        runtimeId,
+        toolCallId,
+        toolName: "dynamic_cli",
+        action,
+        args,
+        timeoutMs: Number.isInteger(commandTimeoutMs) && commandTimeoutMs > 0 ? commandTimeoutMs : 15_000,
+        dynamicTool: definition,
+      }),
+      "Sandbox tool failed.",
+    );
+  }
+
   async executeApprovedApproval(approval) {
     if (!approval || approval.status !== "executing") {
       throw new ToolBrokerError("Approval must be in executing state before broker execution.", 409);
@@ -289,6 +347,30 @@ export class ToolBroker {
         args: approval.args || {},
         approvalId: approval.approvalId,
         store: this.store,
+      });
+    }
+    if (approval.action === "preview.container.updateStaticSite") {
+      const siteId = approval.args?.siteId;
+      const site = siteId ? this.store.getSite(siteId) : null;
+      if (!site) {
+        throw new ToolBrokerError(`Unknown siteId: ${siteId}`, 404);
+      }
+      return this.updateStaticSitePreview({
+        runtimeId: approval.runtimeId,
+        site,
+        args: approval.args || {},
+        approvalId: approval.approvalId,
+        store: this.store,
+      });
+    }
+    const definition = this.getDefinition(approval.action);
+    if (definition) {
+      return this.executeToolDefinition({
+        runtimeId: approval.runtimeId,
+        toolCallId: approval.toolCallId,
+        action: approval.action,
+        args: approval.args || {},
+        definition,
       });
     }
     throw new ToolBrokerError(`No approved broker implementation for ${approval.action}.`, 400);
@@ -348,4 +430,26 @@ function publicApproval(approval) {
     risk: approval.risk,
     gatekeeperReviewId: approval.gatekeeperReviewId || null,
   };
+}
+
+function resultErrorMessage(payload, fallback) {
+  if (typeof payload?.error === "string" && payload.error.trim()) return payload.error;
+  if (typeof payload?.message === "string" && payload.message.trim()) return payload.message;
+  if (Array.isArray(payload?.content)) {
+    const text = payload.content
+      .map((item) => (typeof item?.text === "string" ? item.text : ""))
+      .filter(Boolean)
+      .join("\n")
+      .trim();
+    if (text) return text;
+  }
+  return fallback;
+}
+
+function unwrapBrokerExecutorResult(payload, failureMessage) {
+  if (payload?.ok === false) {
+    throw new ToolBrokerError(resultErrorMessage(payload, failureMessage), 422);
+  }
+  if (payload && typeof payload === "object" && "result" in payload) return payload.result;
+  return payload;
 }

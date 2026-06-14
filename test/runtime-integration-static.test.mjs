@@ -152,7 +152,7 @@ test("trusted Pi loop can load the sandbox tool portal extension", () => {
   );
   assert.match(
     apiSource,
-    /function buildPiChildEnv\(session, \{ lcmContextExtensionLoaded, controlPlaneToolsExtensionLoaded, sandboxToolPortalExtensionLoaded \}\)/,
+    /function buildPiChildEnv\(session, \{ lcmContextExtensionLoaded, codexWebSearchExtensionLoaded, controlPlaneToolsExtensionLoaded, sandboxToolPortalExtensionLoaded \}\)/,
   );
   assert.match(
     apiSource,
@@ -197,6 +197,69 @@ test("trusted Pi loop can load the sandbox tool portal extension", () => {
   assert.match(apiSource, /delete env\.BEEP_RUNTIME_API_TOKEN/);
   assert.doesNotMatch(apiSource, /delete env\.BEEP_SANDBOX_TOOL_PORTAL_TOKEN/);
   assert.match(sandboxPortalRuntimeSource, /delete process\.env\.BEEP_SANDBOX_TOOL_PORTAL_TOKEN/);
+});
+
+test("trusted Pi loop wires the hosted Codex web-search extension into spawn, env, and run config", () => {
+  assert.match(apiSource, /const CODEX_WEB_SEARCH_EXTENSION_ENABLED\s*=/);
+  assert.match(apiSource, /const CODEX_WEB_SEARCH_ENABLED\s*=/);
+  assert.match(apiSource, /const CODEX_WEB_SEARCH_EXTENSION_PATH\s*=/);
+  assert.match(apiSource, /const CODEX_WEB_SEARCH_MODE\s*=\s*process\.env\.BEEP_CODEX_WEB_SEARCH_MODE\s*\|\|\s*"live"/);
+  assert.match(apiSource, /const CODEX_WEB_SEARCH_OPTIONAL_ENV_KEYS\s*=\s*\[/);
+  assert.match(
+    apiSource,
+    /process\.env\.BEEP_CODEX_WEB_SEARCH_EXTENSION_PATH\s*\|\|\s*"\/runtime\/pi-extensions\/codex-web-search-extension\.mjs"/,
+  );
+  assert.match(
+    apiSource,
+    /function buildPiChildEnv\(session, \{ lcmContextExtensionLoaded, codexWebSearchExtensionLoaded, controlPlaneToolsExtensionLoaded, sandboxToolPortalExtensionLoaded \}\)/,
+  );
+  assert.match(
+    apiSource,
+    /BEEP_CODEX_WEB_SEARCH_ENABLED:\s*codexWebSearchExtensionLoaded && CODEX_WEB_SEARCH_ENABLED \? "1" : "0"/,
+  );
+  assert.match(
+    apiSource,
+    /if \(codexWebSearchExtensionLoaded && CODEX_WEB_SEARCH_ENABLED\) \{[\s\S]*env\.BEEP_CODEX_WEB_SEARCH_MODE = CODEX_WEB_SEARCH_MODE[\s\S]*for \(const key of CODEX_WEB_SEARCH_OPTIONAL_ENV_KEYS\) \{[\s\S]*const value = process\.env\[key\][\s\S]*if \(value\) env\[key\] = value[\s\S]*\}/,
+    "web-search mode and optional env keys should only be copied through an explicit whitelist",
+  );
+  assert.doesNotMatch(apiSource, /\.\.\.process\.env/, "Pi child env must remain sanitized");
+
+  const lcmLoadedIndex = apiSource.indexOf("const lcmContextExtensionLoaded");
+  const webSearchLoadedIndex = apiSource.indexOf("const codexWebSearchExtensionLoaded");
+  const portalLoadedIndex = apiSource.indexOf("const sandboxToolPortalExtensionLoaded");
+  const toolsLoadedIndex = apiSource.indexOf("const controlPlaneToolsExtensionLoaded");
+  const lcmPushIndex = apiSource.indexOf('args.push("--extension", LCM_CONTEXT_EXTENSION_PATH)');
+  const webSearchPushIndex = apiSource.indexOf('args.push("--extension", CODEX_WEB_SEARCH_EXTENSION_PATH)');
+  const portalPushIndex = apiSource.indexOf('args.push("--extension", SANDBOX_TOOL_PORTAL_EXTENSION_PATH)');
+  const toolsPushIndex = apiSource.indexOf('args.push("--extension", CONTROL_PLANE_TOOLS_EXTENSION_PATH)');
+
+  assert.ok(webSearchLoadedIndex > lcmLoadedIndex, "web-search extension loading should happen after LCM");
+  assert.ok(portalLoadedIndex > webSearchLoadedIndex, "sandbox portal loading should happen after web-search");
+  assert.ok(toolsLoadedIndex > portalLoadedIndex, "control-plane tools loading should happen after sandbox portal");
+  assert.ok(webSearchPushIndex > lcmPushIndex, "web-search extension arg should be pushed after LCM");
+  assert.ok(portalPushIndex > webSearchPushIndex, "sandbox portal extension arg should be pushed after web-search");
+  assert.ok(toolsPushIndex > portalPushIndex, "control-plane tools extension arg should be pushed after sandbox portal");
+  assert.match(
+    apiSource,
+    /const codexWebSearchExtensionLoaded = CODEX_WEB_SEARCH_EXTENSION_ENABLED && existsSync\(CODEX_WEB_SEARCH_EXTENSION_PATH\)/,
+  );
+  assert.match(apiSource, /args\.push\("--extension", CODEX_WEB_SEARCH_EXTENSION_PATH\)/);
+  assert.match(
+    apiSource,
+    /codexWebSearch: \{[\s\S]*enabled: CODEX_WEB_SEARCH_ENABLED[\s\S]*extensionEnabled: CODEX_WEB_SEARCH_EXTENSION_ENABLED[\s\S]*extensionPath: CODEX_WEB_SEARCH_EXTENSION_PATH[\s\S]*extensionLoaded: codexWebSearchExtensionLoaded[\s\S]*effectiveEnabled: CODEX_WEB_SEARCH_ENABLED && codexWebSearchExtensionLoaded[\s\S]*mode: CODEX_WEB_SEARCH_MODE[\s\S]*allowedDomainsConfigured: Boolean\(process\.env\.BEEP_CODEX_WEB_SEARCH_ALLOWED_DOMAINS\)[\s\S]*contextSizeConfigured: Boolean\(process\.env\.BEEP_CODEX_WEB_SEARCH_CONTEXT_SIZE\)[\s\S]*contentTypesConfigured: Boolean\(process\.env\.BEEP_CODEX_WEB_SEARCH_CONTENT_TYPES\)[\s\S]*userLocationConfigured: CODEX_WEB_SEARCH_OPTIONAL_ENV_KEYS\.some\(\(key\) => key\.startsWith\("BEEP_CODEX_WEB_SEARCH_LOCATION_"\) && Boolean\(process\.env\[key\]\)\)/,
+  );
+  assert.match(
+    apiSource,
+    /buildPiChildEnv\(this, \{[\s\S]*codexWebSearchExtensionLoaded[\s\S]*\}\)/,
+    "Pi spawn should pass the web-search-loaded guard into the child env builder",
+  );
+});
+
+test("runtime capabilities surface high-level Codex web-search status", () => {
+  assert.match(
+    apiSource,
+    /codexWebSearch: \{[\s\S]*enabled: CODEX_WEB_SEARCH_ENABLED[\s\S]*extensionEnabled: CODEX_WEB_SEARCH_EXTENSION_ENABLED[\s\S]*extensionPath: CODEX_WEB_SEARCH_EXTENSION_PATH[\s\S]*extensionAvailable: CODEX_WEB_SEARCH_EXTENSION_ENABLED && existsSync\(CODEX_WEB_SEARCH_EXTENSION_PATH\)[\s\S]*effectiveEnabled: CODEX_WEB_SEARCH_ENABLED && CODEX_WEB_SEARCH_EXTENSION_ENABLED && existsSync\(CODEX_WEB_SEARCH_EXTENSION_PATH\)[\s\S]*mode: CODEX_WEB_SEARCH_MODE[\s\S]*allowedDomainsConfigured: Boolean\(process\.env\.BEEP_CODEX_WEB_SEARCH_ALLOWED_DOMAINS\)[\s\S]*contextSizeConfigured: Boolean\(process\.env\.BEEP_CODEX_WEB_SEARCH_CONTEXT_SIZE\)[\s\S]*contentTypesConfigured: Boolean\(process\.env\.BEEP_CODEX_WEB_SEARCH_CONTENT_TYPES\)[\s\S]*userLocationConfigured: CODEX_WEB_SEARCH_OPTIONAL_ENV_KEYS\.some\(\(key\) => key\.startsWith\("BEEP_CODEX_WEB_SEARCH_LOCATION_"\) && Boolean\(process\.env\[key\]\)\)/,
+  );
 });
 
 test("runtime routes sandbox tools through Docker manager before LCM-only internal handling", () => {

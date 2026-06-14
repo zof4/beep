@@ -121,6 +121,15 @@ test("agent context proxies through operator auth", async () => {
   assert.deepEqual(context.payload, { ok: true, path: "/agent/context" });
 });
 
+test("agent capabilities proxy through operator auth", async () => {
+  const capabilities = await callRoute({ target: "/api/agent/capabilities" });
+
+  assert.equal(capabilities.authCalls, 1);
+  assert.deepEqual(capabilities.calls, [{ path: "/capabilities", options: { method: "GET" } }]);
+  assert.equal(capabilities.statusCode, 200);
+  assert.deepEqual(capabilities.payload, { ok: true, path: "/capabilities" });
+});
+
 test("agent request list and detail proxy to runtime request paths", async () => {
   const list = await callRoute({ target: "/api/agent/requests" });
   assert.deepEqual(list.calls, [{ path: "/agent/requests", options: { method: "GET" } }]);
@@ -129,6 +138,21 @@ test("agent request list and detail proxy to runtime request paths", async () =>
   const detail = await callRoute({ target: "/api/agent/requests/request-123" });
   assert.deepEqual(detail.calls, [{ path: "/agent/requests/request-123", options: { method: "GET" } }]);
   assert.equal(detail.statusCode, 200);
+});
+
+test("agent control POST routes proxy through operator auth", async () => {
+  for (const action of ["start", "pause", "resume", "abort", "stop", "steer", "follow-up"]) {
+    const result = await callRoute({
+      method: "POST",
+      target: `/api/agent/${action}`,
+      body: { reason: "test" },
+    });
+    assert.equal(result.authCalls, 1);
+    assert.deepEqual(result.calls, [
+      { path: `/agent/${action}`, options: { method: "POST", body: { reason: "test" } } },
+    ]);
+    assert.equal(result.statusCode, 200);
+  }
 });
 
 test("LCM status and doctor proxy to runtime LCM paths", async () => {

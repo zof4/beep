@@ -8,9 +8,91 @@ export const DEFAULT_ALLOWED_SCOPES = [
   "runtime.agent.submit",
   "runtime.agent.read",
   "preview.port.expose",
+  "web.search",
+  "sandbox.tool.execute",
 ];
 
-export const TOOL_MANIFEST = [
+export const BUILTIN_TOOL_MANIFEST = [
+  {
+    name: "web_run",
+    action: "web.run",
+    namespace: "web",
+    label: "Web Search",
+    target: "control-plane",
+    description: "Search or inspect current web content through the control-plane OpenAI web search provider.",
+    promptSnippet: "Use web_run when current public web information is required.",
+    defaultDecision: "allow",
+    scopes: ["web.search"],
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        search_query: {
+          type: "array",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            required: ["q"],
+            properties: {
+              q: {
+                type: "string",
+                description: "Search query.",
+              },
+              recency: {
+                type: "integer",
+                minimum: 0,
+                description: "Optional recency window in days.",
+              },
+              domains: {
+                type: "array",
+                items: {
+                  type: "string",
+                },
+                description: "Optional allowed domains.",
+              },
+            },
+          },
+        },
+        open: {
+          type: "array",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            required: ["ref_id"],
+            properties: {
+              ref_id: {
+                type: "string",
+                description: "URL or result reference to inspect.",
+              },
+            },
+          },
+        },
+        find: {
+          type: "array",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            required: ["ref_id", "pattern"],
+            properties: {
+              ref_id: {
+                type: "string",
+                description: "URL or result reference.",
+              },
+              pattern: {
+                type: "string",
+                description: "Text pattern to find.",
+              },
+            },
+          },
+        },
+        response_length: {
+          type: "string",
+          enum: ["short", "medium", "long"],
+          description: "Desired response length.",
+        },
+      },
+    },
+  },
   {
     name: "preview_port_expose",
     action: "preview.port.expose",
@@ -65,4 +147,41 @@ export const TOOL_MANIFEST = [
       },
     },
   },
+  {
+    name: "preview_container_update_static_site",
+    action: "preview.container.updateStaticSite",
+    label: "Update Static Preview Container",
+    description:
+      "Update an existing managed static-site preview from files already changed inside the runtime workspace while preserving the /sites/<siteId>/ URL.",
+    defaultDecision: "review",
+    scopes: ["preview.container.updateStaticSite"],
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["siteId", "sourcePath"],
+      properties: {
+        siteId: {
+          type: "string",
+          description: "Existing managed static preview site id returned by preview_container_create_static_site.",
+        },
+        sourcePath: {
+          type: "string",
+          description: "Absolute runtime workspace path to the updated static site directory.",
+        },
+      },
+    },
+  },
 ];
+
+export const TOOL_MANIFEST = BUILTIN_TOOL_MANIFEST;
+
+export function legacyWebRunToolEnabled(env = process.env) {
+  return ["1", "true", "yes", "on"].includes(
+    String(env.BEEP_LEGACY_WEB_RUN_TOOL_ENABLED || "0").toLowerCase(),
+  );
+}
+
+export function publicManifestTool(tool, env = process.env) {
+  if (tool?.action === "web.run") return legacyWebRunToolEnabled(env);
+  return true;
+}

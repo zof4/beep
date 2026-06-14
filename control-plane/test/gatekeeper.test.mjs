@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative, sep } from "node:path";
 import test from "node:test";
+import { ROOT_DIR } from "../src/config.mjs";
 import { collectGatekeeperContext } from "../src/gatekeeper/context.mjs";
 import { normalizeGatekeeperDecision } from "../src/gatekeeper/decision-schema.mjs";
 import { Gatekeeper } from "../src/gatekeeper/index.mjs";
@@ -20,8 +21,24 @@ function tempStore() {
   };
 }
 
+function staticSiteWorkspaceFixture() {
+  const workspaceRoot = join(ROOT_DIR, ".beep-dev/workspace");
+  mkdirSync(workspaceRoot, { recursive: true });
+  const hostPath = mkdtempSync(join(workspaceRoot, "gatekeeper-update-"));
+  writeFileSync(join(hostPath, "index.html"), "<!doctype html><title>Preview</title>\n");
+  const workspaceRelativePath = relative(workspaceRoot, hostPath).split(sep).join("/");
+  return {
+    sourcePath: `/workspace/${workspaceRelativePath}`,
+    cleanup: () => rmSync(hostPath, { recursive: true, force: true }),
+  };
+}
+
 function staticSiteDefinition() {
   return TOOL_MANIFEST.find((tool) => tool.action === "preview.container.createStaticSite");
+}
+
+function staticSiteUpdateDefinition() {
+  return TOOL_MANIFEST.find((tool) => tool.action === "preview.container.updateStaticSite");
 }
 
 function validStaticSiteEvidence(overrides = {}) {
@@ -134,6 +151,171 @@ test("gatekeeper allows a bounded static preview container when recent context a
   }
 });
 
+test("gatekeeper allows a bounded static preview update when recent context authorizes it", async () => {
+  const { store, cleanup } = tempStore();
+  try {
+    const gatekeeper = new Gatekeeper({
+      store,
+      mode: "auto_review",
+      collectContext: async () => ({
+        ok: true,
+        errors: [],
+        authorizationText:
+          "Update the managed static site demo-site from /workspace/api-sessions/agent_beep/site and keep the same live URL.",
+        text:
+          "Update the managed static site demo-site from /workspace/api-sessions/agent_beep/site and keep the same live URL.",
+      }),
+      collectEvidence: () => validStaticSiteEvidence(),
+    });
+
+    const review = await gatekeeper.review({
+      runtimeId: "local",
+      toolCallId: "call_update_allow",
+      action: "preview.container.updateStaticSite",
+      args: { siteId: "demo-site", sourcePath: "/workspace/api-sessions/agent_beep/site" },
+      definition: staticSiteUpdateDefinition(),
+      classification: { risk: "high", reason: "Tool is configured for review." },
+    });
+
+    assert.equal(review.decision.outcome, "allow");
+    assert.equal(review.decision.scope, "once");
+    assert.equal(review.decision.userAuthorization, "medium");
+  } finally {
+    cleanup();
+  }
+});
+
+test("gatekeeper collects default evidence for a bounded static preview update", async () => {
+  const { sourcePath, cleanup: cleanupSite } = staticSiteWorkspaceFixture();
+  const { store, cleanup } = tempStore();
+  try {
+    const gatekeeper = new Gatekeeper({
+      store,
+      mode: "auto_review",
+      collectContext: async () => ({
+        ok: true,
+        errors: [],
+        authorizationText: `Redeploy the managed static preview demo-site from ${sourcePath} and keep the live URL.`,
+        text: `Redeploy the managed static preview demo-site from ${sourcePath} and keep the live URL.`,
+      }),
+    });
+
+    const review = await gatekeeper.review({
+      runtimeId: "local",
+      toolCallId: "call_update_default_evidence",
+      action: "preview.container.updateStaticSite",
+      args: { siteId: "demo-site", sourcePath },
+      definition: staticSiteUpdateDefinition(),
+      classification: { risk: "high", reason: "Tool is configured for review." },
+    });
+
+    assert.equal(review.decision.outcome, "allow");
+    assert.equal(review.evidence.kind, "static_site");
+    assert.equal(review.evidence.ok, true);
+    assert.equal(review.evidence.sourcePath, sourcePath);
+    assert.equal(review.evidence.hasIndexHtml, true);
+  } finally {
+    cleanupSite();
+    cleanup();
+  }
+});
+
+test("gatekeeper does not treat an ambiguous path update as static preview update authorization", async () => {
+  const { store, cleanup } = tempStore();
+  try {
+    const gatekeeper = new Gatekeeper({
+      store,
+      mode: "auto_review",
+      collectContext: async () => ({
+        ok: true,
+        errors: [],
+        authorizationText: "Update /workspace/api-sessions/agent_beep/site.",
+        text: "Update /workspace/api-sessions/agent_beep/site.",
+      }),
+      collectEvidence: () => validStaticSiteEvidence(),
+    });
+
+    const review = await gatekeeper.review({
+      runtimeId: "local",
+      toolCallId: "call_update_ambiguous",
+      action: "preview.container.updateStaticSite",
+      args: { siteId: "demo-site", sourcePath: "/workspace/api-sessions/agent_beep/site" },
+      definition: staticSiteUpdateDefinition(),
+      classification: { risk: "high", reason: "Tool is configured for review." },
+    });
+
+    assert.equal(review.decision.outcome, "escalate_to_user");
+    assert.notEqual(review.decision.userAuthorization, "medium");
+    assert.match(review.decision.userPrompt, /update|redeploy/iu);
+    assert.match(review.decision.userPrompt, /demo-site/iu);
+    assert.doesNotMatch(review.decision.userPrompt, /creating/iu);
+  } finally {
+    cleanup();
+  }
+});
+
+test("gatekeeper does not treat an html path name as static preview create authorization", async () => {
+  const { store, cleanup } = tempStore();
+  try {
+    const gatekeeper = new Gatekeeper({
+      store,
+      mode: "auto_review",
+      collectContext: async () => ({
+        ok: true,
+        errors: [],
+        authorizationText: "Create /workspace/site-html.",
+        text: "Create /workspace/site-html.",
+      }),
+      collectEvidence: () => validStaticSiteEvidence({ sourcePath: "/workspace/site-html" }),
+    });
+
+    const review = await gatekeeper.review({
+      runtimeId: "local",
+      toolCallId: "call_create_html_path",
+      action: "preview.container.createStaticSite",
+      args: { siteName: "site-html", sourcePath: "/workspace/site-html" },
+      definition: staticSiteDefinition(),
+      classification: { risk: "high", reason: "Tool is configured for review." },
+    });
+
+    assert.equal(review.decision.outcome, "escalate_to_user");
+    assert.notEqual(review.decision.userAuthorization, "medium");
+  } finally {
+    cleanup();
+  }
+});
+
+test("gatekeeper does not treat a website path name as static preview update authorization", async () => {
+  const { store, cleanup } = tempStore();
+  try {
+    const gatekeeper = new Gatekeeper({
+      store,
+      mode: "auto_review",
+      collectContext: async () => ({
+        ok: true,
+        errors: [],
+        authorizationText: "Update /workspace/website.",
+        text: "Update /workspace/website.",
+      }),
+      collectEvidence: () => validStaticSiteEvidence({ sourcePath: "/workspace/website" }),
+    });
+
+    const review = await gatekeeper.review({
+      runtimeId: "local",
+      toolCallId: "call_update_website_path",
+      action: "preview.container.updateStaticSite",
+      args: { siteId: "website-site", sourcePath: "/workspace/website" },
+      definition: staticSiteUpdateDefinition(),
+      classification: { risk: "high", reason: "Tool is configured for review." },
+    });
+
+    assert.equal(review.decision.outcome, "escalate_to_user");
+    assert.notEqual(review.decision.userAuthorization, "medium");
+  } finally {
+    cleanup();
+  }
+});
+
 test("gatekeeper treats explicit static preview denial as a hard deny", async () => {
   const { store, cleanup } = tempStore();
   try {
@@ -163,6 +345,76 @@ test("gatekeeper treats explicit static preview denial as a hard deny", async ()
     assert.equal(review.decision.outcome, "deny");
     assert.equal(review.decision.userAuthorization, "unknown");
     assert.match(review.decision.auditRationale, /explicitly denied/iu);
+  } finally {
+    cleanup();
+  }
+});
+
+test("gatekeeper treats explicit static preview update denial as a hard deny", async () => {
+  const { store, cleanup } = tempStore();
+  try {
+    const gatekeeper = new Gatekeeper({
+      store,
+      mode: "auto_review",
+      collectContext: async () => ({
+        ok: true,
+        errors: [],
+        authorizationText:
+          "Do not update the managed static site demo-site from /workspace/api-sessions/agent_beep/site.",
+        text:
+          "Do not update the managed static site demo-site from /workspace/api-sessions/agent_beep/site.",
+      }),
+      collectEvidence: () => validStaticSiteEvidence(),
+    });
+
+    const review = await gatekeeper.review({
+      runtimeId: "local",
+      toolCallId: "call_update_deny",
+      action: "preview.container.updateStaticSite",
+      args: { siteId: "demo-site", sourcePath: "/workspace/api-sessions/agent_beep/site" },
+      definition: staticSiteUpdateDefinition(),
+      classification: { risk: "high", reason: "Tool is configured for review." },
+    });
+
+    assert.equal(review.decision.outcome, "deny");
+    assert.equal(review.decision.userAuthorization, "unknown");
+    assert.match(review.decision.auditRationale, /explicitly denied/iu);
+    assert.match(review.decision.auditRationale, /update|redeploy/iu);
+    assert.match(review.decision.auditRationale, /demo-site/iu);
+    assert.doesNotMatch(review.decision.auditRationale, /creating/iu);
+  } finally {
+    cleanup();
+  }
+});
+
+test("gatekeeper ignores unrelated update denial before valid static preview update authorization", async () => {
+  const { store, cleanup } = tempStore();
+  try {
+    const gatekeeper = new Gatekeeper({
+      store,
+      mode: "auto_review",
+      collectContext: async () => ({
+        ok: true,
+        errors: [],
+        authorizationText:
+          "No need to update dependencies. Update the managed static site demo-site from /workspace/api-sessions/agent_beep/site and keep the same live URL.",
+        text:
+          "No need to update dependencies. Update the managed static site demo-site from /workspace/api-sessions/agent_beep/site and keep the same live URL.",
+      }),
+      collectEvidence: () => validStaticSiteEvidence(),
+    });
+
+    const review = await gatekeeper.review({
+      runtimeId: "local",
+      toolCallId: "call_update_unrelated_denial",
+      action: "preview.container.updateStaticSite",
+      args: { siteId: "demo-site", sourcePath: "/workspace/api-sessions/agent_beep/site" },
+      definition: staticSiteUpdateDefinition(),
+      classification: { risk: "high", reason: "Tool is configured for review." },
+    });
+
+    assert.equal(review.decision.outcome, "allow");
+    assert.equal(review.decision.userAuthorization, "medium");
   } finally {
     cleanup();
   }

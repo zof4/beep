@@ -1,0 +1,21 @@
+import { readFileSync } from "node:fs";
+import test from "node:test";
+import assert from "node:assert/strict";
+
+test("Codex vendor update script pins vendor/openai-codex to upstream main", () => {
+  const script = readFileSync("scripts/update-vendor-openai-codex.sh", "utf8");
+  assert.match(script, /git -C "\$CODEX_VENDOR_DIR" fetch --depth 1 origin main/u);
+  assert.match(script, /git -C "\$CODEX_VENDOR_DIR" checkout --detach FETCH_HEAD/u);
+  assert.match(script, /npm --prefix "\$ROOT_DIR" run test:tools/u);
+  assert.doesNotMatch(script, /(?:^|\n)npm run test:tools(?:\n|$)/u);
+  assert.doesNotMatch(script, /git submodule update --remote/u);
+});
+
+test("package.json exposes Codex vendor update and tool tests", () => {
+  const pkg = JSON.parse(readFileSync("package.json", "utf8"));
+  assert.equal(pkg.scripts["vendor:codex:update"], "bash scripts/update-vendor-openai-codex.sh");
+  assert.equal(
+    pkg.scripts["test:tools"],
+    "node --test test/codex-web-search-vendor-drift.test.mjs test/vendor-codex-sync-script.test.mjs control-plane/test/state-store.test.mjs control-plane/test/tool-broker.test.mjs test/dynamic-sandbox-cli-tool.test.mjs control-plane/test/tool-package-validator.test.mjs control-plane/test/tool-registry.test.mjs control-plane/test/openai-web-search.test.mjs control-plane/test/tool-package-routes.test.mjs test/runtime-control-plane-tools-extension.test.mjs test/full-stack-e2e-script.test.mjs",
+  );
+});

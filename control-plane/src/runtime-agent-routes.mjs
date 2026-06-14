@@ -2,6 +2,7 @@ import { readJsonBody, sendJson } from "./http-utils.mjs";
 
 const GET_ROUTES = new Map([
   ["/api/agent", "/agent"],
+  ["/api/agent/capabilities", "/capabilities"],
   ["/api/agent/summary", "/agent/summary"],
   ["/api/agent/context", "/agent/context"],
   ["/api/agent/requests", "/agent/requests"],
@@ -10,6 +11,13 @@ const GET_ROUTES = new Map([
 ]);
 
 const POST_ROUTES = new Map([
+  ["/api/agent/start", "/agent/start"],
+  ["/api/agent/pause", "/agent/pause"],
+  ["/api/agent/resume", "/agent/resume"],
+  ["/api/agent/abort", "/agent/abort"],
+  ["/api/agent/stop", "/agent/stop"],
+  ["/api/agent/steer", "/agent/steer"],
+  ["/api/agent/follow-up", "/agent/follow-up"],
   ["/api/agent/lcm", "/agent/lcm"],
   ["/api/agent/lcm/compact", "/agent/lcm/compact"],
   ["/api/agent/lcm/maintain", "/agent/lcm/maintain"],

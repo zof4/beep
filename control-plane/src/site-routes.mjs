@@ -1,7 +1,15 @@
-import { removeStaticSitePreview } from "./static-site-preview.mjs";
-import { sendJson, sendNotFound } from "./http-utils.mjs";
+import { removeStaticSitePreview, updateStaticSitePreview as defaultUpdateStaticSitePreview } from "./static-site-preview.mjs";
+import { readJsonBody, sendJson, sendNotFound } from "./http-utils.mjs";
 
-export async function handleSiteRoute({ request, response, pathname, url, store, requireOperatorAuth }) {
+export async function handleSiteRoute({
+  request,
+  response,
+  pathname,
+  url,
+  store,
+  requireOperatorAuth,
+  updateStaticSitePreview = defaultUpdateStaticSitePreview,
+}) {
   requireOperatorAuth(request);
   const parts = pathname.split("/").filter(Boolean);
   const siteId = parts[2] || null;
@@ -30,7 +38,38 @@ export async function handleSiteRoute({ request, response, pathname, url, store,
     return;
   }
 
-  if (request.method === "POST" && action === "stop") {
+  if (request.method === "POST" && action === "update" && parts.length === 4) {
+    const body = await readJsonBody(request);
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      sendJson(response, 400, { ok: false, error: "Site update body must be a JSON object." });
+      return;
+    }
+    const unknownKeys = Object.keys(body).filter((key) => key !== "sourcePath");
+    if (unknownKeys.length > 0) {
+      sendJson(response, 400, {
+        ok: false,
+        error: `Site update body contains unknown keys: ${unknownKeys.join(", ")}.`,
+      });
+      return;
+    }
+    if (Object.hasOwn(body, "sourcePath") && body.sourcePath !== "" && typeof body.sourcePath !== "string") {
+      sendJson(response, 400, { ok: false, error: "Site update sourcePath must be a string." });
+      return;
+    }
+    const sourcePath =
+      Object.hasOwn(body, "sourcePath") && body.sourcePath !== "" ? body.sourcePath : site.sourcePath || "";
+    const updated = await updateStaticSitePreview({
+      runtimeId: site.runtimeId,
+      site,
+      args: { sourcePath },
+      approvalId: "operator",
+      store,
+    });
+    sendJson(response, 200, { ok: true, site: updated });
+    return;
+  }
+
+  if (request.method === "POST" && action === "stop" && parts.length === 4) {
     const stopped = await removeStaticSitePreview({ site, store });
     sendJson(response, 200, { ok: true, site: stopped });
     return;

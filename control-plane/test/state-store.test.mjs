@@ -137,6 +137,306 @@ test("state store create methods ignore caller-supplied reserved fields", () => 
   }
 });
 
+test("state store persists tool packages and enabled tool definitions", () => {
+  const { store, cleanup } = tempStore();
+  try {
+    const installed = store.installToolPackage({
+      packageId: "demo_tools",
+      version: "1.0.0",
+      packageHash: "sha256:abc123",
+      source: "sandbox",
+      installedAt: "2026-01-01T00:00:00.000Z",
+      enabledTools: {
+        demo_echo: {
+          enabled: true,
+          decidedBy: "package",
+          decidedAt: "2026-01-01T00:00:00.000Z",
+        },
+      },
+      tools: [
+        {
+          name: "demo_echo",
+          action: "beep.tools.demo_tools.demo_echo",
+          namespace: "beep_tools",
+          description: "Echo text from the sandbox.",
+          inputSchema: { type: "object", additionalProperties: false, properties: {} },
+          target: "sandbox",
+          command: {
+            argv: ["node", ".beep/tools/demo_tools/bin/echo.mjs"],
+            input: "json-stdin",
+            timeoutMs: 5000,
+          },
+          scopes: ["sandbox.tool.execute"],
+          defaultDecision: "review",
+        },
+        {
+          name: "demo_package_owned",
+          action: "beep.tools.demo_tools.demo_package_owned",
+          namespace: "beep_tools",
+          description: "Package-owned legacy enablement should not survive reinstall.",
+          inputSchema: { type: "object", additionalProperties: false, properties: {} },
+          target: "sandbox",
+          command: {
+            argv: ["node", ".beep/tools/demo_tools/bin/package-owned.mjs"],
+            input: "json-stdin",
+            timeoutMs: 5000,
+          },
+          scopes: ["sandbox.tool.execute"],
+          defaultDecision: "review",
+        },
+        {
+          name: "demo_removed",
+          action: "beep.tools.demo_tools.demo_removed",
+          namespace: "beep_tools",
+          description: "Removed tool enablement should not survive reinstall.",
+          inputSchema: { type: "object", additionalProperties: false, properties: {} },
+          target: "sandbox",
+          command: {
+            argv: ["node", ".beep/tools/demo_tools/bin/removed.mjs"],
+            input: "json-stdin",
+            timeoutMs: 5000,
+          },
+          scopes: ["sandbox.tool.execute"],
+          defaultDecision: "review",
+        },
+      ],
+    });
+
+    assert.equal(installed.packageVersionId, "demo_tools@1.0.0");
+    assert.equal(installed.status, "installed");
+    assert.deepEqual(installed.enabledTools, {});
+    assert.deepEqual(store.listEnabledToolDefinitions(), []);
+
+    const enabled = store.setToolPackageToolEnabled({
+      packageId: "demo_tools",
+      version: "1.0.0",
+      toolName: "demo_echo",
+      enabled: true,
+      decidedBy: "operator",
+    });
+
+    assert.equal(enabled.enabledTools.demo_echo.enabled, true);
+    assert.deepEqual(
+      store.listEnabledToolDefinitions().map((tool) => tool.action),
+      ["beep.tools.demo_tools.demo_echo"],
+    );
+
+    const state = store.readState();
+    assert.ok(state.audit.some((event) => event.kind === "tool_package_install"));
+    assert.ok(state.audit.some((event) => event.kind === "tool_enable"));
+
+    store.update((currentState) => {
+      currentState.toolPackages["demo_tools@1.0.0"].enabledTools.demo_package_owned = {
+        enabled: true,
+        decidedBy: "package",
+        decidedAt: "2026-01-02T00:00:00.000Z",
+      };
+      currentState.toolPackages["demo_tools@1.0.0"].enabledTools.demo_removed = {
+        enabled: true,
+        decidedBy: "operator",
+        decidedAt: "2026-01-02T00:00:00.000Z",
+      };
+    });
+
+    const firstInstalledAt = installed.installedAt;
+    const reinstalled = store.installToolPackage({
+      packageId: "demo_tools",
+      version: "1.0.0",
+      packageHash: "sha256:abc123",
+      source: "sandbox",
+      tools: installed.tools.filter((tool) => tool.name !== "demo_removed"),
+      enabledTools: {
+        demo_echo: {
+          enabled: false,
+          decidedBy: "package",
+          decidedAt: "2026-01-02T00:00:00.000Z",
+        },
+      },
+    });
+
+    assert.equal(reinstalled.installedAt, firstInstalledAt);
+    assert.deepEqual(reinstalled.enabledTools, { demo_echo: enabled.enabledTools.demo_echo });
+    assert.equal(Number.isNaN(Date.parse(reinstalled.updatedAt)), false);
+  } finally {
+    cleanup();
+  }
+});
+
+test("state store rejects ambiguous tool package identity components", () => {
+  const { store, cleanup } = tempStore();
+  try {
+    assert.throws(() => store.toolPackageVersionId({ packageId: "a@b", version: "c" }), /must not contain @/);
+    assert.throws(() => store.toolPackageVersionId({ packageId: "a", version: "b@c" }), /must not contain @/);
+    assert.throws(
+      () =>
+        store.installToolPackage({
+          packageId: "a@b",
+          version: "c",
+          packageHash: "sha256:abc123",
+          source: "sandbox",
+          tools: [],
+        }),
+      /must not contain @/,
+    );
+    assert.throws(
+      () =>
+        store.installToolPackage({
+          packageId: "a",
+          version: "b@c",
+          packageHash: "sha256:abc123",
+          source: "sandbox",
+          tools: [],
+        }),
+      /must not contain @/,
+    );
+    assert.deepEqual(store.listToolPackages(), []);
+  } finally {
+    cleanup();
+  }
+});
+
+test("state store rejects enabling duplicate tool actions across package versions", () => {
+  const { store, cleanup } = tempStore();
+  try {
+    const tool = {
+      name: "demo_echo",
+      action: "beep.tools.demo_tools.demo_echo",
+      namespace: "beep_tools",
+      description: "Echo text from the sandbox.",
+      inputSchema: { type: "object", additionalProperties: false, properties: {} },
+      target: "sandbox",
+      command: {
+        argv: ["node", ".beep/tools/demo_tools/bin/echo.mjs"],
+        input: "json-stdin",
+        timeoutMs: 5000,
+      },
+      scopes: ["sandbox.tool.execute"],
+      defaultDecision: "review",
+    };
+
+    store.installToolPackage({
+      packageId: "demo_tools",
+      version: "1.0.0",
+      packageHash: "sha256:v1",
+      source: "sandbox",
+      tools: [tool],
+    });
+    store.installToolPackage({
+      packageId: "demo_tools",
+      version: "2.0.0",
+      packageHash: "sha256:v2",
+      source: "sandbox",
+      tools: [tool],
+    });
+
+    store.setToolPackageToolEnabled({
+      packageId: "demo_tools",
+      version: "1.0.0",
+      toolName: "demo_echo",
+      enabled: true,
+      decidedBy: "operator",
+    });
+
+    assert.throws(
+      () =>
+        store.setToolPackageToolEnabled({
+          packageId: "demo_tools",
+          version: "2.0.0",
+          toolName: "demo_echo",
+          enabled: true,
+          decidedBy: "operator",
+        }),
+      /tool action already enabled in package demo_tools@1\.0\.0/u,
+    );
+    assert.deepEqual(
+      store.listEnabledToolDefinitions().map((enabledTool) => enabledTool.packageVersionId),
+      ["demo_tools@1.0.0"],
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test("state store ignores legacy non-operator enabled tools when listing definitions", () => {
+  const { dir, store, cleanup } = tempStore();
+  try {
+    const statePath = join(dir, "state.json");
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      statePath,
+      `${JSON.stringify({
+        schemaVersion: 1,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+        toolPackages: {
+          "demo_tools@1.0.0": {
+            packageVersionId: "demo_tools@1.0.0",
+            packageId: "demo_tools",
+            version: "1.0.0",
+            packageHash: "sha256:abc123",
+            source: "sandbox",
+            status: "installed",
+            installedAt: "2026-01-01T00:00:00.000Z",
+            updatedAt: "2026-01-01T00:00:00.000Z",
+            enabledTools: {
+              demo_echo: {
+                enabled: true,
+                decidedBy: "operator",
+                decidedAt: "2026-01-02T00:00:00.000Z",
+              },
+              demo_package_owned: {
+                enabled: true,
+                decidedBy: "package",
+                decidedAt: "2026-01-02T00:00:00.000Z",
+              },
+              demo_malformed: {
+                enabled: true,
+                decidedBy: "operator",
+              },
+              demo_false: {
+                enabled: false,
+                decidedBy: "operator",
+                decidedAt: "2026-01-02T00:00:00.000Z",
+              },
+            },
+            tools: [
+              {
+                name: "demo_echo",
+                action: "beep.tools.demo_tools.demo_echo",
+                target: "sandbox",
+              },
+              {
+                name: "demo_package_owned",
+                action: "beep.tools.demo_tools.demo_package_owned",
+                target: "sandbox",
+              },
+              {
+                name: "demo_malformed",
+                action: "beep.tools.demo_tools.demo_malformed",
+                target: "sandbox",
+              },
+              {
+                name: "demo_false",
+                action: "beep.tools.demo_tools.demo_false",
+                target: "sandbox",
+              },
+            ],
+          },
+        },
+        audit: [],
+      })}\n`,
+      { mode: 0o600 },
+    );
+
+    assert.deepEqual(
+      store.listEnabledToolDefinitions().map((tool) => tool.action),
+      ["beep.tools.demo_tools.demo_echo"],
+    );
+  } finally {
+    cleanup();
+  }
+});
+
 test("state store separates runtime, runtime API, model credential, and operator tokens", () => {
   const { store, cleanup } = tempStore();
   try {
@@ -453,6 +753,50 @@ test("state store fails closed for malformed nested map records", () => {
     {
       name: "exposure invalid container port",
       value: { exposures: { "local:3000": { runtimeId: "local", containerPort: "03000" } }, audit: [] },
+    },
+    {
+      name: "tool package package id contains at",
+      value: {
+        toolPackages: {
+          "a@b@1.0.0": { packageVersionId: "a@b@1.0.0", packageId: "a@b", version: "1.0.0" },
+        },
+        audit: [],
+      },
+    },
+    {
+      name: "tool package version contains at",
+      value: {
+        toolPackages: {
+          "demo_tools@1@0": { packageVersionId: "demo_tools@1@0", packageId: "demo_tools", version: "1@0" },
+        },
+        audit: [],
+      },
+    },
+    {
+      name: "tool package packageVersionId mismatch",
+      value: {
+        toolPackages: {
+          "demo_tools@1.0.0": {
+            packageVersionId: "demo_tools@2.0.0",
+            packageId: "demo_tools",
+            version: "1.0.0",
+          },
+        },
+        audit: [],
+      },
+    },
+    {
+      name: "tool package key mismatch",
+      value: {
+        toolPackages: {
+          "other_tools@1.0.0": {
+            packageVersionId: "other_tools@1.0.0",
+            packageId: "demo_tools",
+            version: "1.0.0",
+          },
+        },
+        audit: [],
+      },
     },
   ];
 

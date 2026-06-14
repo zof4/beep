@@ -486,7 +486,7 @@ export function staticSiteExecutionRejectionReason(evidence) {
 }
 
 export function collectEvidenceForAction(action, args = {}) {
-  if (action === "preview.container.createStaticSite") {
+  if (action === "preview.container.createStaticSite" || action === "preview.container.updateStaticSite") {
     return collectStaticSiteEvidence(args);
   }
   return {

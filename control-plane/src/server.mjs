@@ -12,15 +12,28 @@ import { handleRuntimeAgentRoute, unsafeRuntimeAgentRequestTargetError } from ".
 import { RuntimeManager } from "./runtime-manager.mjs";
 import { handleSiteRoute } from "./site-routes.mjs";
 import { StateStore } from "./state-store.mjs";
+import { handleToolPackageRoute } from "./tool-package-routes.mjs";
 import { ToolBroker, hostPortForContainerPort, validatePreviewPort } from "./tool-broker.mjs";
+import { createWebRunExecutor } from "./openai-web-search.mjs";
 import { Gatekeeper } from "./gatekeeper/index.mjs";
+import { ToolRegistry } from "./tool-registry.mjs";
 
 export function createDefaultComponents() {
   const store = new StateStore();
   const runtimeManager = new RuntimeManager({ store });
   const gatekeeper = new Gatekeeper({ store });
-  const toolBroker = new ToolBroker({ store, gatekeeper });
-  return { store, runtimeManager, gatekeeper, toolBroker };
+  const registry = new ToolRegistry({ store });
+  const webSearch = createWebRunExecutor({
+    credentialResolver: () => resolveCodexCredentialFromAuthPath(RUNTIME_AUTH_PATH),
+  });
+  const sandboxToolCaller = (body) =>
+    runtimeManager.proxyToRuntime("/internal/sandbox/tools/call", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  const toolBroker = new ToolBroker({ store, gatekeeper, registry, webSearch, sandboxToolCaller });
+  return { store, runtimeManager, gatekeeper, registry, webSearch, toolBroker };
 }
 
 async function proxyLocalPort(request, response, hostPort, suffixPath) {
@@ -121,6 +134,18 @@ export function createControlPlaneHandler({ store, runtimeManager, toolBroker, l
         ok: true,
         service: "beep-control-plane",
         runtimeId: RUNTIME_ID,
+      });
+      return;
+    }
+
+    if (pathname === "/api/tools/packages" || pathname.startsWith("/api/tools/packages/")) {
+      await handleToolPackageRoute({
+        request,
+        response,
+        pathname,
+        url,
+        store,
+        requireOperatorAuth,
       });
       return;
     }
