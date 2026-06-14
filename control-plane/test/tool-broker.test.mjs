@@ -308,6 +308,7 @@ test("approved static site update executes through the managed preview updater",
       assert.equal(input.runtimeId, RUNTIME_ID);
       assert.equal(input.site.siteId, "demo-site");
       assert.deepEqual(input.args, { siteId: "demo-site", sourcePath: "/workspace/api-sessions/agent_beep/site" });
+      assert.equal(input.approvalId, executing.approvalId);
       return {
         siteId: "demo-site",
         status: "running",

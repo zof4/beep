@@ -34,6 +34,7 @@ import {
 import { ToolBrokerError } from "./tool-broker-error.mjs";
 
 const STATIC_SITE_SNAPSHOT_ROOT = join(STATE_DIR, "static-site-snapshots");
+const staticSiteLocks = new Map();
 
 function slugify(input) {
   const slug = String(input || "")
@@ -368,6 +369,48 @@ function nextSiteRevision(site) {
   return currentRevision + 1;
 }
 
+async function withStaticSiteLock(siteId, callback) {
+  const previous = staticSiteLocks.get(siteId) || Promise.resolve();
+  let release = () => {};
+  const gate = new Promise((resolvePromise) => {
+    release = resolvePromise;
+  });
+  const current = previous.catch(() => null).then(() => gate);
+  staticSiteLocks.set(siteId, current);
+  await previous.catch(() => null);
+  try {
+    return await callback();
+  } finally {
+    release();
+    if (staticSiteLocks.get(siteId) === current) {
+      staticSiteLocks.delete(siteId);
+    }
+  }
+}
+
+function currentStaticSiteRecord(store, siteId) {
+  if (typeof store?.getSite !== "function") return null;
+  return store.getSite(siteId);
+}
+
+function siteStateMatchesSite(current, site) {
+  return (
+    current?.siteId === site.siteId &&
+    current.runtimeId === site.runtimeId &&
+    current.status === site.status &&
+    current.containerName === site.containerName &&
+    (current.containerId || null) === (site.containerId || null) &&
+    (current.revision || null) === (site.revision || null)
+  );
+}
+
+function assertStaticSiteStateCurrent({ store, site }) {
+  if (typeof store?.getSite !== "function") return;
+  const current = currentStaticSiteRecord(store, site.siteId);
+  if (siteStateMatchesSite(current, site)) return;
+  throw new ToolBrokerError(`Static preview site state changed before update could be committed: ${site.siteId}`, 409);
+}
+
 function staticPreviewContainerName({ siteId, revision }) {
   return `beep-preview-${siteId}-r${revision}-${randomBytes(3).toString("hex")}`;
 }
@@ -457,7 +500,10 @@ async function cleanupOldStaticSiteAssets(site) {
       cleanup.oldContainerError = error instanceof Error ? error.message : String(error);
     }
   }
-  if (site.snapshotPath) {
+  if (site.snapshotPath && site.containerName && cleanup.oldContainerRemoval === "failed") {
+    cleanup.oldSnapshotRemoval = "skipped";
+    cleanup.oldSnapshotError = "Old container removal failed; snapshot retained because the old container may still be live.";
+  } else if (site.snapshotPath) {
     try {
       removeStaticSiteSnapshot(site.snapshotPath);
       cleanup.oldSnapshotRemoval = "removed";
@@ -577,7 +623,15 @@ export async function createStaticSitePreview({ runtimeId, args, approvalId, sto
   }
 }
 
-export async function updateStaticSitePreview({ runtimeId, site, args, store, sourceHostPath = null, trustedRoot = null }) {
+export async function updateStaticSitePreview({
+  runtimeId,
+  site,
+  args,
+  approvalId = null,
+  store,
+  sourceHostPath = null,
+  trustedRoot = null,
+}) {
   if (runtimeId !== RUNTIME_ID) {
     throw new ToolBrokerError(`Unknown runtimeId: ${runtimeId}`, 404);
   }
@@ -591,112 +645,126 @@ export async function updateStaticSitePreview({ runtimeId, site, args, store, so
     throw new ToolBrokerError(`Site is stopped: ${site.siteId}`, 410);
   }
 
-  const evidence =
-    sourceHostPath && trustedRoot
-      ? { ok: true, hostPath: sourceHostPath, workspaceRoot: trustedRoot }
-      : validateStaticSiteSourceForExecution(args);
-  const revision = nextSiteRevision(site);
-  const snapshotSiteId = snapshotIdForUpdate({ siteId: site.siteId, revision });
-  const containerName = staticPreviewContainerName({ siteId: site.siteId, revision });
-  const snapshot = createStaticSiteSnapshot({
-    sourceHostPath: evidence.hostPath,
-    siteId: snapshotSiteId,
-    trustedRoot: evidence.workspaceRoot,
-  });
-
-  let replacementStarted = false;
-  let committed = false;
-  try {
-    const started = await startStaticSiteContainer({
-      runtimeId,
-      siteId: site.siteId,
-      approvalId: site.approvalId || "operator",
-      revision,
-      snapshotPath: snapshot.snapshotPath,
-      containerName,
-      onContainerStarted: () => {
-        replacementStarted = true;
-      },
+  return withStaticSiteLock(site.siteId, async () => {
+    const evidence =
+      sourceHostPath && trustedRoot
+        ? { ok: true, hostPath: sourceHostPath, workspaceRoot: trustedRoot }
+        : validateStaticSiteSourceForExecution(args);
+    const revision = nextSiteRevision(site);
+    const snapshotSiteId = snapshotIdForUpdate({ siteId: site.siteId, revision });
+    const containerName = staticPreviewContainerName({ siteId: site.siteId, revision });
+    const snapshot = createStaticSiteSnapshot({
+      sourceHostPath: evidence.hostPath,
+      siteId: snapshotSiteId,
+      trustedRoot: evidence.workspaceRoot,
     });
-    const updatedAt = nowIso();
-    const updated = {
-      ...site,
-      runtimeId,
-      siteId: site.siteId,
-      status: "running",
-      sourcePath: args.sourcePath || site.sourcePath,
-      snapshotPath: snapshot.snapshotPath,
-      snapshotFileCount: snapshot.fileCount,
-      snapshotTotalBytes: snapshot.totalBytes,
-      containerName,
-      containerId: started.containerId,
-      image: STATIC_SITE_IMAGE,
-      hostPort: started.hostPort,
-      proxyUrl: `${PUBLIC_BASE_URL}/sites/${site.siteId}/`,
-      directUrl: `http://127.0.0.1:${started.hostPort}/`,
-      previousContainerName: site.containerName,
-      previousSnapshotPath: site.snapshotPath,
-      revision,
-      updatedAt,
-      lastUpdate: {
-        sourcePath: args.sourcePath || site.sourcePath,
+    const updateApprovalId = approvalId || "operator";
+
+    let replacementStarted = false;
+    let committed = false;
+    try {
+      const started = await startStaticSiteContainer({
+        runtimeId,
+        siteId: site.siteId,
+        approvalId: updateApprovalId,
+        revision,
+        snapshotPath: snapshot.snapshotPath,
+        containerName,
+        onContainerStarted: () => {
+          replacementStarted = true;
+        },
+      });
+      assertStaticSiteStateCurrent({ store, site });
+      const updatedAt = nowIso();
+      const updateSourcePath = args.sourcePath || site.sourcePath;
+      const updated = {
+        ...site,
+        runtimeId,
+        siteId: site.siteId,
+        status: "running",
+        sourcePath: updateSourcePath,
+        snapshotPath: snapshot.snapshotPath,
         snapshotFileCount: snapshot.fileCount,
         snapshotTotalBytes: snapshot.totalBytes,
+        containerName,
+        containerId: started.containerId,
+        image: STATIC_SITE_IMAGE,
+        hostPort: started.hostPort,
+        proxyUrl: `${PUBLIC_BASE_URL}/sites/${site.siteId}/`,
+        directUrl: `http://127.0.0.1:${started.hostPort}/`,
+        previousContainerName: site.containerName,
+        previousSnapshotPath: site.snapshotPath,
+        revision,
         updatedAt,
-      },
-    };
+        lastUpdate: {
+          sourcePath: updateSourcePath,
+          snapshotFileCount: snapshot.fileCount,
+          snapshotTotalBytes: snapshot.totalBytes,
+          approvalId: updateApprovalId,
+          updatedAt,
+        },
+      };
 
-    store.upsertSite(updated);
-    committed = true;
-    const cleanup = await cleanupOldStaticSiteAssets(site);
-    const finalUpdated = {
-      ...updated,
-      cleanup,
-    };
-    store.upsertSite(finalUpdated, {
-      kind: "site_updated",
-      siteId: site.siteId,
-      runtimeId,
-      previousContainerName: site.containerName || null,
-      containerName,
-      revision,
-      cleanup,
-    });
-    return {
-      ...finalUpdated,
-    };
-  } catch (error) {
-    if (!committed) {
-      if (replacementStarted) {
-        await run("docker", ["rm", "-f", containerName]).catch(() => null);
+      store.upsertSite(updated);
+      committed = true;
+      const cleanup = await cleanupOldStaticSiteAssets(site);
+      const finalUpdated = {
+        ...updated,
+        cleanup,
+      };
+      store.upsertSite(finalUpdated, {
+        kind: "site_updated",
+        siteId: site.siteId,
+        runtimeId,
+        approvalId: updateApprovalId,
+        previousContainerName: site.containerName || null,
+        containerName,
+        revision,
+        cleanup,
+      });
+      return {
+        ...finalUpdated,
+      };
+    } catch (error) {
+      if (!committed) {
+        if (replacementStarted) {
+          await run("docker", ["rm", "-f", containerName]).catch(() => null);
+        }
+        removeStaticSiteSnapshot(snapshot.snapshotPath);
       }
-      removeStaticSiteSnapshot(snapshot.snapshotPath);
+      throw error;
     }
-    throw error;
-  }
+  });
 }
 
 export async function removeStaticSitePreview({ site, store }) {
-  if (!site?.siteId || !site?.containerName) {
-    throw new ToolBrokerError("Site record is missing a managed container name.", 400);
+  if (!site?.siteId) {
+    throw new ToolBrokerError("Site record is missing a managed site id.", 400);
   }
-  if (site.status === "stopped") {
-    return site;
-  }
-  const removed = await removeStaticSiteContainer(site.containerName);
-  const stopped = {
-    ...site,
-    status: "stopped",
-    stoppedAt: new Date().toISOString(),
-  };
-  store.upsertSite(stopped, {
-    kind: "site_stopped",
-    siteId: site.siteId,
-    runtimeId: site.runtimeId,
-    containerName: site.containerName,
-    dockerRemoval: removed.removal,
-    dockerError: removed.error,
+  return withStaticSiteLock(site.siteId, async () => {
+    const current = currentStaticSiteRecord(store, site.siteId);
+    const target = current || site;
+    if (!target?.containerName) {
+      throw new ToolBrokerError("Site record is missing a managed container name.", 400);
+    }
+    if (target.status === "stopped") {
+      return target;
+    }
+    const removed = await removeStaticSiteContainer(target.containerName);
+    const stopped = {
+      ...target,
+      status: "stopped",
+      stoppedAt: new Date().toISOString(),
+    };
+    store.upsertSite(stopped, {
+      kind: "site_stopped",
+      siteId: target.siteId,
+      runtimeId: target.runtimeId,
+      containerName: target.containerName,
+      dockerRemoval: removed.removal,
+      dockerError: removed.error,
+    });
+    removeStaticSiteSnapshot(target.snapshotPath);
+    return stopped;
   });
-  removeStaticSiteSnapshot(site.snapshotPath);
-  return stopped;
 }

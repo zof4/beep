@@ -359,6 +359,7 @@ export class ToolBroker {
         runtimeId: approval.runtimeId,
         site,
         args: approval.args || {},
+        approvalId: approval.approvalId,
         store: this.store,
       });
     }

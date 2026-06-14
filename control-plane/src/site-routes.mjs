@@ -44,6 +44,14 @@ export async function handleSiteRoute({
       sendJson(response, 400, { ok: false, error: "Site update body must be a JSON object." });
       return;
     }
+    const unknownKeys = Object.keys(body).filter((key) => key !== "sourcePath");
+    if (unknownKeys.length > 0) {
+      sendJson(response, 400, {
+        ok: false,
+        error: `Site update body contains unknown keys: ${unknownKeys.join(", ")}.`,
+      });
+      return;
+    }
     if (Object.hasOwn(body, "sourcePath") && body.sourcePath !== "" && typeof body.sourcePath !== "string") {
       sendJson(response, 400, { ok: false, error: "Site update sourcePath must be a string." });
       return;
@@ -54,6 +62,7 @@ export async function handleSiteRoute({
       runtimeId: site.runtimeId,
       site,
       args: { sourcePath },
+      approvalId: "operator",
       store,
     });
     sendJson(response, 200, { ok: true, site: updated });

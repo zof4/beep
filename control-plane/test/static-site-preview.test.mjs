@@ -487,6 +487,76 @@ function dockerSpawnStubForPortFailure({ runContainerPrefix }) {
   };
 }
 
+function dockerSpawnStubForUpdateStopInterleaving({ oldContainerName, newContainerPrefix, port = 49192 }) {
+  const calls = [];
+  const removedContainers = new Set();
+  let newContainerName = null;
+  let releasePort = null;
+  let portLookupStarted = null;
+  const portLookup = new Promise((resolve) => {
+    portLookupStarted = resolve;
+  });
+  const portRelease = new Promise((resolve) => {
+    releasePort = resolve;
+  });
+  return {
+    calls,
+    removedContainers,
+    waitForPortLookup: () => portLookup,
+    releasePort: () => releasePort(),
+    newContainerName: () => newContainerName,
+    spawn(command, args, options) {
+      assert.equal(command, "docker");
+      assert.deepEqual(options.stdio, ["ignore", "pipe", "pipe"]);
+      calls.push(args);
+      const child = new EventEmitter();
+      child.stdout = new PassThrough();
+      child.stderr = new PassThrough();
+      process.nextTick(async () => {
+        const subcommand = args[0];
+        if (subcommand === "run") {
+          const nameIndex = args.indexOf("--name");
+          newContainerName = nameIndex === -1 ? "" : args[nameIndex + 1];
+          assert.match(newContainerName, new RegExp(`^${newContainerPrefix}`));
+          child.stdout.write("new-container-id\n");
+          child.stdout.end();
+          child.emit("close", 0);
+          return;
+        }
+        if (subcommand === "port") {
+          assert.equal(args[1], newContainerName);
+          portLookupStarted();
+          await portRelease;
+          child.stdout.write(`127.0.0.1:${port}\n`);
+          child.stdout.end();
+          child.emit("close", 0);
+          return;
+        }
+        if (subcommand === "rm") {
+          assert.equal(args[1], "-f");
+          const containerName = args[2];
+          assert.equal(containerName === oldContainerName || containerName === newContainerName, true);
+          if (removedContainers.has(containerName)) {
+            child.stderr.write(`Error response from daemon: No such container: ${containerName}\n`);
+            child.stderr.end();
+            child.emit("close", 1);
+            return;
+          }
+          removedContainers.add(containerName);
+          child.stdout.write(containerName);
+          child.stdout.end();
+          child.emit("close", 0);
+          return;
+        }
+        child.stderr.write(`unexpected docker args: ${args.join(" ")}\n`);
+        child.stderr.end();
+        child.emit("close", 1);
+      });
+      return child;
+    },
+  };
+}
+
 test("static site create removes started container when port lookup fails", async () => {
   const originalSpawn = childProcess.spawn;
   const workspaceRoot = join(ROOT_DIR, ".beep-dev", "workspace");
@@ -571,6 +641,7 @@ test("static site update preserves site id and swaps to a fresh snapshot and con
       site: {
         siteId,
         runtimeId: "local",
+        approvalId: "create-approval",
         status: "running",
         sourcePath: "/workspace/api-sessions/agent_beep/site",
         snapshotPath: oldSnapshotPath,
@@ -584,6 +655,7 @@ test("static site update preserves site id and swaps to a fresh snapshot and con
         revision: 1,
       },
       args: { sourcePath: "/workspace/api-sessions/agent_beep/site" },
+      approvalId: "update-approval",
       store,
       sourceHostPath: source,
       trustedRoot: source,
@@ -597,9 +669,14 @@ test("static site update preserves site id and swaps to a fresh snapshot and con
     assert.equal(updated.previousSnapshotPath, oldSnapshotPath);
     assert.equal(readFileSync(join(updated.snapshotPath, "index.html"), "utf8"), "<h1>updated</h1>\n");
     assert.equal(existsSync(oldSnapshotPath), false);
+    const runCall = stub.calls.find((args) => args[0] === "run");
+    assert.ok(runCall.includes("beep.approval_id=update-approval"));
+    assert.equal(updated.approvalId, "create-approval");
+    assert.equal(updated.lastUpdate.approvalId, "update-approval");
     assert.equal(upserts.length, 2);
     assert.equal(upserts[0].auditEvent, undefined);
     assert.equal(upserts[1].auditEvent.kind, "site_updated");
+    assert.equal(upserts[1].auditEvent.approvalId, "update-approval");
     assert.equal(upserts[1].auditEvent.cleanup.oldContainerRemoval, "removed");
   } finally {
     childProcess.spawn = originalSpawn;
@@ -649,6 +726,73 @@ test("static site update validation failure leaves existing site untouched", asy
       /secret or credential/iu,
     );
     assert.equal(existsSync(oldSnapshotPath), true);
+  } finally {
+    childProcess.spawn = originalSpawn;
+    syncBuiltinESMExports();
+    rmSync(oldSnapshotPath, { recursive: true, force: true });
+    cleanup();
+  }
+});
+
+test("static site update retains old snapshot when old container removal fails unexpectedly", async () => {
+  const originalSpawn = childProcess.spawn;
+  const siteId = `update-rm-failure-${process.pid}-${Date.now()}`;
+  const oldContainerName = `beep-preview-${siteId}`;
+  const { dir, cleanup } = tempDir();
+  const source = join(dir, "workspace-site");
+  const oldSnapshotPath = join(STATE_DIR, "static-site-snapshots", `${siteId}-old`);
+  try {
+    mkdirSync(source, { recursive: true });
+    writeFileSync(join(source, "index.html"), "<h1>updated</h1>\n");
+    mkdirSync(oldSnapshotPath, { recursive: true });
+    writeFileSync(join(oldSnapshotPath, "index.html"), "<h1>old</h1>\n");
+
+    const upserts = [];
+    const store = {
+      upsertSite(site, auditEvent) {
+        upserts.push({ site, auditEvent });
+      },
+    };
+    const stub = dockerSpawnStubForUpdate({
+      oldContainerName,
+      newContainerPrefix: `beep-preview-${siteId}-r2-`,
+      port: 49178,
+      rmFailures: new Map([[oldContainerName, "permission denied while removing old container\n"]]),
+    });
+    childProcess.spawn = stub.spawn;
+    syncBuiltinESMExports();
+
+    const { updateStaticSitePreview } = await import(
+      `../src/static-site-preview.mjs?update-rm-failure=${Date.now()}`
+    );
+    const updated = await updateStaticSitePreview({
+      runtimeId: "local",
+      site: {
+        siteId,
+        runtimeId: "local",
+        status: "running",
+        sourcePath: "/workspace/api-sessions/agent_beep/site",
+        snapshotPath: oldSnapshotPath,
+        snapshotFileCount: 1,
+        snapshotTotalBytes: 13,
+        containerName: oldContainerName,
+        containerId: "old-container-id",
+        hostPort: 49170,
+        proxyUrl: `http://127.0.0.1:8788/sites/${siteId}/`,
+        directUrl: "http://127.0.0.1:49170/",
+        revision: 1,
+      },
+      args: { sourcePath: "/workspace/api-sessions/agent_beep/site" },
+      store,
+      sourceHostPath: source,
+      trustedRoot: source,
+    });
+
+    assert.equal(existsSync(oldSnapshotPath), true);
+    assert.equal(updated.cleanup.oldContainerRemoval, "failed");
+    assert.match(updated.cleanup.oldContainerError, /permission denied/u);
+    assert.equal(updated.cleanup.oldSnapshotRemoval, "skipped");
+    assert.match(updated.cleanup.oldSnapshotError, /container may still be live/u);
   } finally {
     childProcess.spawn = originalSpawn;
     syncBuiltinESMExports();
@@ -863,6 +1007,184 @@ test("static site update keeps replacement assets after state swap if audit writ
     rmSync(oldSnapshotPath, { recursive: true, force: true });
     if (replacementSnapshotPath) {
       rmSync(replacementSnapshotPath, { recursive: true, force: true });
+    }
+    cleanup();
+  }
+});
+
+test("concurrent static site updates reject stale replacement state and keep one current revision", async () => {
+  const originalSpawn = childProcess.spawn;
+  const siteId = `update-concurrent-${process.pid}-${Date.now()}`;
+  const oldContainerName = `beep-preview-${siteId}`;
+  const { dir, cleanup } = tempDir();
+  const source = join(dir, "workspace-site");
+  const oldSnapshotPath = join(STATE_DIR, "static-site-snapshots", `${siteId}-old`);
+  try {
+    mkdirSync(source, { recursive: true });
+    writeFileSync(join(source, "index.html"), "<h1>updated</h1>\n");
+    mkdirSync(oldSnapshotPath, { recursive: true });
+    writeFileSync(join(oldSnapshotPath, "index.html"), "<h1>old</h1>\n");
+
+    const initialSite = {
+      siteId,
+      runtimeId: "local",
+      status: "running",
+      sourcePath: "/workspace/api-sessions/agent_beep/site",
+      snapshotPath: oldSnapshotPath,
+      snapshotFileCount: 1,
+      snapshotTotalBytes: 13,
+      containerName: oldContainerName,
+      containerId: "old-container-id",
+      hostPort: 49170,
+      proxyUrl: `http://127.0.0.1:8788/sites/${siteId}/`,
+      directUrl: "http://127.0.0.1:49170/",
+      revision: 1,
+    };
+    let currentSite = initialSite;
+    const upserts = [];
+    const store = {
+      getSite(requestedSiteId) {
+        assert.equal(requestedSiteId, siteId);
+        return currentSite;
+      },
+      upsertSite(site, auditEvent) {
+        currentSite = { ...currentSite, ...site };
+        upserts.push({ site: currentSite, auditEvent });
+      },
+    };
+    const stub = dockerSpawnStubForUpdate({
+      oldContainerName,
+      newContainerPrefix: `beep-preview-${siteId}-r2-`,
+      port: 49179,
+    });
+    childProcess.spawn = stub.spawn;
+    syncBuiltinESMExports();
+
+    const { updateStaticSitePreview } = await import(
+      `../src/static-site-preview.mjs?update-concurrent=${Date.now()}`
+    );
+    const attempts = await Promise.allSettled([
+      updateStaticSitePreview({
+        runtimeId: "local",
+        site: initialSite,
+        args: { sourcePath: "/workspace/api-sessions/agent_beep/site" },
+        approvalId: "update-a",
+        store,
+        sourceHostPath: source,
+        trustedRoot: source,
+      }),
+      updateStaticSitePreview({
+        runtimeId: "local",
+        site: initialSite,
+        args: { sourcePath: "/workspace/api-sessions/agent_beep/site" },
+        approvalId: "update-b",
+        store,
+        sourceHostPath: source,
+        trustedRoot: source,
+      }),
+    ]);
+
+    const fulfilled = attempts.filter((attempt) => attempt.status === "fulfilled");
+    const rejected = attempts.filter((attempt) => attempt.status === "rejected");
+    assert.equal(fulfilled.length, 1);
+    assert.equal(rejected.length, 1);
+    assert.equal(rejected[0].reason.status, 409);
+    assert.equal(currentSite.revision, 2);
+    assert.notEqual(currentSite.containerName, oldContainerName);
+    const snapshotRoot = join(STATE_DIR, "static-site-snapshots");
+    const updateSnapshots = fs.readdirSync(snapshotRoot).filter((entry) => entry.startsWith(`${siteId}-r2-`));
+    assert.equal(updateSnapshots.length, 1);
+    assert.equal(upserts.filter((entry) => entry.auditEvent?.kind === "site_updated").length, 1);
+  } finally {
+    childProcess.spawn = originalSpawn;
+    syncBuiltinESMExports();
+    const snapshotRoot = join(STATE_DIR, "static-site-snapshots");
+    if (existsSync(snapshotRoot)) {
+      for (const entry of fs.readdirSync(snapshotRoot)) {
+        if (entry.startsWith(siteId)) rmSync(join(snapshotRoot, entry), { recursive: true, force: true });
+      }
+    }
+    cleanup();
+  }
+});
+
+test("static site stop interleaved with update does not resurrect the running site", async () => {
+  const originalSpawn = childProcess.spawn;
+  const siteId = `update-stop-${process.pid}-${Date.now()}`;
+  const oldContainerName = `beep-preview-${siteId}`;
+  const { dir, cleanup } = tempDir();
+  const source = join(dir, "workspace-site");
+  const oldSnapshotPath = join(STATE_DIR, "static-site-snapshots", `${siteId}-old`);
+  try {
+    mkdirSync(source, { recursive: true });
+    writeFileSync(join(source, "index.html"), "<h1>updated</h1>\n");
+    mkdirSync(oldSnapshotPath, { recursive: true });
+    writeFileSync(join(oldSnapshotPath, "index.html"), "<h1>old</h1>\n");
+
+    const initialSite = {
+      siteId,
+      runtimeId: "local",
+      status: "running",
+      sourcePath: "/workspace/api-sessions/agent_beep/site",
+      snapshotPath: oldSnapshotPath,
+      snapshotFileCount: 1,
+      snapshotTotalBytes: 13,
+      containerName: oldContainerName,
+      containerId: "old-container-id",
+      hostPort: 49170,
+      proxyUrl: `http://127.0.0.1:8788/sites/${siteId}/`,
+      directUrl: "http://127.0.0.1:49170/",
+      revision: 1,
+    };
+    let currentSite = initialSite;
+    const store = {
+      getSite(requestedSiteId) {
+        assert.equal(requestedSiteId, siteId);
+        return currentSite;
+      },
+      upsertSite(site) {
+        currentSite = { ...currentSite, ...site };
+      },
+    };
+    const stub = dockerSpawnStubForUpdateStopInterleaving({
+      oldContainerName,
+      newContainerPrefix: `beep-preview-${siteId}-r2-`,
+    });
+    childProcess.spawn = stub.spawn;
+    syncBuiltinESMExports();
+
+    const moduleUrl = `../src/static-site-preview.mjs?update-stop=${Date.now()}`;
+    const {
+      updateStaticSitePreview,
+      removeStaticSitePreview: checkedRemoveStaticSitePreview,
+    } = await import(moduleUrl);
+    const updateAttempt = updateStaticSitePreview({
+      runtimeId: "local",
+      site: initialSite,
+      args: { sourcePath: "/workspace/api-sessions/agent_beep/site" },
+      approvalId: "update-approval",
+      store,
+      sourceHostPath: source,
+      trustedRoot: source,
+    });
+    await stub.waitForPortLookup();
+    const stopAttempt = checkedRemoveStaticSitePreview({ site: initialSite, store });
+    await new Promise((resolve) => setImmediate(resolve));
+    stub.releasePort();
+
+    await Promise.all([updateAttempt, stopAttempt]);
+
+    assert.equal(currentSite.status, "stopped");
+    assert.equal(currentSite.containerName, stub.newContainerName());
+    assert.equal(stub.removedContainers.has(stub.newContainerName()), true);
+  } finally {
+    childProcess.spawn = originalSpawn;
+    syncBuiltinESMExports();
+    const snapshotRoot = join(STATE_DIR, "static-site-snapshots");
+    if (existsSync(snapshotRoot)) {
+      for (const entry of fs.readdirSync(snapshotRoot)) {
+        if (entry.startsWith(siteId)) rmSync(join(snapshotRoot, entry), { recursive: true, force: true });
+      }
     }
     cleanup();
   }
