@@ -3,14 +3,18 @@ import { execFileSync } from "node:child_process";
 import { createServer } from "node:http";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { shouldPromoteAgentSubmit } from "./beep-chat-page-logic.mjs";
 
 const ROOT_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 const CONTROL_SCRIPT = join(ROOT_DIR, "scripts", "beep-control-plane.sh");
+const RUNTIME_SCRIPT = join(ROOT_DIR, "scripts", "beep-runtime.sh");
 const WRAPPER_HOST = process.env.BEEP_CHAT_PAGE_HOST || "127.0.0.1";
 const WRAPPER_PORT = Number.parseInt(process.env.BEEP_CHAT_PAGE_PORT || "8799", 10);
 const CONTROL_HOST = process.env.BEEP_CONTROL_PLANE_HOST || "127.0.0.1";
 const CONTROL_PORT = Number.parseInt(process.env.BEEP_CONTROL_PLANE_PORT || "8788", 10);
 const REQUEST_TIMEOUT_MS = Number.parseInt(process.env.BEEP_CHAT_PAGE_REQUEST_TIMEOUT_MS || "600000", 10);
+const CONFIG_TIMEOUT_MS = Number.parseInt(process.env.BEEP_CHAT_PAGE_CONFIG_TIMEOUT_MS || "180000", 10);
+const THINKING_LEVELS = new Set(["minimal", "low", "medium", "high", "xhigh"]);
 const SHOULD_START_CONTROL_PLANE = !["0", "false", "no", "off"].includes(
   String(process.env.BEEP_CHAT_PAGE_START_CONTROL_PLANE || "1").toLowerCase(),
 );
@@ -36,6 +40,22 @@ function ensureControlPlane() {
 
 function operatorToken() {
   return runControlPlaneCommand("operator-token");
+}
+
+function runRuntimeCommand(args) {
+  const output = execFileSync("bash", [RUNTIME_SCRIPT, ...args], {
+    cwd: ROOT_DIR,
+    env: process.env,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+    timeout: CONFIG_TIMEOUT_MS,
+  }).trim();
+  if (!output) return { ok: true };
+  try {
+    return JSON.parse(output);
+  } catch {
+    return { ok: true, output };
+  }
 }
 
 async function readJsonBody(request, limitBytes = 1024 * 1024) {
@@ -112,6 +132,26 @@ function extractFinalText(payload) {
   );
 }
 
+async function fetchAgentStatus() {
+  return controlPlaneFetch("/api/agent", { timeoutMs: 15000 }).catch((error) => ({
+    ok: false,
+    status: 0,
+    payload: { ok: false, error: error instanceof Error ? error.message : String(error) },
+  }));
+}
+
+async function submitAgentRequest({ message, waitForCompletion, timeoutMs }) {
+  return controlPlaneFetch("/api/requests", {
+    method: "POST",
+    body: {
+      message,
+      waitForCompletion,
+      timeoutMs,
+    },
+    timeoutMs: waitForCompletion ? timeoutMs + 10000 : 30000,
+  });
+}
+
 async function handleStatus(_request, response) {
   const [health, tools, capabilities] = await Promise.all([
     controlPlaneFetch("/health", { auth: false, timeoutMs: 15000 }).catch((error) => ({
@@ -157,15 +197,16 @@ async function handleChat(request, response) {
   }
 
   const timeoutMs = Math.max(1000, Number.parseInt(String(body.timeoutMs || REQUEST_TIMEOUT_MS), 10) || REQUEST_TIMEOUT_MS);
-  const result = await controlPlaneFetch("/api/requests", {
-    method: "POST",
-    body: {
-      message,
-      waitForCompletion: true,
-      timeoutMs,
-    },
-    timeoutMs: timeoutMs + 10000,
-  });
+  let waitForCompletion = body.waitForCompletion !== false;
+  let promotedFromQueue = false;
+  let agentBeforeSubmit = null;
+  if (!waitForCompletion && body.promoteWhenIdle !== false) {
+    agentBeforeSubmit = await fetchAgentStatus();
+    promotedFromQueue = shouldPromoteAgentSubmit(agentBeforeSubmit.payload);
+    if (promotedFromQueue) waitForCompletion = true;
+  }
+
+  const result = await submitAgentRequest({ message, waitForCompletion, timeoutMs });
   const payload = result.payload || {};
   sendJson(response, result.ok ? 200 : result.status || 500, {
     ok: result.ok && payload.ok !== false,
@@ -173,7 +214,111 @@ async function handleChat(request, response) {
     finalText: extractFinalText(payload),
     requestId: payload.requestId || null,
     runtimeRequestId: payload.result?.request?.id || null,
+    queued: !waitForCompletion,
+    promotedFromQueue,
+    agentBeforeSubmit: agentBeforeSubmit
+      ? {
+          ok: agentBeforeSubmit.ok && agentBeforeSubmit.payload?.ok !== false,
+          status: agentBeforeSubmit.status,
+          payload: agentBeforeSubmit.payload,
+        }
+      : null,
     payload,
+  });
+}
+
+async function handleSteer(request, response) {
+  const body = await readJsonBody(request);
+  const message = String(body.message || "").trim();
+  if (!message) {
+    sendJson(response, 400, { ok: false, error: "Message is required." });
+    return;
+  }
+
+  const timeoutMs = Math.max(1000, Number.parseInt(String(body.timeoutMs || REQUEST_TIMEOUT_MS), 10) || REQUEST_TIMEOUT_MS);
+  const agentBeforeSubmit = await fetchAgentStatus();
+  if (body.promoteWhenIdle !== false && shouldPromoteAgentSubmit(agentBeforeSubmit.payload)) {
+    const promptResult = await submitAgentRequest({ message, waitForCompletion: true, timeoutMs });
+    const payload = promptResult.payload || {};
+    sendJson(response, promptResult.ok ? 200 : promptResult.status || 500, {
+      ok: promptResult.ok && payload.ok !== false,
+      controlPlaneStatus: promptResult.status,
+      finalText: extractFinalText(payload),
+      requestId: payload.requestId || null,
+      runtimeRequestId: payload.result?.request?.id || null,
+      queued: false,
+      steered: false,
+      promotedFromSteer: true,
+      agentBeforeSubmit: {
+        ok: agentBeforeSubmit.ok && agentBeforeSubmit.payload?.ok !== false,
+        status: agentBeforeSubmit.status,
+        payload: agentBeforeSubmit.payload,
+      },
+      payload,
+    });
+    return;
+  }
+
+  const result = await controlPlaneFetch("/api/agent/steer", {
+    method: "POST",
+    body: { message },
+    timeoutMs: 30000,
+  });
+  sendJson(response, result.ok ? 200 : result.status || 500, {
+    ok: result.ok && result.payload?.ok !== false,
+    controlPlaneStatus: result.status,
+    steered: true,
+    promotedFromSteer: false,
+    agentBeforeSubmit: {
+      ok: agentBeforeSubmit.ok && agentBeforeSubmit.payload?.ok !== false,
+      status: agentBeforeSubmit.status,
+      payload: agentBeforeSubmit.payload,
+    },
+    payload: result.payload,
+  });
+}
+
+async function handleRuntimeConfig(request, response) {
+  const body = await readJsonBody(request);
+  const model = String(body.model || "").trim();
+  const thinking = String(body.thinking || "").trim();
+  const restart = body.restart !== false;
+  if (!model && !thinking) {
+    sendJson(response, 400, { ok: false, error: "Model or thinking level is required." });
+    return;
+  }
+  if (thinking && !THINKING_LEVELS.has(thinking)) {
+    sendJson(response, 400, { ok: false, error: `Invalid thinking level: ${thinking}` });
+    return;
+  }
+
+  const updates = {};
+  if (model) updates.model = runRuntimeCommand(["models", "set", model]);
+  if (thinking) updates.thinking = runRuntimeCommand(["thinking", "set", thinking]);
+
+  let restartResult = null;
+  if (restart) {
+    restartResult = await controlPlaneFetch("/api/agent/stop", {
+      method: "POST",
+      body: { reason: "runtime config changed from beep chat page" },
+      timeoutMs: 30000,
+    }).catch((error) => ({
+      ok: false,
+      status: 0,
+      payload: { ok: false, error: error instanceof Error ? error.message : String(error) },
+    }));
+  }
+
+  sendJson(response, 200, {
+    ok: true,
+    updates,
+    restart: restartResult
+      ? {
+          ok: restartResult.ok && restartResult.payload?.ok !== false,
+          status: restartResult.status,
+          payload: restartResult.payload,
+        }
+      : null,
   });
 }
 
@@ -301,15 +446,12 @@ function pageHtml() {
       border-top: 1px solid var(--line);
       padding: 14px;
       display: grid;
-      grid-template-columns: 1fr auto;
+      grid-template-columns: 1fr;
       gap: 10px;
       align-items: end;
     }
-    textarea {
+    textarea, input, select {
       width: 100%;
-      min-height: 86px;
-      max-height: 220px;
-      resize: vertical;
       border: 1px solid var(--line);
       border-radius: 8px;
       padding: 12px;
@@ -318,9 +460,23 @@ function pageHtml() {
       color: var(--ink);
       background: oklch(0.985 0.004 165);
     }
-    textarea:focus, button:focus-visible {
+    textarea {
+      min-height: 86px;
+      max-height: 220px;
+      resize: vertical;
+    }
+    select {
+      min-height: 44px;
+    }
+    textarea:focus, input:focus, select:focus, button:focus-visible {
       outline: 3px solid color-mix(in oklch, var(--accent) 30%, transparent);
       outline-offset: 2px;
+    }
+    .composer-actions {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      gap: 8px;
     }
     button {
       border: 0;
@@ -332,6 +488,11 @@ function pageHtml() {
       color: var(--accent-ink);
       background: var(--accent);
       cursor: pointer;
+    }
+    button.secondary {
+      border: 1px solid var(--line);
+      color: var(--ink);
+      background: oklch(0.985 0.004 165);
     }
     button:disabled {
       cursor: wait;
@@ -383,6 +544,35 @@ function pageHtml() {
       padding: 7px 9px;
       min-height: 34px;
       font-weight: 600;
+    }
+    .runtime-config {
+      border-top: 1px solid var(--line);
+      margin-top: 14px;
+      padding-top: 12px;
+      display: grid;
+      gap: 9px;
+    }
+    .runtime-config h3 {
+      margin: 0;
+      font-size: 14px;
+    }
+    .field {
+      display: grid;
+      gap: 5px;
+    }
+    .inline-check {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .inline-check input {
+      width: auto;
+      min-height: 0;
+    }
+    #applyConfigButton {
+      width: 100%;
     }
     details {
       margin-top: 14px;
@@ -440,7 +630,11 @@ function pageHtml() {
       </div>
       <form id="chatForm">
         <textarea id="messageInput" name="message" placeholder="Ask Beep something..." required></textarea>
-        <button id="sendButton" type="submit">Send</button>
+        <div class="composer-actions">
+          <button id="queueButton" class="secondary" type="button">Queue</button>
+          <button id="steerButton" class="secondary" type="button">Steer</button>
+          <button id="sendButton" type="submit">Send</button>
+        </div>
       </form>
     </section>
 
@@ -452,6 +646,28 @@ function pageHtml() {
         <button class="chip" type="button" data-prompt="Search the web for the latest OpenAI Codex release notes and summarize the search result sources.">Web search</button>
         <button class="chip" type="button" data-prompt="Create a tiny hello.txt file in your workspace, read it back, then tell me what happened.">Sandbox write</button>
       </div>
+      <section class="runtime-config" aria-label="Runtime config">
+        <h3>Model</h3>
+        <label class="field">
+          <span class="label">Model id</span>
+          <input id="modelInput" type="text" autocomplete="off" spellcheck="false" placeholder="gpt-5.5">
+        </label>
+        <label class="field">
+          <span class="label">Thinking</span>
+          <select id="thinkingSelect">
+            <option value="minimal">minimal</option>
+            <option value="low">low</option>
+            <option value="medium">medium</option>
+            <option value="high">high</option>
+            <option value="xhigh">xhigh</option>
+          </select>
+        </label>
+        <label class="inline-check">
+          <input id="restartAgentInput" type="checkbox" checked>
+          Restart active agent after applying
+        </label>
+        <button id="applyConfigButton" class="secondary" type="button">Apply model settings</button>
+      </section>
       <details>
         <summary>Raw status</summary>
         <pre id="rawStatus"></pre>
@@ -463,9 +679,15 @@ function pageHtml() {
     const form = document.getElementById("chatForm");
     const input = document.getElementById("messageInput");
     const button = document.getElementById("sendButton");
+    const queueButton = document.getElementById("queueButton");
+    const steerButton = document.getElementById("steerButton");
     const topStatus = document.getElementById("topStatus");
     const facts = document.getElementById("facts");
     const rawStatus = document.getElementById("rawStatus");
+    const modelInput = document.getElementById("modelInput");
+    const thinkingSelect = document.getElementById("thinkingSelect");
+    const restartAgentInput = document.getElementById("restartAgentInput");
+    const applyConfigButton = document.getElementById("applyConfigButton");
 
     function addMessage(kind, label, text) {
       const entry = document.createElement("div");
@@ -482,9 +704,18 @@ function pageHtml() {
     function setFacts(status) {
       const search = status.codexWebSearch || {};
       const toolNames = status.tools?.names || [];
+      const current = status.capabilities?.payload?.current || {};
+      if (current.model && modelInput.dataset.touched !== "1") {
+        modelInput.value = current.model;
+      }
+      if (current.thinking && thinkingSelect.dataset.touched !== "1") {
+        thinkingSelect.value = current.thinking;
+      }
       const rows = [
         ["Control plane", status.controlPlaneUrl || "unknown"],
         ["Health", status.health?.ok ? "ok" : status.health?.payload?.error || "not ready", status.health?.ok],
+        ["Model", current.model || "unknown"],
+        ["Thinking", current.thinking || "unknown"],
         ["Codex web search", search.effectiveEnabled ? "effective on" : search.enabled === false ? "disabled" : "not effective", search.effectiveEnabled],
         ["Search mode", search.mode || "unknown"],
         ["Public tools", String(status.tools?.count ?? 0)],
@@ -515,17 +746,30 @@ function pageHtml() {
       rawStatus.textContent = JSON.stringify(status, null, 2);
     }
 
-    async function sendMessage(message) {
-      addMessage("user", "You", message);
-      button.disabled = true;
-      input.disabled = true;
+    function setComposerBusy(busy, lockInput = false) {
+      button.disabled = busy;
+      queueButton.disabled = busy;
+      steerButton.disabled = busy;
+      input.disabled = lockInput;
+    }
+
+    async function sendMessage(message, mode = "send") {
+      const label = mode === "queue" ? "You queued" : mode === "steer" ? "You steered" : "You";
+      addMessage("user", label, message);
+      setComposerBusy(true, mode === "send");
       const started = Date.now();
-      addMessage("system", "Submitted", "Waiting for the runtime agent. This can take a while on first start.");
+      if (mode === "send") {
+        addMessage("system", "Submitted", "Waiting for the runtime agent. This can take a while on first start.");
+      } else if (mode === "queue") {
+        addMessage("system", "Queued", "Submitting to the persisted runtime request queue.");
+      } else {
+        addMessage("system", "Steer", "Sending steering input to the active agent turn.");
+      }
       try {
-        const response = await fetch("/api/chat", {
+        const response = await fetch(mode === "steer" ? "/api/steer" : "/api/chat", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ message, timeoutMs: 600000 }),
+          body: JSON.stringify({ message, timeoutMs: 600000, waitForCompletion: mode !== "queue" }),
         });
         const payload = await response.json();
         const seconds = ((Date.now() - started) / 1000).toFixed(1);
@@ -533,23 +777,121 @@ function pageHtml() {
           addMessage("system", "Error", payload.error || payload.payload?.error || JSON.stringify(payload, null, 2));
           return;
         }
+        if (mode === "queue" && payload.queued !== false && !payload.promotedFromQueue) {
+          addMessage(
+            "system",
+            "Queued " + seconds + "s",
+            [
+              payload.requestId ? "controlPlaneRequest: " + payload.requestId : "",
+              payload.runtimeRequestId ? "runtimeRequest: " + payload.runtimeRequestId : "",
+              "Use Runtime status or Raw status to inspect progress.",
+            ].filter(Boolean).join("\\n"),
+          );
+          return;
+        }
+        if (mode === "queue") {
+          addMessage(
+            "agent",
+            "Beep idle queue " + seconds + "s",
+            payload.finalText || JSON.stringify(payload.payload?.result?.request || payload.payload, null, 2),
+          );
+          return;
+        }
+        if (mode === "steer" && !payload.promotedFromSteer && !payload.finalText) {
+          addMessage("system", "Steer accepted " + seconds + "s", JSON.stringify(payload.payload?.response || payload.payload, null, 2));
+          return;
+        }
+        if (mode === "steer") {
+          addMessage(
+            "agent",
+            "Beep idle steer " + seconds + "s",
+            payload.finalText || JSON.stringify(payload.payload?.result?.request || payload.payload, null, 2),
+          );
+          return;
+        }
         addMessage("agent", "Beep " + seconds + "s", payload.finalText || JSON.stringify(payload.payload?.result?.request || payload.payload, null, 2));
       } catch (error) {
         addMessage("system", "Network error", error instanceof Error ? error.message : String(error));
       } finally {
-        button.disabled = false;
-        input.disabled = false;
+        setComposerBusy(false, false);
         input.focus();
         refreshStatus().catch(() => {});
       }
     }
 
-    form.addEventListener("submit", (event) => {
-      event.preventDefault();
+    async function submitComposer(mode) {
       const message = input.value.trim();
       if (!message) return;
       input.value = "";
-      sendMessage(message);
+      await sendMessage(message, mode);
+    }
+
+    async function applyRuntimeConfig() {
+      const model = modelInput.value.trim();
+      const thinking = thinkingSelect.value;
+      if (!model && !thinking) return;
+      applyConfigButton.disabled = true;
+      addMessage(
+        "system",
+        "Config",
+        "Applying model settings. This may take a minute because the setting is validated inside the runtime container.",
+      );
+      try {
+        const response = await fetch("/api/runtime-config", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            model,
+            thinking,
+            restart: restartAgentInput.checked,
+          }),
+        });
+        const payload = await response.json();
+        if (!response.ok || payload.ok === false) {
+          addMessage("system", "Config error", payload.error || JSON.stringify(payload, null, 2));
+          return;
+        }
+        const selected =
+          payload.updates?.thinking?.selected ||
+          payload.updates?.model?.selected;
+        addMessage(
+          "system",
+          "Config applied",
+          JSON.stringify({
+            selected,
+            restart: payload.restart ? { ok: payload.restart.ok, status: payload.restart.status } : null,
+          }, null, 2),
+        );
+        await refreshStatus();
+      } catch (error) {
+        addMessage("system", "Config network error", error instanceof Error ? error.message : String(error));
+      } finally {
+        applyConfigButton.disabled = false;
+      }
+    }
+
+    window.setBeepRuntimeConfig = async function setBeepRuntimeConfig({ model, thinking, restart = true } = {}) {
+      const response = await fetch("/api/runtime-config", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model, thinking, restart }),
+      });
+      return response.json();
+    };
+
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      submitComposer("send");
+    });
+
+    queueButton.addEventListener("click", () => submitComposer("queue"));
+    steerButton.addEventListener("click", () => submitComposer("steer"));
+    applyConfigButton.addEventListener("click", () => applyRuntimeConfig());
+    modelInput.addEventListener("input", () => {
+      modelInput.dataset.touched = "1";
+    });
+    thinkingSelect.addEventListener("change", () => {
+      thinkingSelect.dataset.touched = "1";
     });
 
     document.querySelectorAll("[data-prompt]").forEach((chip) => {
@@ -582,6 +924,14 @@ async function route(request, response) {
     }
     if (request.method === "POST" && url.pathname === "/api/chat") {
       await handleChat(request, response);
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/api/steer") {
+      await handleSteer(request, response);
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/api/runtime-config") {
+      await handleRuntimeConfig(request, response);
       return;
     }
     sendJson(response, 404, { ok: false, error: "not found" });
