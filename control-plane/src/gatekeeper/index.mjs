@@ -66,25 +66,61 @@ function textReferencesRequestedPath(text, args) {
   return refs.length > 0 && refs.some((ref) => textContainsPathReference(haystack, ref));
 }
 
+function textReferencesRequestedSiteId(text, args) {
+  const siteId = normalizeReferencePath(args?.siteId);
+  return siteId.length >= 3 && textContainsPathReference(normalizeText(text), siteId);
+}
+
 function textReferencesAnyWorkspacePath(text) {
   return /\/workspace(?:\/[^\s"'`,)]*)?/iu.test(String(text || ""));
 }
 
-function hasStaticPreviewIntent(text) {
+function hasStrongStaticPreviewPhrase(text) {
+  return includesAny(text, [
+    "static preview container",
+    "managed static",
+    "preview_container_create_static_site",
+    "preview_container_update_static_site",
+  ]);
+}
+
+function hasStaticPreviewTargetAndOperation(text) {
   return (
+    includesAny(text, ["static site", "website", "web page", "html"]) &&
     includesAny(text, [
-      "static preview container",
-      "managed static",
-      "preview_container_create_static_site",
-      "preview_container_update_static_site",
-    ]) ||
-    (includesAny(text, ["static site", "website", "web page", "html", "site"]) &&
-      includesAny(text, ["preview", "container", "publish", "serve", "show it", "expose", "create", "update", "redeploy"]))
+      "preview",
+      "container",
+      "publish",
+      "serve",
+      "show it",
+      "expose",
+      "create",
+      "update",
+      "redeploy",
+      "live url",
+    ])
   );
 }
 
-function hasExplicitStaticPreviewDenial(text) {
+function hasStaticPreviewIntent(text) {
+  return hasStrongStaticPreviewPhrase(text) || hasStaticPreviewTargetAndOperation(text);
+}
+
+function hasExplicitStaticPreviewDenial(text, args = {}) {
   const haystack = normalizeText(text);
+  const deniesAction = [
+    /\bdo\s+not\b/u,
+    /\bdon['’]?t\b/u,
+    /\bdont\b/u,
+    /\bnever\b/u,
+    /\bnot\s+(?:create|start|run|serve|publish|expose|show|request|open|update|redeploy)\b/u,
+    /\bno\b/u,
+    /\bwithout\b/u,
+    /\bdeny\b/u,
+    /\brefuse\b/u,
+  ].some((pattern) => pattern.test(haystack));
+  if (!deniesAction) return false;
+
   const deniesPreviewTarget =
     hasStaticPreviewIntent(haystack) ||
     includesAny(haystack, [
@@ -97,47 +133,31 @@ function hasExplicitStaticPreviewDenial(text) {
       "serve",
       "show",
       "expose",
-      "update",
-      "redeploy",
-    ]);
-  if (!deniesPreviewTarget) return false;
-  return [
-    /\bdo\s+not\b/u,
-    /\bdon['’]?t\b/u,
-    /\bdont\b/u,
-    /\bnever\b/u,
-    /\bnot\s+(?:create|start|run|serve|publish|expose|show|request|open|update|redeploy)\b/u,
-    /\bno\b/u,
-    /\bwithout\b/u,
-    /\bdeny\b/u,
-    /\brefuse\b/u,
-  ].some((pattern) => pattern.test(haystack));
+    ]) ||
+    (includesAny(haystack, ["update", "redeploy"]) && textReferencesRequestedPath(haystack, args));
+  return deniesPreviewTarget;
 }
 
 function staticPreviewDeniedByUser({ authorizationText, args }) {
   return authorizationUnits(authorizationText).some(
     (unit) =>
-      hasExplicitStaticPreviewDenial(unit) &&
+      hasExplicitStaticPreviewDenial(unit, args) &&
       (textReferencesRequestedPath(unit, args) || !textReferencesAnyWorkspacePath(unit)),
   );
 }
 
 function authScoreForStaticPreview({ authorizationText, args }) {
   const units = authorizationUnits(authorizationText).filter(
-    (unit) => textReferencesRequestedPath(unit, args) && !hasExplicitStaticPreviewDenial(unit),
+    (unit) => textReferencesRequestedPath(unit, args) && !hasExplicitStaticPreviewDenial(unit, args),
   );
   if (units.length === 0) return "unknown";
 
   for (const unit of units) {
     if (
-      includesAny(unit, [
-        "static preview container",
-        "managed static",
-        "preview_container_create_static_site",
-        "preview_container_update_static_site",
-      ]) ||
-      (includesAny(unit, ["static site", "website", "web page", "html", "site"]) &&
-        includesAny(unit, ["preview", "container", "publish", "serve", "show it", "expose", "create", "update", "redeploy"]))
+      hasStrongStaticPreviewPhrase(unit) ||
+      hasStaticPreviewTargetAndOperation(unit) ||
+      (textReferencesRequestedSiteId(unit, args) &&
+        includesAny(unit, ["preview", "container", "publish", "serve", "show it", "expose", "redeploy", "live url"]))
     ) {
       return "medium";
     }
@@ -146,9 +166,41 @@ function authScoreForStaticPreview({ authorizationText, args }) {
   return "unknown";
 }
 
-function localReviewStaticPreview({ args, context, evidence }) {
+function staticPreviewReviewText(action, args = {}) {
+  if (action !== "preview.container.updateStaticSite") {
+    return {
+      deniedAuditRationale: "Recent trusted user context explicitly denied creating a static preview for the requested path.",
+      deniedAgentMessage: "Static preview was denied because the recent user request explicitly said not to create it.",
+      unclearAuditRationale:
+        "Static preview container is bounded, but recent context does not clearly authorize creating it.",
+      unclearAgentMessage:
+        "Static preview requires user/operator approval because the recent request does not clearly authorize creating a managed preview container.",
+      userPrompt: `Approve creating a managed static preview container for ${args.sourcePath}?`,
+      allowAuditRationale:
+        "Static preview container is bounded to an existing /workspace directory with index.html, within size limits, no suspicious files, and user authorization is sufficient.",
+      allowAgentMessage: "Static preview container was approved by the control-plane gatekeeper.",
+    };
+  }
+
+  const siteId = typeof args.siteId === "string" ? args.siteId.trim() : "";
+  const siteLabel = siteId ? ` ${siteId}` : "";
+  const updateTarget = siteId ? ` ${siteId}` : " it";
+  return {
+    deniedAuditRationale: `Recent trusted user context explicitly denied updating/redeploying the existing managed static preview${siteLabel} for the requested path.`,
+    deniedAgentMessage: `Static preview update was denied because the recent user request explicitly said not to update/redeploy${updateTarget}.`,
+    unclearAuditRationale: `Static preview update is bounded, but recent context does not clearly authorize updating/redeploying the existing managed static preview${siteLabel}.`,
+    unclearAgentMessage: `Static preview update requires user/operator approval because the recent request does not clearly authorize updating/redeploying the existing managed static preview${siteLabel}.`,
+    userPrompt: `Approve updating/redeploying existing managed static preview${siteLabel} from ${args.sourcePath}?`,
+    allowAuditRationale:
+      "Static preview update is bounded to an existing /workspace directory with index.html, within size limits, no suspicious files, and user authorization is sufficient.",
+    allowAgentMessage: "Static preview update was approved by the control-plane gatekeeper.",
+  };
+}
+
+function localReviewStaticPreview({ action, args, context, evidence }) {
   const userDenied = staticPreviewDeniedByUser({ authorizationText: context?.authorizationText, args });
   const userAuthorization = authScoreForStaticPreview({ authorizationText: context?.authorizationText, args });
+  const reviewText = staticPreviewReviewText(action, args);
   const base = {
     scope: "once",
     riskLevel: "medium",
@@ -171,8 +223,8 @@ function localReviewStaticPreview({ args, context, evidence }) {
       outcome: "deny",
       riskLevel: "high",
       userAuthorization: "unknown",
-      auditRationale: "Recent trusted user context explicitly denied creating a static preview for the requested path.",
-      agentMessage: "Static preview was denied because the recent user request explicitly said not to create it.",
+      auditRationale: reviewText.deniedAuditRationale,
+      agentMessage: reviewText.deniedAgentMessage,
       userPrompt: null,
     };
   }
@@ -222,26 +274,24 @@ function localReviewStaticPreview({ args, context, evidence }) {
       ...base,
       outcome: "escalate_to_user",
       riskLevel: "medium",
-      auditRationale: "Static preview container is bounded, but recent context does not clearly authorize creating it.",
-      agentMessage:
-        "Static preview requires user/operator approval because the recent request does not clearly authorize creating a managed preview container.",
-      userPrompt: `Approve creating a managed static preview container for ${args.sourcePath}?`,
+      auditRationale: reviewText.unclearAuditRationale,
+      agentMessage: reviewText.unclearAgentMessage,
+      userPrompt: reviewText.userPrompt,
     };
   }
 
   return {
     ...base,
     outcome: "allow",
-    auditRationale:
-      "Static preview container is bounded to an existing /workspace directory with index.html, within size limits, no suspicious files, and user authorization is sufficient.",
-    agentMessage: "Static preview container was approved by the control-plane gatekeeper.",
+    auditRationale: reviewText.allowAuditRationale,
+    agentMessage: reviewText.allowAgentMessage,
     userPrompt: null,
   };
 }
 
 function localPolicyReview({ action, args, context, evidence }) {
   if (action === "preview.container.createStaticSite" || action === "preview.container.updateStaticSite") {
-    return localReviewStaticPreview({ args, context, evidence });
+    return localReviewStaticPreview({ action, args, context, evidence });
   }
   return {
     outcome: "escalate_to_user",
