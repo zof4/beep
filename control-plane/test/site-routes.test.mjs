@@ -78,18 +78,19 @@ test("site update route calls injected updater and returns updated site", async 
     { sourcePath: "/workspace/new-site" },
   );
   const response = captureResponse();
+  const store = {
+    getSite(siteId) {
+      assert.equal(siteId, "demo");
+      return site;
+    },
+  };
 
   await handleSiteRoute({
     request: req,
     response: response.response,
     pathname: "/api/sites/demo/update",
     url: new URL("http://127.0.0.1/api/sites/demo/update"),
-    store: {
-      getSite(siteId) {
-        assert.equal(siteId, "demo");
-        return site;
-      },
-    },
+    store,
     requireOperatorAuth(requestForAuth) {
       assert.equal(requestForAuth.headers.authorization, "Bearer operator");
     },
@@ -113,4 +114,5 @@ test("site update route calls injected updater and returns updated site", async 
   assert.equal(calls[0].runtimeId, "local");
   assert.equal(calls[0].site, site);
   assert.deepEqual(calls[0].args, { sourcePath: "/workspace/new-site" });
+  assert.equal(calls[0].store, store);
 });
