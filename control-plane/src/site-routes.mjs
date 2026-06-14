@@ -1,7 +1,15 @@
-import { removeStaticSitePreview } from "./static-site-preview.mjs";
-import { sendJson, sendNotFound } from "./http-utils.mjs";
+import { removeStaticSitePreview, updateStaticSitePreview as defaultUpdateStaticSitePreview } from "./static-site-preview.mjs";
+import { readJsonBody, sendJson, sendNotFound } from "./http-utils.mjs";
 
-export async function handleSiteRoute({ request, response, pathname, url, store, requireOperatorAuth }) {
+export async function handleSiteRoute({
+  request,
+  response,
+  pathname,
+  url,
+  store,
+  requireOperatorAuth,
+  updateStaticSitePreview = defaultUpdateStaticSitePreview,
+}) {
   requireOperatorAuth(request);
   const parts = pathname.split("/").filter(Boolean);
   const siteId = parts[2] || null;
@@ -27,6 +35,18 @@ export async function handleSiteRoute({ request, response, pathname, url, store,
 
   if (request.method === "GET" && parts.length === 3) {
     sendJson(response, 200, { ok: true, site });
+    return;
+  }
+
+  if (request.method === "POST" && action === "update") {
+    const body = await readJsonBody(request);
+    const updated = await updateStaticSitePreview({
+      runtimeId: site.runtimeId,
+      site,
+      args: { sourcePath: String(body.sourcePath || site.sourcePath || "") },
+      store,
+    });
+    sendJson(response, 200, { ok: true, site: updated });
     return;
   }
 
