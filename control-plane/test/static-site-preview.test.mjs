@@ -609,6 +609,108 @@ test("static site update preserves site id and swaps to a fresh snapshot and con
   }
 });
 
+test("static site update validation failure leaves existing site untouched", async () => {
+  const originalSpawn = childProcess.spawn;
+  const siteId = `update-invalid-${process.pid}-${Date.now()}`;
+  const oldSnapshotPath = join(STATE_DIR, "static-site-snapshots", `${siteId}-old`);
+  const { dir, cleanup } = tempDir();
+  const source = join(dir, "workspace-site");
+  try {
+    mkdirSync(source, { recursive: true });
+    writeFileSync(join(source, ".env"), "TOKEN=secret\n");
+    mkdirSync(oldSnapshotPath, { recursive: true });
+    writeFileSync(join(oldSnapshotPath, "index.html"), "<h1>old</h1>\n");
+    childProcess.spawn = function spawnShouldNotRun() {
+      throw new Error("docker must not run after validation failure");
+    };
+    syncBuiltinESMExports();
+
+    const { updateStaticSitePreview } = await import(
+      `../src/static-site-preview.mjs?update-validation=${Date.now()}`
+    );
+    await assert.rejects(
+      updateStaticSitePreview({
+        runtimeId: "local",
+        site: {
+          siteId,
+          runtimeId: "local",
+          status: "running",
+          sourcePath: "/workspace/site",
+          snapshotPath: oldSnapshotPath,
+          containerName: `beep-preview-${siteId}`,
+          hostPort: 49170,
+        },
+        args: { sourcePath: "/workspace/site" },
+        store: { upsertSite() { throw new Error("site record must not be updated"); } },
+        sourceHostPath: source,
+        trustedRoot: source,
+      }),
+      /secret or credential/iu,
+    );
+    assert.equal(existsSync(oldSnapshotPath), true);
+  } finally {
+    childProcess.spawn = originalSpawn;
+    syncBuiltinESMExports();
+    rmSync(oldSnapshotPath, { recursive: true, force: true });
+    cleanup();
+  }
+});
+
+test("static site update replacement start failure removes only the new snapshot", async () => {
+  const originalSpawn = childProcess.spawn;
+  const siteId = `update-start-failure-${process.pid}-${Date.now()}`;
+  const oldContainerName = `beep-preview-${siteId}`;
+  const oldSnapshotPath = join(STATE_DIR, "static-site-snapshots", `${siteId}-old`);
+  const { dir, cleanup } = tempDir();
+  const source = join(dir, "workspace-site");
+  try {
+    mkdirSync(source, { recursive: true });
+    writeFileSync(join(source, "index.html"), "<h1>updated</h1>\n");
+    mkdirSync(oldSnapshotPath, { recursive: true });
+    writeFileSync(join(oldSnapshotPath, "index.html"), "<h1>old</h1>\n");
+    const stub = dockerSpawnStubForUpdate({
+      oldContainerName,
+      newContainerPrefix: `beep-preview-${siteId}-r2-`,
+      failOnRun: true,
+    });
+    childProcess.spawn = stub.spawn;
+    syncBuiltinESMExports();
+
+    const { updateStaticSitePreview } = await import(
+      `../src/static-site-preview.mjs?update-start-failure=${Date.now()}`
+    );
+    await assert.rejects(
+      updateStaticSitePreview({
+        runtimeId: "local",
+        site: {
+          siteId,
+          runtimeId: "local",
+          status: "running",
+          sourcePath: "/workspace/site",
+          snapshotPath: oldSnapshotPath,
+          containerName: oldContainerName,
+          hostPort: 49170,
+          revision: 1,
+        },
+        args: { sourcePath: "/workspace/site" },
+        store: { upsertSite() { throw new Error("site record must not be updated"); } },
+        sourceHostPath: source,
+        trustedRoot: source,
+      }),
+      /replacement container failed/iu,
+    );
+    assert.equal(existsSync(oldSnapshotPath), true);
+    const snapshotRoot = join(STATE_DIR, "static-site-snapshots");
+    const leaked = fs.readdirSync(snapshotRoot).filter((entry) => entry.startsWith(`${siteId}-r2-`));
+    assert.deepEqual(leaked, []);
+  } finally {
+    childProcess.spawn = originalSpawn;
+    syncBuiltinESMExports();
+    rmSync(oldSnapshotPath, { recursive: true, force: true });
+    cleanup();
+  }
+});
+
 test("static site update removes replacement container when port lookup fails", async () => {
   const originalSpawn = childProcess.spawn;
   const siteId = `update-port-fail-${process.pid}-${Date.now()}`;
