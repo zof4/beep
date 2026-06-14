@@ -277,3 +277,52 @@ test("approved review-mode sandbox tools execute through sandboxToolCaller", asy
     cleanup();
   }
 });
+
+test("approved static site update executes through the managed preview updater", async () => {
+  const { store, cleanup } = tempStore();
+  try {
+    const broker = new ToolBroker({ store });
+    const approval = store.createApproval({
+      runtimeId: RUNTIME_ID,
+      toolCallId: "call_update_static",
+      action: "preview.container.updateStaticSite",
+      args: { siteId: "demo-site", sourcePath: "/workspace/api-sessions/agent_beep/site" },
+      risk: "high",
+      prompt: "Approve update?",
+      reason: "Tool is configured for review.",
+    });
+    const executing = store.updateApproval(approval.approvalId, { status: "executing" });
+    store.upsertSite({
+      siteId: "demo-site",
+      runtimeId: RUNTIME_ID,
+      status: "running",
+      sourcePath: "/workspace/api-sessions/agent_beep/site",
+      snapshotPath: "/tmp/old-snapshot",
+      containerName: "beep-preview-demo-site",
+      hostPort: 49170,
+      proxyUrl: `${PUBLIC_BASE_URL}/sites/demo-site/`,
+      revision: 1,
+    });
+
+    broker.updateStaticSitePreview = async (input) => {
+      assert.equal(input.runtimeId, RUNTIME_ID);
+      assert.equal(input.site.siteId, "demo-site");
+      assert.deepEqual(input.args, { siteId: "demo-site", sourcePath: "/workspace/api-sessions/agent_beep/site" });
+      return {
+        siteId: "demo-site",
+        status: "running",
+        proxyUrl: `${PUBLIC_BASE_URL}/sites/demo-site/`,
+        directUrl: "http://127.0.0.1:49199/",
+        revision: 2,
+      };
+    };
+
+    const result = await broker.executeApprovedApproval(executing);
+
+    assert.equal(result.siteId, "demo-site");
+    assert.equal(result.revision, 2);
+    assert.equal(result.proxyUrl, `${PUBLIC_BASE_URL}/sites/demo-site/`);
+  } finally {
+    cleanup();
+  }
+});

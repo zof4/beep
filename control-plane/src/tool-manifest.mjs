@@ -147,6 +147,30 @@ export const BUILTIN_TOOL_MANIFEST = [
       },
     },
   },
+  {
+    name: "preview_container_update_static_site",
+    action: "preview.container.updateStaticSite",
+    label: "Update Static Preview Container",
+    description:
+      "Update an existing managed static-site preview from files already changed inside the runtime workspace while preserving the /sites/<siteId>/ URL.",
+    defaultDecision: "review",
+    scopes: ["preview.container.updateStaticSite"],
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["siteId", "sourcePath"],
+      properties: {
+        siteId: {
+          type: "string",
+          description: "Existing managed static preview site id returned by preview_container_create_static_site.",
+        },
+        sourcePath: {
+          type: "string",
+          description: "Absolute runtime workspace path to the updated static site directory.",
+        },
+      },
+    },
+  },
 ];
 
 export const TOOL_MANIFEST = BUILTIN_TOOL_MANIFEST;

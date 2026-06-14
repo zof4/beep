@@ -5,7 +5,7 @@ import {
   PUBLIC_BASE_URL,
   RUNTIME_ID,
 } from "./config.mjs";
-import { createStaticSitePreview } from "./static-site-preview.mjs";
+import { createStaticSitePreview, updateStaticSitePreview } from "./static-site-preview.mjs";
 import { DEFAULT_ALLOWED_SCOPES, TOOL_MANIFEST } from "./tool-manifest.mjs";
 import { ToolBrokerError } from "./tool-broker-error.mjs";
 
@@ -59,6 +59,7 @@ export class ToolBroker {
     this.registry = registry;
     this.webSearch = webSearch;
     this.sandboxToolCaller = sandboxToolCaller;
+    this.updateStaticSitePreview = updateStaticSitePreview;
     this.toolsByAction = new Map(TOOL_MANIFEST.map((tool) => [tool.action, tool]));
   }
 
@@ -345,6 +346,19 @@ export class ToolBroker {
         runtimeId: approval.runtimeId,
         args: approval.args || {},
         approvalId: approval.approvalId,
+        store: this.store,
+      });
+    }
+    if (approval.action === "preview.container.updateStaticSite") {
+      const siteId = approval.args?.siteId;
+      const site = siteId ? this.store.getSite(siteId) : null;
+      if (!site) {
+        throw new ToolBrokerError(`Unknown siteId: ${siteId}`, 404);
+      }
+      return this.updateStaticSitePreview({
+        runtimeId: approval.runtimeId,
+        site,
+        args: approval.args || {},
         store: this.store,
       });
     }
