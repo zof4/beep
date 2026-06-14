@@ -3,13 +3,13 @@ import { PassThrough } from "node:stream";
 import test from "node:test";
 import { handleSiteRoute } from "../src/site-routes.mjs";
 
-function request(method, url, headers = {}, body = null) {
+function request(method, url, headers = {}, body = undefined) {
   const req = new PassThrough();
   req.method = method;
   req.url = url;
   req.headers = headers;
   process.nextTick(() => {
-    if (body !== null) req.write(JSON.stringify(body));
+    if (body !== undefined) req.write(JSON.stringify(body));
     req.end();
   });
   return req;
@@ -115,4 +115,178 @@ test("site update route calls injected updater and returns updated site", async 
   assert.equal(calls[0].site, site);
   assert.deepEqual(calls[0].args, { sourcePath: "/workspace/new-site" });
   assert.equal(calls[0].store, store);
+});
+
+test("site update route rejects extra path segments without updating", async () => {
+  const calls = [];
+  const site = {
+    siteId: "demo",
+    runtimeId: "local",
+    status: "running",
+    sourcePath: "/workspace/old-site",
+    proxyUrl: "http://127.0.0.1:8788/sites/demo/",
+  };
+  const req = request(
+    "POST",
+    "/api/sites/demo/update/extra",
+    { authorization: "Bearer operator" },
+    { sourcePath: "/workspace/new-site" },
+  );
+  const response = captureResponse();
+
+  await handleSiteRoute({
+    request: req,
+    response: response.response,
+    pathname: "/api/sites/demo/update/extra",
+    url: new URL("http://127.0.0.1/api/sites/demo/update/extra"),
+    store: {
+      getSite(siteId) {
+        assert.equal(siteId, "demo");
+        return site;
+      },
+    },
+    requireOperatorAuth(requestForAuth) {
+      assert.equal(requestForAuth.headers.authorization, "Bearer operator");
+    },
+    updateStaticSitePreview: async (input) => {
+      calls.push(input);
+      return {
+        ...site,
+        sourcePath: "/workspace/new-site",
+        directUrl: "http://127.0.0.1:49199/",
+        revision: 2,
+      };
+    },
+  });
+
+  const { statusCode, payload } = response.json();
+  assert.equal(statusCode, 404);
+  assert.equal(payload.ok, false);
+  assert.equal(calls.length, 0);
+});
+
+test("site update route falls back to existing source path when body omits sourcePath", async () => {
+  const calls = [];
+  const site = {
+    siteId: "demo",
+    runtimeId: "local",
+    status: "running",
+    sourcePath: "/workspace/old-site",
+    proxyUrl: "http://127.0.0.1:8788/sites/demo/",
+  };
+  const req = request("POST", "/api/sites/demo/update", { authorization: "Bearer operator" }, {});
+  const response = captureResponse();
+
+  await handleSiteRoute({
+    request: req,
+    response: response.response,
+    pathname: "/api/sites/demo/update",
+    url: new URL("http://127.0.0.1/api/sites/demo/update"),
+    store: {
+      getSite(siteId) {
+        assert.equal(siteId, "demo");
+        return site;
+      },
+    },
+    requireOperatorAuth(requestForAuth) {
+      assert.equal(requestForAuth.headers.authorization, "Bearer operator");
+    },
+    updateStaticSitePreview: async (input) => {
+      calls.push(input);
+      return {
+        ...site,
+        directUrl: "http://127.0.0.1:49199/",
+        revision: 2,
+      };
+    },
+  });
+
+  const { statusCode, payload } = response.json();
+  assert.equal(statusCode, 200);
+  assert.equal(payload.ok, true);
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].args, { sourcePath: "/workspace/old-site" });
+});
+
+test("site update route rejects null body without updating", async () => {
+  const calls = [];
+  const site = {
+    siteId: "demo",
+    runtimeId: "local",
+    status: "running",
+    sourcePath: "/workspace/old-site",
+    proxyUrl: "http://127.0.0.1:8788/sites/demo/",
+  };
+  const req = request("POST", "/api/sites/demo/update", { authorization: "Bearer operator" }, null);
+  const response = captureResponse();
+
+  await handleSiteRoute({
+    request: req,
+    response: response.response,
+    pathname: "/api/sites/demo/update",
+    url: new URL("http://127.0.0.1/api/sites/demo/update"),
+    store: {
+      getSite(siteId) {
+        assert.equal(siteId, "demo");
+        return site;
+      },
+    },
+    requireOperatorAuth(requestForAuth) {
+      assert.equal(requestForAuth.headers.authorization, "Bearer operator");
+    },
+    updateStaticSitePreview: async (input) => {
+      calls.push(input);
+      return site;
+    },
+  });
+
+  const { statusCode, payload } = response.json();
+  assert.equal(statusCode, 400);
+  assert.equal(payload.ok, false);
+  assert.match(payload.error, /object/u);
+  assert.equal(calls.length, 0);
+});
+
+test("site update route rejects non-string sourcePath without updating", async () => {
+  const calls = [];
+  const site = {
+    siteId: "demo",
+    runtimeId: "local",
+    status: "running",
+    sourcePath: "/workspace/old-site",
+    proxyUrl: "http://127.0.0.1:8788/sites/demo/",
+  };
+  const req = request(
+    "POST",
+    "/api/sites/demo/update",
+    { authorization: "Bearer operator" },
+    { sourcePath: ["/workspace/site"] },
+  );
+  const response = captureResponse();
+
+  await handleSiteRoute({
+    request: req,
+    response: response.response,
+    pathname: "/api/sites/demo/update",
+    url: new URL("http://127.0.0.1/api/sites/demo/update"),
+    store: {
+      getSite(siteId) {
+        assert.equal(siteId, "demo");
+        return site;
+      },
+    },
+    requireOperatorAuth(requestForAuth) {
+      assert.equal(requestForAuth.headers.authorization, "Bearer operator");
+    },
+    updateStaticSitePreview: async (input) => {
+      calls.push(input);
+      return site;
+    },
+  });
+
+  const { statusCode, payload } = response.json();
+  assert.equal(statusCode, 400);
+  assert.equal(payload.ok, false);
+  assert.match(payload.error, /sourcePath/u);
+  assert.equal(calls.length, 0);
 });

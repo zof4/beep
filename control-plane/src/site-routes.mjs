@@ -38,19 +38,29 @@ export async function handleSiteRoute({
     return;
   }
 
-  if (request.method === "POST" && action === "update") {
+  if (request.method === "POST" && action === "update" && parts.length === 4) {
     const body = await readJsonBody(request);
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      sendJson(response, 400, { ok: false, error: "Site update body must be a JSON object." });
+      return;
+    }
+    if (Object.hasOwn(body, "sourcePath") && body.sourcePath !== "" && typeof body.sourcePath !== "string") {
+      sendJson(response, 400, { ok: false, error: "Site update sourcePath must be a string." });
+      return;
+    }
+    const sourcePath =
+      Object.hasOwn(body, "sourcePath") && body.sourcePath !== "" ? body.sourcePath : site.sourcePath || "";
     const updated = await updateStaticSitePreview({
       runtimeId: site.runtimeId,
       site,
-      args: { sourcePath: String(body.sourcePath || site.sourcePath || "") },
+      args: { sourcePath },
       store,
     });
     sendJson(response, 200, { ok: true, site: updated });
     return;
   }
 
-  if (request.method === "POST" && action === "stop") {
+  if (request.method === "POST" && action === "stop" && parts.length === 4) {
     const stopped = await removeStaticSitePreview({ site, store });
     sendJson(response, 200, { ok: true, site: stopped });
     return;
