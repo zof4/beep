@@ -40,6 +40,7 @@ function pathReferencesForStaticPreview(args = {}) {
   const genericRefs = new Set(["app", "demo", "html", "public", "site", "static", "website", "web"]);
   const sourcePath = typeof args.sourcePath === "string" ? args.sourcePath.trim() : "";
   const siteName = typeof args.siteName === "string" ? args.siteName.trim() : "";
+  const siteId = typeof args.siteId === "string" ? args.siteId.trim() : "";
   if (sourcePath) {
     refs.add(normalizeReferencePath(sourcePath));
     if (sourcePath.startsWith("/workspace/")) {
@@ -48,6 +49,7 @@ function pathReferencesForStaticPreview(args = {}) {
     }
   }
   if (siteName && !genericRefs.has(siteName.toLowerCase())) refs.add(siteName.toLowerCase());
+  if (siteId && !genericRefs.has(siteId.toLowerCase())) refs.add(siteId.toLowerCase());
   return [...refs].filter((ref) => ref.length >= 3);
 }
 
@@ -70,9 +72,14 @@ function textReferencesAnyWorkspacePath(text) {
 
 function hasStaticPreviewIntent(text) {
   return (
-    includesAny(text, ["static preview container", "managed static", "preview_container_create_static_site"]) ||
+    includesAny(text, [
+      "static preview container",
+      "managed static",
+      "preview_container_create_static_site",
+      "preview_container_update_static_site",
+    ]) ||
     (includesAny(text, ["static site", "website", "web page", "html", "site"]) &&
-      includesAny(text, ["preview", "container", "publish", "serve", "show it", "expose", "create"]))
+      includesAny(text, ["preview", "container", "publish", "serve", "show it", "expose", "create", "update", "redeploy"]))
   );
 }
 
@@ -90,6 +97,8 @@ function hasExplicitStaticPreviewDenial(text) {
       "serve",
       "show",
       "expose",
+      "update",
+      "redeploy",
     ]);
   if (!deniesPreviewTarget) return false;
   return [
@@ -97,7 +106,7 @@ function hasExplicitStaticPreviewDenial(text) {
     /\bdon['’]?t\b/u,
     /\bdont\b/u,
     /\bnever\b/u,
-    /\bnot\s+(?:create|start|run|serve|publish|expose|show|request|open)\b/u,
+    /\bnot\s+(?:create|start|run|serve|publish|expose|show|request|open|update|redeploy)\b/u,
     /\bno\b/u,
     /\bwithout\b/u,
     /\bdeny\b/u,
@@ -121,14 +130,19 @@ function authScoreForStaticPreview({ authorizationText, args }) {
 
   for (const unit of units) {
     if (
-      includesAny(unit, ["static preview container", "managed static", "preview_container_create_static_site"]) ||
-      (includesAny(unit, ["static site", "website", "web page", "html"]) &&
-        includesAny(unit, ["preview", "container", "publish", "serve", "show it", "expose"]))
+      includesAny(unit, [
+        "static preview container",
+        "managed static",
+        "preview_container_create_static_site",
+        "preview_container_update_static_site",
+      ]) ||
+      (includesAny(unit, ["static site", "website", "web page", "html", "site"]) &&
+        includesAny(unit, ["preview", "container", "publish", "serve", "show it", "expose", "create", "update", "redeploy"]))
     ) {
       return "medium";
     }
   }
-  if (units.some((unit) => includesAny(unit, ["preview", "website", "site", "html"]))) return "low";
+  if (units.some((unit) => includesAny(unit, ["preview", "website", "site", "html", "update", "redeploy"]))) return "low";
   return "unknown";
 }
 
@@ -226,7 +240,7 @@ function localReviewStaticPreview({ args, context, evidence }) {
 }
 
 function localPolicyReview({ action, args, context, evidence }) {
-  if (action === "preview.container.createStaticSite") {
+  if (action === "preview.container.createStaticSite" || action === "preview.container.updateStaticSite") {
     return localReviewStaticPreview({ args, context, evidence });
   }
   return {
