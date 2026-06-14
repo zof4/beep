@@ -618,6 +618,7 @@ test("static site update validation failure leaves existing site untouched", asy
   try {
     mkdirSync(source, { recursive: true });
     writeFileSync(join(source, ".env"), "TOKEN=secret\n");
+    writeFileSync(join(source, "index.html"), "<h1>updated</h1>\n");
     mkdirSync(oldSnapshotPath, { recursive: true });
     writeFileSync(join(oldSnapshotPath, "index.html"), "<h1>old</h1>\n");
     childProcess.spawn = function spawnShouldNotRun() {
@@ -698,6 +699,10 @@ test("static site update replacement start failure removes only the new snapshot
         trustedRoot: source,
       }),
       /replacement container failed/iu,
+    );
+    assert.deepEqual(
+      stub.calls.map((args) => args[0]),
+      ["run"],
     );
     assert.equal(existsSync(oldSnapshotPath), true);
     const snapshotRoot = join(STATE_DIR, "static-site-snapshots");
