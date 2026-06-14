@@ -19,7 +19,14 @@ function normalizeStageOutput(raw) {
 }
 
 function parseAgentJson(result) {
-  const text = result?.finalText || result?.text || result?.message || "";
+  const text =
+    result?.finalText ??
+    result?.text ??
+    result?.message ??
+    result?.request?.finalText ??
+    result?.request?.text ??
+    result?.request?.message ??
+    "";
   try {
     return JSON.parse(text);
   } catch (error) {

@@ -6,6 +6,7 @@ import { handleApprovalRoute } from "./approval-routes.mjs";
 import { buildBackendStatus } from "./backend-status.mjs";
 import { resolveCodexCredentialFromAuthPath } from "./codex-token.mjs";
 import { parseRequestUrl, readJsonBody, sendJson, sendNotFound, statusFromError } from "./http-utils.mjs";
+import { handleNotesRoute } from "./notes/routes.mjs";
 import { buildLocalProxyOptions } from "./proxy-utils.mjs";
 import { handleRequestRoute } from "./request-routes.mjs";
 import { handleRuntimeAgentRoute, unsafeRuntimeAgentRequestTargetError } from "./runtime-agent-routes.mjs";
@@ -239,6 +240,18 @@ export function createControlPlaneHandler({ store, runtimeManager, toolBroker, l
         requireOperatorAuth,
       });
       return;
+    }
+
+    if (pathname === "/api/notes" || pathname.startsWith("/api/notes/")) {
+      const handled = await handleNotesRoute({
+        request,
+        response,
+        pathname,
+        store,
+        requireOperatorAuth,
+        forwardRuntimeRequest,
+      });
+      if (handled) return;
     }
 
     if (pathname === "/api/agent" || pathname.startsWith("/api/agent/")) {

@@ -330,6 +330,24 @@ test("local agent gateway parses message response", async () => {
   assert.equal(output.comments[0].body, "Message comment.");
 });
 
+test("local agent gateway parses nested runtime request finalText", async () => {
+  const gateway = new NotesBeepGateway({
+    mode: "localAgent",
+    submitToAgent: async () => ({
+      ok: true,
+      request: {
+        finalText: JSON.stringify({
+          comments: [{ targetId: "item_1", body: "Nested comment.", sourceItemIds: ["item_1"] }],
+        }),
+      },
+    }),
+  });
+
+  const output = await gateway.runStage("agentCommentary", { targetItemId: "item_1" });
+
+  assert.equal(output.comments[0].body, "Nested comment.");
+});
+
 test("local agent gateway rejects invalid JSON", async () => {
   const gateway = new NotesBeepGateway({
     mode: "localAgent",
