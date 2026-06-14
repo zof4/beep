@@ -436,6 +436,101 @@ function dockerSpawnStubForUpdate({ oldContainerName, newContainerPrefix, port =
   };
 }
 
+function dockerSpawnStubForPortFailure({ runContainerPrefix }) {
+  const calls = [];
+  let startedContainerName = null;
+  return {
+    calls,
+    spawn(command, args, options) {
+      assert.equal(command, "docker");
+      assert.deepEqual(options.stdio, ["ignore", "pipe", "pipe"]);
+      calls.push(args);
+      const child = new EventEmitter();
+      child.stdout = new PassThrough();
+      child.stderr = new PassThrough();
+      process.nextTick(() => {
+        const subcommand = args[0];
+        if (subcommand === "run") {
+          const nameIndex = args.indexOf("--name");
+          startedContainerName = nameIndex === -1 ? "" : args[nameIndex + 1];
+          assert.match(startedContainerName, new RegExp(`^${runContainerPrefix}`));
+          child.stdout.write("started-container-id\n");
+          child.stdout.end();
+          child.emit("close", 0);
+          return;
+        }
+        if (subcommand === "port") {
+          assert.equal(args[1], startedContainerName);
+          child.stderr.write("port lookup failed\n");
+          child.stderr.end();
+          child.emit("close", 1);
+          return;
+        }
+        if (subcommand === "rm") {
+          assert.equal(args[1], "-f");
+          assert.equal(args[2], startedContainerName);
+          child.stdout.write(startedContainerName);
+          child.stdout.end();
+          child.emit("close", 0);
+          return;
+        }
+        child.stderr.write(`unexpected docker args: ${args.join(" ")}\n`);
+        child.stderr.end();
+        child.emit("close", 1);
+      });
+      return child;
+    },
+  };
+}
+
+test("static site create removes started container when port lookup fails", async () => {
+  const originalSpawn = childProcess.spawn;
+  const workspaceRoot = join(ROOT_DIR, ".beep-dev", "workspace");
+  const sourceName = `port-fail-create-${process.pid}-${Date.now()}`;
+  const source = join(workspaceRoot, sourceName);
+  const siteName = `port-fail-create-${process.pid}`;
+  try {
+    mkdirSync(source, { recursive: true });
+    writeFileSync(join(source, "index.html"), "<h1>demo</h1>\n");
+
+    const upserts = [];
+    const store = {
+      upsertSite(site, auditEvent) {
+        upserts.push({ site, auditEvent });
+      },
+    };
+    const stub = dockerSpawnStubForPortFailure({
+      runContainerPrefix: `beep-preview-${siteName}-`,
+    });
+    childProcess.spawn = stub.spawn;
+    syncBuiltinESMExports();
+
+    const { createStaticSitePreview } = await import(
+      `../src/static-site-preview.mjs?create-port-failure=${Date.now()}`
+    );
+
+    await assert.rejects(
+      createStaticSitePreview({
+        runtimeId: "local",
+        args: { sourcePath: `/workspace/${sourceName}`, siteName },
+        approvalId: "approval-port-failure",
+        store,
+      }),
+      /port lookup failed/iu,
+    );
+
+    assert.deepEqual(
+      stub.calls.map((args) => args[0]),
+      ["run", "port", "rm"],
+    );
+    assert.equal(upserts.length, 0);
+  } finally {
+    childProcess.spawn = originalSpawn;
+    syncBuiltinESMExports();
+    rmSync(source, { recursive: true, force: true });
+  }
+});
+
 test("static site update preserves site id and swaps to a fresh snapshot and container", async () => {
   const originalSpawn = childProcess.spawn;
   const siteId = `update-${process.pid}-${Date.now()}`;
@@ -501,6 +596,75 @@ test("static site update preserves site id and swaps to a fresh snapshot and con
     assert.equal(upserts[0].auditEvent, undefined);
     assert.equal(upserts[1].auditEvent.kind, "site_updated");
     assert.equal(upserts[1].auditEvent.cleanup.oldContainerRemoval, "removed");
+  } finally {
+    childProcess.spawn = originalSpawn;
+    syncBuiltinESMExports();
+    rmSync(oldSnapshotPath, { recursive: true, force: true });
+    cleanup();
+  }
+});
+
+test("static site update removes replacement container when port lookup fails", async () => {
+  const originalSpawn = childProcess.spawn;
+  const siteId = `update-port-fail-${process.pid}-${Date.now()}`;
+  const oldContainerName = `beep-preview-${siteId}`;
+  const { dir, cleanup } = tempDir();
+  const source = join(dir, "workspace-site");
+  const oldSnapshotPath = join(STATE_DIR, "static-site-snapshots", `${siteId}-old`);
+  try {
+    mkdirSync(source, { recursive: true });
+    writeFileSync(join(source, "index.html"), "<h1>updated</h1>\n");
+    mkdirSync(oldSnapshotPath, { recursive: true });
+    writeFileSync(join(oldSnapshotPath, "index.html"), "<h1>old</h1>\n");
+
+    const upserts = [];
+    const store = {
+      upsertSite(site, auditEvent) {
+        upserts.push({ site, auditEvent });
+      },
+    };
+    const stub = dockerSpawnStubForPortFailure({
+      runContainerPrefix: `beep-preview-${siteId}-r2-`,
+    });
+    childProcess.spawn = stub.spawn;
+    syncBuiltinESMExports();
+
+    const { updateStaticSitePreview } = await import(
+      `../src/static-site-preview.mjs?update-port-failure=${Date.now()}`
+    );
+
+    await assert.rejects(
+      updateStaticSitePreview({
+        runtimeId: "local",
+        site: {
+          siteId,
+          runtimeId: "local",
+          status: "running",
+          sourcePath: "/workspace/api-sessions/agent_beep/site",
+          snapshotPath: oldSnapshotPath,
+          snapshotFileCount: 1,
+          snapshotTotalBytes: 13,
+          containerName: oldContainerName,
+          containerId: "old-container-id",
+          hostPort: 49170,
+          proxyUrl: `http://127.0.0.1:8788/sites/${siteId}/`,
+          directUrl: "http://127.0.0.1:49170/",
+          revision: 1,
+        },
+        args: { sourcePath: "/workspace/api-sessions/agent_beep/site" },
+        store,
+        sourceHostPath: source,
+        trustedRoot: source,
+      }),
+      /port lookup failed/iu,
+    );
+
+    assert.deepEqual(
+      stub.calls.map((args) => args[0]),
+      ["run", "port", "rm"],
+    );
+    assert.equal(upserts.length, 0);
+    assert.equal(existsSync(oldSnapshotPath), true);
   } finally {
     childProcess.spawn = originalSpawn;
     syncBuiltinESMExports();

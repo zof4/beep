@@ -376,7 +376,15 @@ function snapshotIdForUpdate({ siteId, revision }) {
   return `${siteId}-r${revision}-${randomBytes(4).toString("hex")}`;
 }
 
-async function startStaticSiteContainer({ runtimeId, siteId, approvalId, revision, snapshotPath, containerName }) {
+async function startStaticSiteContainer({
+  runtimeId,
+  siteId,
+  approvalId,
+  revision,
+  snapshotPath,
+  containerName,
+  onContainerStarted = null,
+}) {
   const runResult = await run("docker", [
     "run",
     "-d",
@@ -405,6 +413,9 @@ async function startStaticSiteContainer({ runtimeId, siteId, approvalId, revisio
     staticServerScript(),
   ]);
   const containerId = runResult.stdout.trim();
+  if (onContainerStarted) {
+    onContainerStarted({ containerId, containerName });
+  }
   const portResult = await run("docker", ["port", containerName, "8080/tcp"]);
   const portMatch = portResult.stdout.match(/127[.]0[.]0[.]1:(\d+)/u);
   if (!portMatch) {
@@ -532,8 +543,10 @@ export async function createStaticSitePreview({ runtimeId, args, approvalId, sto
       revision: 1,
       snapshotPath: snapshot.snapshotPath,
       containerName,
+      onContainerStarted: () => {
+        containerStarted = true;
+      },
     });
-    containerStarted = true;
     const site = {
       siteId,
       runtimeId,
@@ -600,8 +613,10 @@ export async function updateStaticSitePreview({ runtimeId, site, args, store, so
       revision,
       snapshotPath: snapshot.snapshotPath,
       containerName,
+      onContainerStarted: () => {
+        replacementStarted = true;
+      },
     });
-    replacementStarted = true;
     const updatedAt = nowIso();
     const updated = {
       ...site,
