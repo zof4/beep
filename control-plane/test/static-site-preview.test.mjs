@@ -439,8 +439,10 @@ function dockerSpawnStubForUpdate({ oldContainerName, newContainerPrefix, port =
 function dockerSpawnStubForPortFailure({ runContainerPrefix }) {
   const calls = [];
   let startedContainerName = null;
+  let startedSnapshotPath = null;
   return {
     calls,
+    startedSnapshotPath: () => startedSnapshotPath,
     spawn(command, args, options) {
       assert.equal(command, "docker");
       assert.deepEqual(options.stdio, ["ignore", "pipe", "pipe"]);
@@ -454,6 +456,8 @@ function dockerSpawnStubForPortFailure({ runContainerPrefix }) {
           const nameIndex = args.indexOf("--name");
           startedContainerName = nameIndex === -1 ? "" : args[nameIndex + 1];
           assert.match(startedContainerName, new RegExp(`^${runContainerPrefix}`));
+          const volume = args.find((arg) => typeof arg === "string" && arg.endsWith(":/site:ro"));
+          startedSnapshotPath = volume ? volume.slice(0, -":/site:ro".length) : null;
           child.stdout.write("started-container-id\n");
           child.stdout.end();
           child.emit("close", 0);
@@ -524,6 +528,7 @@ test("static site create removes started container when port lookup fails", asyn
       ["run", "port", "rm"],
     );
     assert.equal(upserts.length, 0);
+    assert.equal(existsSync(stub.startedSnapshotPath()), false);
   } finally {
     childProcess.spawn = originalSpawn;
     syncBuiltinESMExports();
@@ -665,10 +670,93 @@ test("static site update removes replacement container when port lookup fails", 
     );
     assert.equal(upserts.length, 0);
     assert.equal(existsSync(oldSnapshotPath), true);
+    assert.equal(existsSync(stub.startedSnapshotPath()), false);
   } finally {
     childProcess.spawn = originalSpawn;
     syncBuiltinESMExports();
     rmSync(oldSnapshotPath, { recursive: true, force: true });
+    cleanup();
+  }
+});
+
+test("static site update keeps replacement assets after state swap if audit write fails", async () => {
+  const originalSpawn = childProcess.spawn;
+  const siteId = `update-audit-fail-${process.pid}-${Date.now()}`;
+  const oldContainerName = `beep-preview-${siteId}`;
+  const { dir, cleanup } = tempDir();
+  const source = join(dir, "workspace-site");
+  const oldSnapshotPath = join(STATE_DIR, "static-site-snapshots", `${siteId}-old`);
+  let replacementSnapshotPath = null;
+  try {
+    mkdirSync(source, { recursive: true });
+    writeFileSync(join(source, "index.html"), "<h1>updated</h1>\n");
+    mkdirSync(oldSnapshotPath, { recursive: true });
+    writeFileSync(join(oldSnapshotPath, "index.html"), "<h1>old</h1>\n");
+
+    const upserts = [];
+    const store = {
+      upsertSite(site, auditEvent) {
+        upserts.push({ site, auditEvent });
+        if (upserts.length === 1) {
+          replacementSnapshotPath = site.snapshotPath;
+          return;
+        }
+        throw new Error("audit write failed");
+      },
+    };
+    const stub = dockerSpawnStubForUpdate({
+      oldContainerName,
+      newContainerPrefix: `beep-preview-${siteId}-r2-`,
+      port: 49188,
+    });
+    childProcess.spawn = stub.spawn;
+    syncBuiltinESMExports();
+
+    const { updateStaticSitePreview } = await import(
+      `../src/static-site-preview.mjs?update-audit-failure=${Date.now()}`
+    );
+
+    await assert.rejects(
+      updateStaticSitePreview({
+        runtimeId: "local",
+        site: {
+          siteId,
+          runtimeId: "local",
+          status: "running",
+          sourcePath: "/workspace/api-sessions/agent_beep/site",
+          snapshotPath: oldSnapshotPath,
+          snapshotFileCount: 1,
+          snapshotTotalBytes: 13,
+          containerName: oldContainerName,
+          containerId: "old-container-id",
+          hostPort: 49170,
+          proxyUrl: `http://127.0.0.1:8788/sites/${siteId}/`,
+          directUrl: "http://127.0.0.1:49170/",
+          revision: 1,
+        },
+        args: { sourcePath: "/workspace/api-sessions/agent_beep/site" },
+        store,
+        sourceHostPath: source,
+        trustedRoot: source,
+      }),
+      /audit write failed/iu,
+    );
+
+    const rmCalls = stub.calls.filter((args) => args[0] === "rm");
+    assert.equal(rmCalls.length, 1);
+    assert.equal(rmCalls[0][2], oldContainerName);
+    assert.equal(upserts.length, 2);
+    assert.equal(upserts[0].auditEvent, undefined);
+    assert.equal(upserts[1].auditEvent.kind, "site_updated");
+    assert.equal(existsSync(oldSnapshotPath), false);
+    assert.equal(readFileSync(join(replacementSnapshotPath, "index.html"), "utf8"), "<h1>updated</h1>\n");
+  } finally {
+    childProcess.spawn = originalSpawn;
+    syncBuiltinESMExports();
+    rmSync(oldSnapshotPath, { recursive: true, force: true });
+    if (replacementSnapshotPath) {
+      rmSync(replacementSnapshotPath, { recursive: true, force: true });
+    }
     cleanup();
   }
 });

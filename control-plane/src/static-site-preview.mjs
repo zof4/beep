@@ -605,6 +605,7 @@ export async function updateStaticSitePreview({ runtimeId, site, args, store, so
   });
 
   let replacementStarted = false;
+  let committed = false;
   try {
     const started = await startStaticSiteContainer({
       runtimeId,
@@ -646,6 +647,7 @@ export async function updateStaticSitePreview({ runtimeId, site, args, store, so
     };
 
     store.upsertSite(updated);
+    committed = true;
     const cleanup = await cleanupOldStaticSiteAssets(site);
     const finalUpdated = {
       ...updated,
@@ -664,10 +666,12 @@ export async function updateStaticSitePreview({ runtimeId, site, args, store, so
       ...finalUpdated,
     };
   } catch (error) {
-    if (replacementStarted) {
-      await run("docker", ["rm", "-f", containerName]).catch(() => null);
+    if (!committed) {
+      if (replacementStarted) {
+        await run("docker", ["rm", "-f", containerName]).catch(() => null);
+      }
+      removeStaticSiteSnapshot(snapshot.snapshotPath);
     }
-    removeStaticSiteSnapshot(snapshot.snapshotPath);
     throw error;
   }
 }
