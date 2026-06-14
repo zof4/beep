@@ -326,3 +326,19 @@ test("approved static site update executes through the managed preview updater",
     cleanup();
   }
 });
+
+test("builtin manifest exposes static site update as a reviewed tool", () => {
+  const { store, cleanup } = tempStore();
+  try {
+    const tool = new ToolBroker({ store })
+      .manifest()
+      .tools.find((candidate) => candidate.action === "preview.container.updateStaticSite");
+
+    assert.equal(tool.name, "preview_container_update_static_site");
+    assert.equal(tool.defaultDecision, "review");
+    assert.deepEqual(tool.scopes, ["preview.container.updateStaticSite"]);
+    assert.deepEqual(tool.inputSchema.required, ["siteId", "sourcePath"]);
+  } finally {
+    cleanup();
+  }
+});
