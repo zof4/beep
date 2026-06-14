@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Deterministic replay smoke:
+#   ./scripts/smoke-test-beep-notes-backbone.sh
+#
+# Optional live local-Beep smoke:
+#   BEEP_NOTES_LIVE=1 ./scripts/smoke-test-beep-notes-backbone.sh
+#
+# Live mode requires a working local Beep runtime and Codex auth. Replay mode is
+# the normal CI-safe check.
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 NODE_BIN="${NODE_BIN:-node}"
 if ! command -v "$NODE_BIN" >/dev/null 2>&1 && [ -x /opt/homebrew/bin/node ]; then
@@ -142,12 +151,21 @@ cat >"$NOTE_BODY_FILE" <<'JSON'
 }
 JSON
 
-cat >"$ASK_BODY_FILE" <<'JSON'
+if [[ "${BEEP_NOTES_LIVE:-0}" == "1" ]]; then
+  cat >"$ASK_BODY_FILE" <<'JSON'
+{
+  "reviewPolicy": "autopilot",
+  "beepMode": "localAgent"
+}
+JSON
+else
+  cat >"$ASK_BODY_FILE" <<'JSON'
 {
   "beepMode": "replay",
   "reviewPolicy": "autopilot"
 }
 JSON
+fi
 
 printf '{}\n' >"$EMPTY_BODY_FILE"
 
