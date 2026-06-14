@@ -6,6 +6,7 @@ import { handleApprovalRoute } from "./approval-routes.mjs";
 import { buildBackendStatus } from "./backend-status.mjs";
 import { resolveCodexCredentialFromAuthPath } from "./codex-token.mjs";
 import { parseRequestUrl, readJsonBody, sendJson, sendNotFound, statusFromError } from "./http-utils.mjs";
+import { handleNotesDemoRoute } from "./notes/demo-web.mjs";
 import { handleNotesRoute } from "./notes/routes.mjs";
 import { buildLocalProxyOptions } from "./proxy-utils.mjs";
 import { handleRequestRoute } from "./request-routes.mjs";
@@ -115,6 +116,10 @@ export function createControlPlaneHandler({ store, runtimeManager, toolBroker, l
     if (unsafeAgentPathError) {
       sendJson(response, 400, { ok: false, error: unsafeAgentPathError });
       return;
+    }
+
+    if (pathname === "/notes" || pathname.startsWith("/notes/")) {
+      if (handleNotesDemoRoute({ request, response, pathname })) return;
     }
 
     if (request.method === "GET" && pathname === "/health") {
