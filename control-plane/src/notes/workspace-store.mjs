@@ -194,6 +194,13 @@ export class NotesWorkspaceStore {
           source.updatedAt = derived.createdAt;
         }
       }
+      for (const itemId of derived.sourceItemIds) {
+        if (Object.hasOwn(workspace.items, itemId)) {
+          const item = workspace.items[itemId];
+          appendUniqueOwnArray(item, "derivedArtifactIds", derived.id);
+          item.updatedAt = derived.createdAt;
+        }
+      }
       return derived;
     });
   }

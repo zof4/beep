@@ -757,6 +757,25 @@ test("workspace store creates derived artifacts linked to sources", () => {
   }
 });
 
+test("workspace store creates derived artifacts linked to source items", () => {
+  const { notesStore, cleanup } = tempNotesStore();
+  try {
+    const item = notesStore.createItem({ type: "note", title: "Inbox", body: "Call Sam" });
+    const derived = notesStore.createDerivedArtifact({
+      kind: "readableRendition",
+      body: "Clean note",
+      sourceItemIds: [item.id],
+    });
+    const workspace = notesStore.readWorkspace();
+
+    assert.equal(workspace.derivedArtifacts[derived.id].body, "Clean note");
+    assert.deepEqual(workspace.derivedArtifacts[derived.id].sourceItemIds, [item.id]);
+    assert.deepEqual(workspace.items[item.id].derivedArtifactIds, [derived.id]);
+  } finally {
+    cleanup();
+  }
+});
+
 test("workspace store source linkage ignores inherited derived artifact id getters", () => {
   withCleanPrototypeWorkspaceLinks(() => {
     const { notesStore, stateStore, cleanup } = tempNotesStore();

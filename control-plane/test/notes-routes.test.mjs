@@ -106,6 +106,32 @@ test("ask-beep route attaches replay comments and proposals", async () => {
   }
 });
 
+test("ask-beep route does not leak locked item body through replay output", async () => {
+  const { handler, auth, cleanup } = tempHandler();
+  const secret = "SECRET-BEEP-NOTES-LOCKED-BODY-9361";
+  try {
+    const created = await call(
+      handler,
+      "POST",
+      "/api/notes/items",
+      { type: "note", title: "Private note", body: secret },
+      auth,
+    );
+    const itemId = created.payload.item.id;
+    await call(handler, "POST", `/api/notes/items/${itemId}/lock`, {}, auth);
+
+    const asked = await call(handler, "POST", `/api/notes/items/${itemId}/ask-beep`, { reviewPolicy: "autopilot" }, auth);
+
+    assert.equal(asked.statusCode, 200);
+    assert.equal(asked.payload.run.status, "completed");
+    assert.equal(JSON.stringify(asked.payload).includes(secret), false);
+    assert.match(asked.payload.comments[0].body, /locked|private|hidden/i);
+    assert.match(asked.payload.proposals[0].body, /locked|private|hidden/i);
+  } finally {
+    cleanup();
+  }
+});
+
 test("ask-beep route localAgent parses nested runtime finalText", async () => {
   const runtimeCalls = [];
   const { handler, auth, cleanup } = tempHandler({
@@ -147,6 +173,55 @@ test("ask-beep route localAgent parses nested runtime finalText", async () => {
     assert.equal(asked.payload.run.status, "completed");
     assert.equal(asked.payload.comments[0].body, "Nested runtime comment.");
     assert.equal(asked.payload.proposals[0].title, "Nested runtime todo");
+  } finally {
+    cleanup();
+  }
+});
+
+test("item read route returns item-derived artifacts from ask-beep materialization", async () => {
+  const { handler, auth, cleanup } = tempHandler({
+    proxyToRuntime: async (path, options) => {
+      const { message } = JSON.parse(options.body);
+      const stageOutput = message.includes("agentCommentary")
+        ? {
+            comments: [{ targetId: "item_derived", body: "Derived artifact comment.", sourceItemIds: ["item_derived"] }],
+          }
+        : message.includes("draftExtraction")
+          ? {
+              proposals: [
+                { kind: "todo", title: "Derived artifact todo", body: "Use the derivation.", sourceItemIds: ["item_derived"] },
+              ],
+            }
+          : message.includes("readContext")
+            ? {
+                derivedArtifacts: [{ kind: "readableRendition", body: "Item-derived readable text." }],
+              }
+            : {};
+      return { ok: true, finalText: JSON.stringify(stageOutput) };
+    },
+  });
+  try {
+    const created = await call(
+      handler,
+      "POST",
+      "/api/notes/items",
+      { id: "item_derived", type: "note", title: "Inbox", body: "Call Sam" },
+      auth,
+    );
+    const asked = await call(
+      handler,
+      "POST",
+      `/api/notes/items/${created.payload.item.id}/ask-beep`,
+      { beepMode: "localAgent", reviewPolicy: "autopilot" },
+      auth,
+    );
+    const read = await call(handler, "GET", `/api/notes/items/${created.payload.item.id}`, null, auth);
+
+    assert.equal(asked.statusCode, 200);
+    assert.equal(asked.payload.derivedArtifacts.length, 1);
+    assert.equal(read.statusCode, 200);
+    assert.deepEqual(read.payload.item.derivedArtifactIds, [asked.payload.derivedArtifacts[0].id]);
+    assert.equal(read.payload.derivedArtifacts[0].body, "Item-derived readable text.");
   } finally {
     cleanup();
   }
@@ -205,7 +280,13 @@ test("notes routes translate non-pending proposal actions to 409", async () => {
   const { handler, auth, cleanup } = tempHandler();
   try {
     const created = await call(handler, "POST", "/api/notes/items", { type: "note", title: "Inbox", body: "Call Sam" }, auth);
-    const asked = await call(handler, "POST", `/api/notes/items/${created.payload.item.id}/ask-beep`, {}, auth);
+    const asked = await call(
+      handler,
+      "POST",
+      `/api/notes/items/${created.payload.item.id}/ask-beep`,
+      { reviewPolicy: "autopilot" },
+      auth,
+    );
     const proposalId = asked.payload.proposals[0].id;
     await call(handler, "POST", `/api/notes/proposals/${proposalId}/accept`, {}, auth);
     const acceptedAgain = await call(handler, "POST", `/api/notes/proposals/${proposalId}/accept`, {}, auth);
@@ -243,12 +324,54 @@ test("proposal accept route promotes a todo", async () => {
   const { handler, auth, cleanup } = tempHandler();
   try {
     const created = await call(handler, "POST", "/api/notes/items", { type: "note", title: "Inbox", body: "Call Sam" }, auth);
-    const asked = await call(handler, "POST", `/api/notes/items/${created.payload.item.id}/ask-beep`, {}, auth);
+    const asked = await call(
+      handler,
+      "POST",
+      `/api/notes/items/${created.payload.item.id}/ask-beep`,
+      { reviewPolicy: "autopilot" },
+      auth,
+    );
     const proposalId = asked.payload.proposals[0].id;
     const accepted = await call(handler, "POST", `/api/notes/proposals/${proposalId}/accept`, {}, auth);
 
     assert.equal(accepted.statusCode, 200);
     assert.equal(accepted.payload.item.type, "todo");
+  } finally {
+    cleanup();
+  }
+});
+
+test("proposal accept route maps non-promotable proposal kinds to client errors", async () => {
+  const { handler, auth, cleanup } = tempHandler({
+    proxyToRuntime: async (path, options) => {
+      const { message } = JSON.parse(options.body);
+      const stageOutput = message.includes("draftExtraction")
+        ? {
+            proposals: [{ kind: "comment", title: "Comment only", body: "Do not promote.", sourceItemIds: ["item_comment"] }],
+          }
+        : {};
+      return { ok: true, finalText: JSON.stringify(stageOutput) };
+    },
+  });
+  try {
+    const created = await call(
+      handler,
+      "POST",
+      "/api/notes/items",
+      { id: "item_comment", type: "note", title: "Inbox", body: "Call Sam" },
+      auth,
+    );
+    const asked = await call(
+      handler,
+      "POST",
+      `/api/notes/items/${created.payload.item.id}/ask-beep`,
+      { beepMode: "localAgent", reviewPolicy: "autopilot" },
+      auth,
+    );
+    const accepted = await call(handler, "POST", `/api/notes/proposals/${asked.payload.proposals[0].id}/accept`, {}, auth);
+
+    assert.equal(accepted.statusCode, 400);
+    assert.match(accepted.payload.error, /proposal kind cannot be promoted: comment/);
   } finally {
     cleanup();
   }

@@ -66,7 +66,7 @@ function shouldPause(run, completedStageName) {
   if (run.reviewPolicy === "stepReview") return { pause: true, reason: "step_review" };
   if (
     run.reviewPolicy === "firstReadCheckpoint" &&
-    completedStageName === "readableRendition"
+    (completedStageName === "readableRendition" || completedStageName === "readContext")
   ) {
     return { pause: true, reason: "first_read_checkpoint" };
   }

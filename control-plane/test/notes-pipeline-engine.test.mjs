@@ -71,6 +71,27 @@ test("firstReadCheckpoint pauses after readable rendition", async () => {
   assert.equal(result.outputs.derivedArtifacts.length, 1);
 });
 
+test("firstReadCheckpoint pauses askBeep after read context", async () => {
+  const run = createPipelineRun({
+    id: "run_ask_read_checkpoint",
+    kind: "askBeep",
+    reviewPolicy: "firstReadCheckpoint",
+    targetItemId: "item_note",
+    createdAt: NOW,
+  });
+
+  const result = await runPipeline(run, { gateway: fakeGateway(), now: () => NOW });
+
+  assert.equal(result.status, "paused");
+  assert.equal(result.pauseReason, "first_read_checkpoint");
+  assert.equal(result.currentStage, "agentCommentary");
+  assert.equal(result.stages[0].name, "readContext");
+  assert.equal(result.stages[0].status, "completed");
+  assert.equal(result.stages[1].status, "pending");
+  assert.equal(result.outputs.comments.length, 0);
+  assert.equal(result.outputs.proposals.length, 0);
+});
+
 test("autopilot completes all note-processing stages", async () => {
   const run = createPipelineRun({
     id: "run_3",

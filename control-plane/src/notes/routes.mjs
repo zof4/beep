@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { readJsonBody, sendJson } from "../http-utils.mjs";
 import { NotesBeepGateway } from "./beep-gateway.mjs";
 import { createPipelineRun, runPipeline } from "./pipeline-engine.mjs";
+import { readItemForBeep } from "./workspace-domain.mjs";
 import { NotesWorkspaceStore } from "./workspace-store.mjs";
 
 function newRouteId(prefix) {
@@ -32,6 +33,7 @@ function expectedNotesErrorStatus(error) {
   const message = errorMessage(error);
   if (/^unknown (?:item|proposal|source artifact|run): /u.test(message)) return 404;
   if (/^proposal is not pending: /u.test(message)) return 409;
+  if (/^proposal kind cannot be promoted: /u.test(message)) return 400;
   if (/^duplicate /u.test(message)) return 409;
   if (
     /(?: is required| must be | entries must be |^unsupported |^unsafe state map key: |^invalid )/u.test(message)
@@ -56,13 +58,17 @@ function titleFromText(text, fallback) {
 
 function replayFor(item) {
   const title = titleFromText(item.title || item.body, "Follow up on note");
+  const body = item.contentHidden ? "This item's content is locked and hidden from Beep." : item.body || title;
+  const commentBody = item.contentHidden
+    ? "This item is locked, so Beep can only suggest a privacy-safe follow-up."
+    : "This note has a clear follow-up Beep can help track.";
   return {
     readContext: {},
     agentCommentary: {
       comments: [
         {
           targetId: item.id,
-          body: "This note has a clear follow-up Beep can help track.",
+          body: commentBody,
           sourceItemIds: [item.id],
         },
       ],
@@ -72,7 +78,7 @@ function replayFor(item) {
         {
           kind: "todo",
           title,
-          body: item.body || title,
+          body,
           sourceItemIds: [item.id],
           confidence: 0.86,
         },
@@ -240,7 +246,7 @@ export async function handleNotesRoute({ request, response, pathname, store, req
     const result = await runNotesPipeline({
       notesStore,
       body,
-      replay: replayFor(item),
+      replay: replayFor(readItemForBeep(item)),
       forwardRuntimeRequest,
       runInput: { kind: "askBeep", targetItemId: item.id },
     });
