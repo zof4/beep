@@ -125,8 +125,17 @@ async function callRaw(handler, method, url, body, headers) {
   return captured.json();
 }
 
+function runtimeSubmitBody(body) {
+  const submitBody = typeof body === "string" ? JSON.parse(body) : body;
+  assert.ok(
+    submitBody && typeof submitBody === "object" && !Array.isArray(submitBody),
+    "runtime submit body should be an object",
+  );
+  return submitBody;
+}
+
 function runtimePromptFromSubmitBody(body) {
-  const { input } = JSON.parse(body);
+  const { input } = runtimeSubmitBody(body);
   assert.ok(Array.isArray(input), "runtime submit body should contain native input parts");
   return input.find((part) => part?.type === "text")?.text || "";
 }
@@ -245,7 +254,7 @@ test("ask-beep route localAgent parses nested runtime finalText", async () => {
 
     assert.equal(asked.statusCode, 200);
     assert.equal(runtimeCalls.every((callRecord) => callRecord.path === "/agent/submit"), true);
-    const submitted = JSON.parse(runtimeCalls[0].options.body);
+    const submitted = runtimeSubmitBody(runtimeCalls[0].options.body);
     assert.equal(Object.hasOwn(submitted, "message"), false);
     assert.equal(submitted.waitForCompletion, true);
     assert.equal(asked.payload.run.status, "completed");
@@ -877,7 +886,7 @@ test("capture processing route localAgent forwards image capture as localImage i
     notesWorkspaceHostPath: workspaceDir,
     proxyToRuntime: async (path, options) => {
       assert.equal(path, "/agent/submit");
-      const body = JSON.parse(options.body);
+      const body = runtimeSubmitBody(options.body);
       runtimeBodies.push(body);
       const message = body.input.find((part) => part?.type === "text")?.text || "";
       const stageOutput = message.includes("readableRendition")
@@ -928,6 +937,101 @@ test("capture processing route localAgent forwards image capture as localImage i
   }
 });
 
+test("capture processing route includes active handwriting calibration samples", async () => {
+  const runtimeBodies = [];
+  const converterCalls = [];
+  const workspaceDir = mkdtempSync(join(tmpdir(), "beep-notes-workspace-test-"));
+  const samplePng = Buffer.from("converted-sample-png");
+  const captureJpeg = Buffer.from("converted-capture-jpeg");
+  const { handler, auth, cleanup } = tempHandler({
+    notesWorkspaceHostPath: workspaceDir,
+    notesImageConverter: async (input) => {
+      converterCalls.push(input);
+      if (input.targetFormat === "png" || input.targetMimeType === "image/png") {
+        return { mimeType: "image/png", data: samplePng };
+      }
+      return { mimeType: "image/jpeg", data: captureJpeg };
+    },
+    proxyToRuntime: async (path, options) => {
+      assert.equal(path, "/agent/submit");
+      const body = runtimeSubmitBody(options.body);
+      runtimeBodies.push(body);
+      return {
+        ok: true,
+        finalText: JSON.stringify({
+          derivedArtifacts: [
+            {
+              kind: "readableRendition",
+              body: "Current capture says call Sam after lunch.",
+              sourceArtifactIds: ["src_handwriting_current"],
+            },
+          ],
+        }),
+      };
+    },
+  });
+  try {
+    const sampleBoundary = "beep-notes-handwriting-context-sample";
+    const sampleBody = multipartBody({
+      boundary: sampleBoundary,
+      fields: {
+        profileId: "profile_default",
+        promptId: "hw_prompt_v1",
+        referenceText: "Monday Jan 5 at 10:30 AM - Call Sam about the research plan.",
+      },
+      file: { filename: "sample.HEIC", mimeType: "image/heic", data: Buffer.from("sample-heic") },
+    });
+    const sample = await callRaw(handler, "POST", "/api/notes/handwriting/samples", sampleBody, {
+      ...auth,
+      "content-type": `multipart/form-data; boundary=${sampleBoundary}`,
+      "content-length": String(sampleBody.byteLength),
+    });
+
+    const captureBoundary = "beep-notes-handwriting-context-capture";
+    const captureBody = multipartBody({
+      boundary: captureBoundary,
+      fields: { id: "src_handwriting_current", kind: "image", body: "Whiteboard capture", detail: "auto" },
+      file: { filename: "capture.HEIC", mimeType: "image/heic", data: Buffer.from("capture-heic") },
+    });
+    const source = await callRaw(handler, "POST", "/api/notes/captures", captureBody, {
+      ...auth,
+      "content-type": `multipart/form-data; boundary=${captureBoundary}`,
+      "content-length": String(captureBody.byteLength),
+    });
+    const processed = await call(
+      handler,
+      "POST",
+      `/api/notes/captures/${source.payload.source.id}/process`,
+      { beepMode: "localAgent", reviewPolicy: "stepReview", useHandwritingCalibration: true },
+      auth,
+    );
+
+    assert.equal(sample.statusCode, 200);
+    assert.equal(source.statusCode, 200);
+    assert.equal(processed.statusCode, 200);
+    assert.equal(converterCalls.length, 2);
+    assert.equal(sample.payload.sample.image.mimeType, "image/png");
+    assert.equal(source.payload.source.media.files[0].mimeType, "image/jpeg");
+    assert.equal(runtimeBodies.length, 1);
+    const firstInput = runtimeBodies[0].input;
+    assert.ok(Array.isArray(firstInput), "runtime input should be an array");
+    const localImages = firstInput.filter((part) => part?.type === "localImage");
+    assert.deepEqual(localImages, [
+      { type: "localImage", path: sample.payload.sample.image.workspacePath, detail: "original" },
+      { type: "localImage", path: source.payload.source.media.files[0].workspacePath, detail: "auto" },
+    ]);
+    const promptText = firstInput
+      .filter((part) => part?.type === "text")
+      .map((part) => part.text)
+      .join("\n");
+    assert.match(promptText, /Calibration sample/u);
+    assert.match(promptText, /Current capture to transcribe follows/u);
+  } finally {
+    cleanup();
+    rmSync(workspaceDir, { recursive: true, force: true });
+  }
+});
+
 test("capture processing route converts HEIF multipart capture to JPEG workspace localImage", async () => {
   const runtimeBodies = [];
   const converterCalls = [];
@@ -942,7 +1046,7 @@ test("capture processing route converts HEIF multipart capture to JPEG workspace
     },
     proxyToRuntime: async (path, options) => {
       assert.equal(path, "/agent/submit");
-      const body = JSON.parse(options.body);
+      const body = runtimeSubmitBody(options.body);
       runtimeBodies.push(body);
       const message = body.input.find((part) => part?.type === "text")?.text || "";
       const stageOutput = message.includes("readableRendition")

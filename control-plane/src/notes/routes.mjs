@@ -3,6 +3,7 @@ import { normalizeBeepInput } from "../../../shared/native-input.mjs";
 import { readJsonBody, sendJson } from "../http-utils.mjs";
 import { NotesBeepGateway } from "./beep-gateway.mjs";
 import {
+  buildHandwritingContext,
   DEFAULT_HANDWRITING_PROFILE_ID,
   DEFAULT_HANDWRITING_PROMPT_ID,
 } from "./handwriting-domain.mjs";
@@ -289,6 +290,14 @@ async function imageInputPartsForSource(source, options = {}) {
   if (source?.kind !== "image") return [];
   const files = Array.isArray(source.media?.files) ? source.media.files : [];
   return Promise.all(files.map((file, index) => localImageInputPartForMediaFile(file, index, options)));
+}
+
+function handwritingContextForWorkspace(workspace, enabled) {
+  return buildHandwritingContext({
+    enabled,
+    profile: workspace.handwritingProfiles?.[DEFAULT_HANDWRITING_PROFILE_ID],
+    samples: workspace.handwritingSamples || {},
+  });
 }
 
 function replayFor(item) {
@@ -597,13 +606,17 @@ export async function handleNotesRoute({
       sendUnknown(response, "source artifact", parts[3]);
       return true;
     }
+    const handwriting = handwritingContextForWorkspace(workspace, body.useHandwritingCalibration === true);
     const result = await runNotesPipeline({
       notesStore,
       body,
       replay: replayForSource(source),
       forwardRuntimeRequest,
       runInput: { kind: "processNote", sourceArtifactId: source.id },
-      context: { attachments: await imageInputPartsForSource(source, { convertHeif: notesImageConverter }) },
+      context: {
+        attachments: await imageInputPartsForSource(source, { convertHeif: notesImageConverter }),
+        handwriting,
+      },
     });
     sendJson(response, 200, { ok: true, ...result });
     return true;
