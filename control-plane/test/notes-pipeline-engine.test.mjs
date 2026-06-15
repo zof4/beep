@@ -289,3 +289,50 @@ test("pipeline preserves handwriting metadata separately from derived artifacts"
   assert.deepEqual(result.outputs.handwriting.sampleIdsUsed, ["hw_sample_1"]);
   assert.deepEqual(result.outputs.handwriting.uncertainSpans[0].alternatives, ["5am"]);
 });
+
+test("pipeline preserves omitted handwriting metadata and replaces explicit later metadata", async () => {
+  const run = createPipelineRun({
+    id: "run_handwriting_merge",
+    kind: "processNote",
+    reviewPolicy: "autopilot",
+    sourceArtifactId: "src_current",
+    createdAt: NOW,
+  });
+  const handwritingA = {
+    sampleIdsUsed: ["hw_sample_a"],
+    uncertainSpans: [{ text: "Sam", alternatives: ["5am"], reason: "ambiguous S" }],
+  };
+  const handwritingB = {
+    sampleIdsUsed: ["hw_sample_b"],
+    uncertainSpans: [{ text: "plans", alternatives: ["pants"], reason: "ambiguous word" }],
+  };
+  const observed = [];
+  const gateway = {
+    async runStage(stage, context) {
+      observed.push({ stage, handwriting: structuredClone(context.outputs.handwriting) });
+      if (stage === "readableRendition") {
+        return {
+          derivedArtifacts: [{ kind: "readableRendition", body: "Call Sam.", sourceArtifactIds: ["src_current"] }],
+          handwriting: handwritingA,
+        };
+      }
+      if (stage === "formattedNote") {
+        return {
+          derivedArtifacts: [{ kind: "formattedNote", body: "Call Sam.", sourceArtifactIds: ["src_current"] }],
+        };
+      }
+      if (stage === "draftExtraction") {
+        return { handwriting: handwritingB };
+      }
+      return {};
+    },
+  };
+
+  const result = await runPipeline(run, { gateway, now: () => NOW });
+
+  assert.equal(result.status, "completed");
+  assert.deepEqual(observed.find((entry) => entry.stage === "formattedNote").handwriting, handwritingA);
+  assert.deepEqual(observed.find((entry) => entry.stage === "agentCommentary").handwriting, handwritingA);
+  assert.deepEqual(observed.find((entry) => entry.stage === "plannerPass").handwriting, handwritingB);
+  assert.deepEqual(result.outputs.handwriting, handwritingB);
+});

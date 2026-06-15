@@ -440,8 +440,29 @@ test("local agent gateway sends handwriting calibration samples before current i
   assert.equal(output.handwriting.sampleIdsUsed[0], "hw_sample_1");
   const input = calls[0].input;
   assert.equal(input.filter((part) => part.type === "localImage").length, 2);
-  assert.equal(input.findIndex((part) => part.path === "notes-captures/sample.png") < input.findIndex((part) => part.path === "notes-captures/current.png"), true);
+  const sampleImageIndex = input.findIndex((part) => part.path === "notes-captures/sample.png");
+  const currentImageIndex = input.findIndex((part) => part.path === "notes-captures/current.png");
+  assert.equal(sampleImageIndex >= 0, true);
+  assert.equal(currentImageIndex >= 0, true);
+  assert.equal(sampleImageIndex < currentImageIndex, true);
   assert.match(input.map((part) => part.text || "").join("\n"), /Calibration sample hw_sample_1 exact reference text/u);
+});
+
+test("validateStageOutput omits absent handwriting metadata", () => {
+  const output = validateStageOutput({
+    derivedArtifacts: [{ kind: "readableRendition", body: "Power pants", sourceArtifactIds: ["src_current"] }],
+  });
+
+  assert.equal(Object.hasOwn(output, "handwriting"), false);
+});
+
+test("validateStageOutput treats null handwriting metadata as absent", () => {
+  const output = validateStageOutput({
+    derivedArtifacts: [{ kind: "readableRendition", body: "Power pants", sourceArtifactIds: ["src_current"] }],
+    handwriting: null,
+  });
+
+  assert.equal(output.handwriting, null);
 });
 
 test("validateStageOutput accepts handwriting uncertainty metadata", () => {
