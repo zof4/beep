@@ -261,3 +261,31 @@ test("malformed stage output fails the current stage without completing it", asy
   assert.equal(result.stages[0].completedAt, null);
   assert.match(result.stages[0].error, /derivedArtifacts must be an array/);
 });
+
+test("pipeline preserves handwriting metadata separately from derived artifacts", async () => {
+  const run = createPipelineRun({
+    id: "run_handwriting",
+    kind: "processNote",
+    reviewPolicy: "stepReview",
+    sourceArtifactId: "src_current",
+    createdAt: NOW,
+  });
+  const gateway = {
+    async runStage() {
+      return {
+        derivedArtifacts: [{ kind: "readableRendition", body: "Call Sam.", sourceArtifactIds: ["src_current"] }],
+        handwriting: {
+          sampleIdsUsed: ["hw_sample_1"],
+          uncertainSpans: [{ text: "Sam", alternatives: ["5am"], reason: "ambiguous S" }],
+        },
+      };
+    },
+  };
+
+  const result = await runPipeline(run, { gateway, now: () => NOW });
+
+  assert.equal(result.status, "paused");
+  assert.equal(result.outputs.derivedArtifacts.length, 1);
+  assert.deepEqual(result.outputs.handwriting.sampleIdsUsed, ["hw_sample_1"]);
+  assert.deepEqual(result.outputs.handwriting.uncertainSpans[0].alternatives, ["5am"]);
+});

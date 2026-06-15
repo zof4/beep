@@ -402,3 +402,59 @@ test("local agent gateway rejects invalid JSON", async () => {
     /local agent returned invalid JSON/,
   );
 });
+
+test("local agent gateway sends handwriting calibration samples before current image", async () => {
+  const calls = [];
+  const gateway = new NotesBeepGateway({
+    mode: "localAgent",
+    submitToAgent: async (request) => {
+      calls.push(request);
+      return {
+        ok: true,
+        finalText: JSON.stringify({
+          derivedArtifacts: [{ kind: "readableRendition", body: "Call Sam.", sourceArtifactIds: ["src_current"] }],
+          handwriting: { sampleIdsUsed: ["hw_sample_1"], uncertainSpans: [] },
+        }),
+      };
+    },
+  });
+
+  const output = await gateway.runStage("readableRendition", {
+    sourceArtifactId: "src_current",
+    attachments: [{ type: "localImage", path: "notes-captures/current.png", detail: "original" }],
+    handwriting: {
+      enabled: true,
+      samples: [
+        {
+          id: "hw_sample_1",
+          promptId: "hw_prompt_v1",
+          referenceText: "Monday Jan 5 at 10:30 AM - Call Sam.",
+          coverage: { ambiguousPairs: ["m/n/u/w"], domainTerms: ["call"] },
+          imagePart: { type: "localImage", path: "notes-captures/sample.png", detail: "original" },
+        },
+      ],
+      lexicon: ["Sam"],
+    },
+  });
+
+  assert.equal(output.handwriting.sampleIdsUsed[0], "hw_sample_1");
+  const input = calls[0].input;
+  assert.equal(input.filter((part) => part.type === "localImage").length, 2);
+  assert.equal(input.findIndex((part) => part.path === "notes-captures/sample.png") < input.findIndex((part) => part.path === "notes-captures/current.png"), true);
+  assert.match(input.map((part) => part.text || "").join("\n"), /Calibration sample hw_sample_1 exact reference text/u);
+});
+
+test("validateStageOutput accepts handwriting uncertainty metadata", () => {
+  const output = validateStageOutput({
+    derivedArtifacts: [{ kind: "readableRendition", body: "Power pants", sourceArtifactIds: ["src_current"] }],
+    handwriting: {
+      sampleIdsUsed: ["hw_sample_1"],
+      uncertainSpans: [{ text: "Power pants", alternatives: ["Power plans"], reason: "ambiguous word" }],
+    },
+  });
+
+  assert.deepEqual(output.handwriting, {
+    sampleIdsUsed: ["hw_sample_1"],
+    uncertainSpans: [{ text: "Power pants", alternatives: ["Power plans"], reason: "ambiguous word" }],
+  });
+});

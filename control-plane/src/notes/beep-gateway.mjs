@@ -1,3 +1,5 @@
+import { normalizeHandwritingStageMetadata } from "./handwriting-domain.mjs";
+
 const PROPOSAL_KINDS = new Set(["todo", "calendarBlock", "research", "comment", "estimate", "plan"]);
 
 function optionalArray(value, fieldName) {
@@ -121,7 +123,12 @@ export function validateStageOutput(raw) {
     };
   });
 
-  return { comments, proposals, derivedArtifacts };
+  return {
+    comments,
+    proposals,
+    derivedArtifacts,
+    ...(input.handwriting !== undefined ? { handwriting: normalizeHandwritingStageMetadata(input.handwriting) } : {}),
+  };
 }
 
 function jsonExample(value) {
@@ -137,7 +144,7 @@ function stagePrompt(stage, context) {
     `Target item: ${targetItemId}.`,
     `Source artifact: ${sourceArtifactId}.`,
     "Return exactly one JSON object. Do not include markdown, prose, code fences, or thinking text.",
-    "Allowed top-level keys are comments, proposals, and derivedArtifacts. Omit arrays you do not need.",
+    "Allowed top-level keys are comments, proposals, derivedArtifacts, and handwriting. Omit arrays you do not need.",
     "derivedArtifacts: array of objects with kind, body, sourceArtifactIds, and optional sourceItemIds.",
     "comments: array of objects with targetId, body, optional sourceItemIds, sourceArtifactIds, and uncertainty.",
     "proposals: array of objects with kind, title, body, optional sourceItemIds, sourceArtifactIds, estimateMinutes, and confidence.",
@@ -148,6 +155,7 @@ function stagePrompt(stage, context) {
     ...(stage === "readableRendition"
       ? [
           `For readableRendition, put the transcription or readable summary in derivedArtifacts with kind: "readableRendition", body, and sourceArtifactIds: ${sourceArtifactIdsExample}.`,
+          "If handwriting calibration is enabled, include handwriting.sampleIdsUsed and handwriting.uncertainSpans when useful.",
         ]
       : []),
     ...(stage === "formattedNote"
@@ -167,9 +175,37 @@ function attachmentInputParts(context) {
   return context.attachments.map((part) => structuredClone(part));
 }
 
+function handwritingInputParts(stage, context) {
+  if (stage !== "readableRendition" || !context.handwriting?.enabled) return [];
+  const parts = [
+    {
+      type: "text",
+      text: [
+        "Handwriting calibration is enabled.",
+        "Each calibration image is a handwritten copy of the exact reference text immediately before it.",
+        "Use those image/reference pairs to infer this user's letter shapes, spacing, shorthand, and ambiguous forms before reading the current capture.",
+        "Return uncertain words in handwriting.uncertainSpans instead of guessing confidently.",
+      ].join("\n"),
+    },
+  ];
+  if (context.handwriting.lexicon?.length) {
+    parts.push({ type: "text", text: `User handwriting lexicon: ${context.handwriting.lexicon.join(", ")}` });
+  }
+  for (const sample of context.handwriting.samples || []) {
+    parts.push({
+      type: "text",
+      text: `Calibration sample ${sample.id} exact reference text:\n${sample.referenceText}`,
+    });
+    parts.push(structuredClone(sample.imagePart));
+  }
+  parts.push({ type: "text", text: "Current capture to transcribe follows." });
+  return parts;
+}
+
 function nativeInputForStage(stage, context) {
   return [
     { type: "text", text: stagePrompt(stage, context) },
+    ...handwritingInputParts(stage, context),
     ...attachmentInputParts(context),
   ];
 }

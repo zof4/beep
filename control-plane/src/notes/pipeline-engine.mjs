@@ -58,6 +58,7 @@ function mergeOutputs(outputs, stageOutput = {}) {
     ],
     comments: [...outputs.comments, ...outputArray(stageOutput, "comments")],
     proposals: [...outputs.proposals, ...outputArray(stageOutput, "proposals")],
+    handwriting: stageOutput.handwriting === undefined ? outputs.handwriting || null : stageOutput.handwriting,
   };
 }
 
@@ -91,7 +92,7 @@ export function createPipelineRun(input) {
     currentStage: stages[0]?.name || null,
     pauseReason: null,
     stages,
-    outputs: { derivedArtifacts: [], comments: [], proposals: [] },
+    outputs: { derivedArtifacts: [], comments: [], proposals: [], handwriting: null },
     errors: [],
     createdAt,
     updatedAt: createdAt,
