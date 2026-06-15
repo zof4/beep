@@ -1,5 +1,13 @@
 import { randomBytes } from "node:crypto";
 import {
+  DEFAULT_HANDWRITING_PROFILE_ID,
+  DEFAULT_HANDWRITING_PROMPT_ID,
+  createDefaultHandwritingProfile,
+  createDefaultHandwritingPrompt,
+  createHandwritingSample as createHandwritingSampleDomain,
+  toggleHandwritingSampleActive,
+} from "./handwriting-domain.mjs";
+import {
   acceptProposal as acceptProposalDomain,
   createAgentComment,
   createDerivedArtifact as createDerivedArtifactDomain,
@@ -12,8 +20,18 @@ import {
 } from "./workspace-domain.mjs";
 
 const UNSAFE_STATE_MAP_KEYS = new Set(["__proto__", "prototype", "constructor"]);
-const NOTES_OBJECT_MAP_FIELDS = ["items", "sourceArtifacts", "derivedArtifacts", "comments", "proposals", "runs"];
-const NOTES_ARRAY_FIELDS = ["itemOrder", "sourceOrder", "runOrder"];
+const NOTES_OBJECT_MAP_FIELDS = [
+  "items",
+  "sourceArtifacts",
+  "derivedArtifacts",
+  "comments",
+  "proposals",
+  "runs",
+  "handwritingProfiles",
+  "handwritingPrompts",
+  "handwritingSamples",
+];
+const NOTES_ARRAY_FIELDS = ["itemOrder", "sourceOrder", "runOrder", "handwritingSampleOrder", "handwritingPromptOrder"];
 
 function nowIso() {
   return new Date().toISOString();
@@ -96,6 +114,11 @@ function initialNotesState() {
     proposals: {},
     runs: {},
     runOrder: [],
+    handwritingProfiles: {},
+    handwritingPrompts: {},
+    handwritingSamples: {},
+    handwritingSampleOrder: [],
+    handwritingPromptOrder: [],
   };
 }
 
@@ -110,6 +133,18 @@ function ensureNotesState(state) {
   return notes;
 }
 
+function ensureHandwritingDefaults(notes, now = nowIso) {
+  if (!Object.hasOwn(notes.handwritingProfiles, DEFAULT_HANDWRITING_PROFILE_ID)) {
+    notes.handwritingProfiles[DEFAULT_HANDWRITING_PROFILE_ID] = createDefaultHandwritingProfile({ createdAt: now() });
+  }
+  if (!Object.hasOwn(notes.handwritingPrompts, DEFAULT_HANDWRITING_PROMPT_ID)) {
+    notes.handwritingPrompts[DEFAULT_HANDWRITING_PROMPT_ID] = createDefaultHandwritingPrompt({ createdAt: now() });
+  }
+  if (!notes.handwritingPromptOrder.includes(DEFAULT_HANDWRITING_PROMPT_ID)) {
+    notes.handwritingPromptOrder.push(DEFAULT_HANDWRITING_PROMPT_ID);
+  }
+}
+
 export class NotesWorkspaceStore {
   constructor({ store, now = nowIso } = {}) {
     if (!store) throw new Error("StateStore is required");
@@ -119,12 +154,15 @@ export class NotesWorkspaceStore {
 
   readWorkspace() {
     const state = this.store.readState();
-    return structuredClone(ensureNotesState(state));
+    const notes = ensureNotesState(state);
+    ensureHandwritingDefaults(notes, this.now);
+    return structuredClone(notes);
   }
 
   updateWorkspace(mutator) {
     return this.store.update((state) => {
       const notes = ensureNotesState(state);
+      ensureHandwritingDefaults(notes, this.now);
       return mutator(notes);
     });
   }
@@ -170,6 +208,60 @@ export class NotesWorkspaceStore {
       workspace.sourceArtifacts[source.id] = source;
       workspace.sourceOrder.push(source.id);
       return source;
+    });
+  }
+
+  getDefaultHandwritingPrompt() {
+    const workspace = this.readWorkspace();
+    return workspace.handwritingPrompts[DEFAULT_HANDWRITING_PROMPT_ID];
+  }
+
+  createHandwritingSample(input) {
+    const sampleId = createRecordId(input, "hw_sample", "handwriting sample id");
+    const profileId = canonicalId(input.profileId || DEFAULT_HANDWRITING_PROFILE_ID, "handwriting profile id");
+    const sourceArtifactId = canonicalId(input.sourceArtifactId, "source artifact id");
+    return this.updateWorkspace((workspace) => {
+      assertUniqueId(workspace.handwritingSamples, sampleId, "handwriting sample id");
+      const profile = workspace.handwritingProfiles[profileId];
+      if (!profile) throw new Error(`unknown handwriting profile: ${profileId}`);
+      const prompt = input.prompt || workspace.handwritingPrompts[input.promptId || DEFAULT_HANDWRITING_PROMPT_ID];
+      if (!prompt) throw new Error(`unknown handwriting prompt: ${input.promptId}`);
+      if (!Object.hasOwn(workspace.sourceArtifacts, sourceArtifactId)) {
+        throw new Error(`unknown source artifact: ${sourceArtifactId}`);
+      }
+      const sample = createHandwritingSampleDomain({
+        ...input,
+        id: sampleId,
+        profileId,
+        prompt,
+        sourceArtifactId,
+        createdAt: input.createdAt || this.now(),
+      });
+      workspace.handwritingSamples[sample.id] = sample;
+      workspace.handwritingSampleOrder.push(sample.id);
+      const toggled = toggleHandwritingSampleActive({
+        profile,
+        sample,
+        active: sample.active,
+        updatedAt: sample.createdAt,
+      });
+      workspace.handwritingProfiles[profileId] = toggled.profile;
+      workspace.handwritingSamples[sample.id] = toggled.sample;
+      return workspace.handwritingSamples[sample.id];
+    });
+  }
+
+  toggleHandwritingSample(sampleId, { active }) {
+    const id = canonicalId(sampleId, "handwriting sample id");
+    return this.updateWorkspace((workspace) => {
+      const sample = workspace.handwritingSamples[id];
+      if (!sample) throw new Error(`unknown handwriting sample: ${id}`);
+      const profile = workspace.handwritingProfiles[sample.profileId];
+      if (!profile) throw new Error(`unknown handwriting profile: ${sample.profileId}`);
+      const toggled = toggleHandwritingSampleActive({ profile, sample, active, updatedAt: this.now() });
+      workspace.handwritingProfiles[sample.profileId] = toggled.profile;
+      workspace.handwritingSamples[id] = toggled.sample;
+      return toggled.sample;
     });
   }
 

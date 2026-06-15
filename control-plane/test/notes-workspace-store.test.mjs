@@ -4,12 +4,27 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { StateStore } from "../src/state-store.mjs";
+import {
+  DEFAULT_HANDWRITING_PROFILE_ID,
+  DEFAULT_HANDWRITING_PROMPT_ID,
+  createDefaultHandwritingPrompt,
+} from "../src/notes/handwriting-domain.mjs";
 import { NotesWorkspaceStore } from "../src/notes/workspace-store.mjs";
 
 const UNSAFE_IDS = ["__proto__", "prototype", "constructor"];
 const PROTOTYPE_LINK_FIELDS = ["agentCommentIds", "derivedArtifactIds", "proposalIds", "updatedAt"];
-const NOTES_OBJECT_MAP_FIELDS = ["items", "sourceArtifacts", "derivedArtifacts", "comments", "proposals", "runs"];
-const NOTES_ARRAY_FIELDS = ["itemOrder", "sourceOrder", "runOrder"];
+const NOTES_OBJECT_MAP_FIELDS = [
+  "items",
+  "sourceArtifacts",
+  "derivedArtifacts",
+  "comments",
+  "proposals",
+  "runs",
+  "handwritingProfiles",
+  "handwritingPrompts",
+  "handwritingSamples",
+];
+const NOTES_ARRAY_FIELDS = ["itemOrder", "sourceOrder", "runOrder", "handwritingSampleOrder", "handwritingPromptOrder"];
 
 function tempNotesStore() {
   const dir = mkdtempSync(join(tmpdir(), "beep-notes-store-test-"));
@@ -92,11 +107,21 @@ test("workspace store normalizes inherited top-level notes fields without touchi
     assert.equal(getterCount, 0);
     for (const field of NOTES_OBJECT_MAP_FIELDS) {
       assert.equal(Object.hasOwn(workspace, field), true);
-      assert.deepEqual(workspace[field], {});
+      if (field === "handwritingProfiles") {
+        assert.equal(workspace.handwritingProfiles[DEFAULT_HANDWRITING_PROFILE_ID].id, DEFAULT_HANDWRITING_PROFILE_ID);
+      } else if (field === "handwritingPrompts") {
+        assert.equal(workspace.handwritingPrompts[DEFAULT_HANDWRITING_PROMPT_ID].id, DEFAULT_HANDWRITING_PROMPT_ID);
+      } else {
+        assert.deepEqual(workspace[field], {});
+      }
     }
     for (const field of NOTES_ARRAY_FIELDS) {
       assert.equal(Object.hasOwn(workspace, field), true);
-      assert.deepEqual(workspace[field], []);
+      if (field === "handwritingPromptOrder") {
+        assert.deepEqual(workspace.handwritingPromptOrder, [DEFAULT_HANDWRITING_PROMPT_ID]);
+      } else {
+        assert.deepEqual(workspace[field], []);
+      }
     }
   } finally {
     for (const field of [...NOTES_OBJECT_MAP_FIELDS, ...NOTES_ARRAY_FIELDS]) {
@@ -1005,6 +1030,105 @@ test("workspace store rejects missing and blank run ids", () => {
     assert.equal(Object.hasOwn(workspace.runs, "undefined"), false);
     assert.equal(Object.hasOwn(workspace.runs, ""), false);
     assert.deepEqual(workspace.runOrder, []);
+  } finally {
+    cleanup();
+  }
+});
+
+test("workspace store seeds default handwriting profile and prompt", () => {
+  const { notesStore, cleanup } = tempNotesStore();
+  try {
+    const workspace = notesStore.readWorkspace();
+
+    assert.equal(
+      workspace.handwritingProfiles[DEFAULT_HANDWRITING_PROFILE_ID].id,
+      DEFAULT_HANDWRITING_PROFILE_ID,
+    );
+    assert.equal(workspace.handwritingPrompts[DEFAULT_HANDWRITING_PROMPT_ID].id, DEFAULT_HANDWRITING_PROMPT_ID);
+    assert.deepEqual(workspace.handwritingSampleOrder, []);
+    assert.deepEqual(workspace.handwritingPromptOrder, [DEFAULT_HANDWRITING_PROMPT_ID]);
+  } finally {
+    cleanup();
+  }
+});
+
+test("workspace store creates handwriting samples linked to source artifacts", () => {
+  const { notesStore, cleanup } = tempNotesStore();
+  try {
+    const source = notesStore.createSourceArtifact({
+      id: "src_hw_sample",
+      kind: "image",
+      body: "handwriting calibration sample",
+      media: {
+        schemaVersion: 1,
+        files: [
+          {
+            kind: "image",
+            name: "sample.png",
+            mimeType: "image/png",
+            sizeBytes: 100,
+            workspacePath: "notes-captures/sample.png",
+          },
+        ],
+      },
+    });
+
+    const prompt = createDefaultHandwritingPrompt({ createdAt: "2026-06-14T18:00:00.000Z" });
+    const sample = notesStore.createHandwritingSample({
+      id: "hw_sample_1",
+      profileId: DEFAULT_HANDWRITING_PROFILE_ID,
+      prompt,
+      sourceArtifactId: source.id,
+      image: source.media.files[0],
+    });
+
+    const workspace = notesStore.readWorkspace();
+    assert.equal(sample.referenceText, prompt.referenceText);
+    assert.equal(workspace.handwritingSamples.hw_sample_1.sourceArtifactId, "src_hw_sample");
+    assert.deepEqual(workspace.handwritingProfiles[DEFAULT_HANDWRITING_PROFILE_ID].activeSampleIds, ["hw_sample_1"]);
+    assert.deepEqual(workspace.handwritingSampleOrder, ["hw_sample_1"]);
+  } finally {
+    cleanup();
+  }
+});
+
+test("workspace store toggles handwriting sample active state", () => {
+  const { notesStore, cleanup } = tempNotesStore();
+  try {
+    const source = notesStore.createSourceArtifact({
+      id: "src_hw_sample",
+      kind: "image",
+      media: {
+        schemaVersion: 1,
+        files: [
+          {
+            kind: "image",
+            name: "sample.png",
+            mimeType: "image/png",
+            sizeBytes: 100,
+            workspacePath: "notes-captures/sample.png",
+          },
+        ],
+      },
+    });
+    const prompt = createDefaultHandwritingPrompt({ createdAt: "2026-06-14T18:00:00.000Z" });
+    notesStore.createHandwritingSample({
+      id: "hw_sample_1",
+      profileId: DEFAULT_HANDWRITING_PROFILE_ID,
+      prompt,
+      sourceArtifactId: source.id,
+      image: source.media.files[0],
+    });
+
+    notesStore.toggleHandwritingSample("hw_sample_1", { active: false });
+    let workspace = notesStore.readWorkspace();
+    assert.equal(workspace.handwritingSamples.hw_sample_1.active, false);
+    assert.deepEqual(workspace.handwritingProfiles[DEFAULT_HANDWRITING_PROFILE_ID].activeSampleIds, []);
+
+    notesStore.toggleHandwritingSample("hw_sample_1", { active: true });
+    workspace = notesStore.readWorkspace();
+    assert.equal(workspace.handwritingSamples.hw_sample_1.active, true);
+    assert.deepEqual(workspace.handwritingProfiles[DEFAULT_HANDWRITING_PROFILE_ID].activeSampleIds, ["hw_sample_1"]);
   } finally {
     cleanup();
   }
