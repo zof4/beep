@@ -94,14 +94,16 @@ export function createDefaultHandwritingProfile({ createdAt = nowIso() } = {}) {
 
 export function createHandwritingSample(input) {
   const prompt = plainObject(input.prompt, "prompt");
-  const image = plainObject(input.image, "image");
+  const image = structuredClone(plainObject(input.image, "image"));
+  text(image.workspacePath, "sample image workspacePath");
+  text(image.mimeType, "sample image mimeType");
   const createdAt = input.createdAt || nowIso();
   return {
     id: text(input.id, "handwriting sample id"),
     profileId: text(input.profileId || DEFAULT_HANDWRITING_PROFILE_ID, "handwriting profile id"),
     promptId: text(input.promptId || prompt.id, "handwriting prompt id"),
     sourceArtifactId: text(input.sourceArtifactId, "source artifact id"),
-    image: structuredClone(image),
+    image,
     referenceText: text(input.referenceText || prompt.referenceText, "reference text"),
     coverage: cloneCoverage(input.coverage || prompt.coverage),
     active: input.active !== false,
@@ -111,7 +113,8 @@ export function createHandwritingSample(input) {
 }
 
 export function toggleHandwritingSampleActive({ profile, sample, active, updatedAt = nowIso() }) {
-  const nextSample = { ...plainObject(sample, "sample"), active: Boolean(active), updatedAt };
+  if (typeof active !== "boolean") throw new Error("active must be a boolean");
+  const nextSample = { ...plainObject(sample, "sample"), active, updatedAt };
   const sampleId = text(nextSample.id, "handwriting sample id");
   const profileInput = plainObject(profile, "profile");
   const activeIds = uniquePrimitiveIds(profileInput.activeSampleIds).filter((id) => id !== sampleId);
@@ -156,7 +159,7 @@ export function buildHandwritingContext({ enabled = false, profile, samples = {}
 }
 
 export function normalizeHandwritingStageMetadata(value) {
-  if (value === undefined) return null;
+  if (value === undefined || value === null) return null;
   const input = plainObject(value, "handwriting");
   return {
     sampleIdsUsed: uniquePrimitiveIds(input.sampleIdsUsed),
