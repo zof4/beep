@@ -106,7 +106,7 @@ const HTML = `<!doctype html>
             <label class="field-label" for="handwritingReferenceText">Reference text</label>
             <textarea id="handwritingReferenceText" name="referenceText" placeholder="Write the prompt text exactly as shown"></textarea>
             <label class="field-label" for="handwritingImageInput">Sample image</label>
-            <input id="handwritingImageInput" name="image" type="file" accept="image/png,image/jpeg,image/webp,image/heic,image/heif,.heic,.heif">
+            <input id="handwritingImageInput" name="image" type="file" accept="image/png,image/jpeg,image/webp,image/heic,image/heif,.png,.jpg,.jpeg,.webp,.heic,.heif">
             <label class="checkbox-row" for="useHandwritingCalibration">
               <input id="useHandwritingCalibration" type="checkbox" checked>
               <span>Use calibration in captures</span>

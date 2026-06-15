@@ -160,9 +160,17 @@ test("/notes serves handwriting calibration controls", async () => {
 
     assert.equal(result.statusCode, 200);
     assert.match(result.body, /Handwriting calibration/u);
+    assert.match(result.body, /id="handwritingPromptText"/u);
+    assert.match(result.body, /id="handwritingCalibrationForm"/u);
     assert.match(result.body, /id="handwritingReferenceText"/u);
     assert.match(result.body, /id="handwritingImageInput"/u);
+    assert.match(
+      result.body,
+      /id="handwritingImageInput"[^>]+accept="image\/png,image\/jpeg,image\/webp,image\/heic,image\/heif,\.png,\.jpg,\.jpeg,\.webp,\.heic,\.heif"/u,
+    );
     assert.match(result.body, /id="useHandwritingCalibration"/u);
+    assert.match(result.body, /id="useHandwritingCalibration" type="checkbox" checked/u);
+    assert.match(result.body, /id="handwritingSamplesList"/u);
     assert.match(result.body, /id="handwritingUncertainty"/u);
     assert.match(result.body, /No handwriting uncertainty reported\./u);
   } finally {
