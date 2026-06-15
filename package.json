@@ -15,6 +15,6 @@
     "vendor:codex:update": "bash scripts/update-vendor-openai-codex.sh",
     "test:tools": "node --test test/codex-web-search-vendor-drift.test.mjs test/vendor-codex-sync-script.test.mjs control-plane/test/state-store.test.mjs control-plane/test/tool-broker.test.mjs test/dynamic-sandbox-cli-tool.test.mjs control-plane/test/tool-package-validator.test.mjs control-plane/test/tool-registry.test.mjs control-plane/test/openai-web-search.test.mjs control-plane/test/tool-package-routes.test.mjs test/runtime-control-plane-tools-extension.test.mjs test/full-stack-e2e-script.test.mjs",
     "test:notes-backbone": "node --test control-plane/test/notes-*.test.mjs",
-    "test:notes-backbone-static": "node --test control-plane/test/notes-workspace-domain.test.mjs control-plane/test/notes-workspace-store.test.mjs control-plane/test/notes-pipeline-engine.test.mjs control-plane/test/notes-beep-gateway.test.mjs control-plane/test/notes-routes.test.mjs control-plane/test/notes-demo-web.test.mjs && bash -n scripts/smoke-test-beep-notes-backbone.sh"
+    "test:notes-backbone-static": "node --test control-plane/test/notes-workspace-domain.test.mjs control-plane/test/notes-workspace-store.test.mjs control-plane/test/notes-handwriting-domain.test.mjs control-plane/test/notes-image-media.test.mjs control-plane/test/notes-pipeline-engine.test.mjs control-plane/test/notes-beep-gateway.test.mjs control-plane/test/notes-routes.test.mjs control-plane/test/notes-demo-web.test.mjs && bash -n scripts/smoke-test-beep-notes-backbone.sh"
   }
 }
