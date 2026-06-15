@@ -450,9 +450,9 @@ class AgentSupervisor {
       createdAt: request.createdAt,
       startedAt: request.startedAt || null,
       completedAt: request.completedAt || null,
-      input: request.inputRedacted || null,
-      inputSummary: request.inputSummary || null,
-      label: request.label || null,
+      inputSummary: request.inputSummary || summarizeBeepInput(request.input || []),
+      redactedInput: request.input ? redactBeepInput(request.input) : null,
+      label: request.input ? labelBeepInput(request.input) : null,
       finalText: request.finalText || null,
       error: request.error || null,
       memoryError: request.memoryError || null,
@@ -462,20 +462,16 @@ class AgentSupervisor {
     };
   }
 
-  enqueuePrompt({ input, timeoutMs, recordLcm = true, streamingBehavior = undefined } = {}) {
-    if (!Array.isArray(input) || input.length === 0) {
-      throw Object.assign(new Error("Agent submit requires native input parts."), { statusCode: 400 });
-    }
+  enqueuePrompt({ input, timeoutMs, recordLcm = true, streamingBehavior = undefined, workspaceRoot = WORKSPACE_DIR } = {}) {
+    const nativeInput = normalizeBeepInput(input, { workspaceRoot });
     this.state.sequence += 1;
     const request = {
       id: newRequestId("agent_req"),
       sequence: this.state.sequence,
       status: "queued",
       type: "prompt",
-      input,
-      inputSummary: summarizeBeepInput(input),
-      inputRedacted: redactBeepInput(input),
-      label: labelBeepInput(input),
+      input: nativeInput,
+      inputSummary: summarizeBeepInput(nativeInput),
       timeoutMs: safeNumber(timeoutMs, DEFAULT_PROMPT_TIMEOUT_MS),
       recordLcm: recordLcm !== false,
       streamingBehavior,
@@ -1264,11 +1260,10 @@ async function handleAgentRoute(req, res, url, parts) {
   }
 
   if (action === "submit") {
-    const input = normalizeBeepInput(body.input, {
-      workspaceRoot: agentSupervisor.session?.workspace || resolve(join(API_WORKSPACE_DIR, agentSupervisor.sessionId)),
-    });
+    const workspaceRoot = agentSupervisor.session?.workspace || resolve(join(API_WORKSPACE_DIR, agentSupervisor.sessionId));
     const request = agentSupervisor.enqueuePrompt({
-      input: input,
+      input: normalizeBeepInput(body.input, { workspaceRoot }),
+      workspaceRoot,
       timeoutMs: body.timeoutMs,
       recordLcm: body.recordLcm,
       streamingBehavior: body.streamingBehavior,

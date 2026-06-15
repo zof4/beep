@@ -276,6 +276,21 @@ test("runtime routes require native input instead of message prompt shims", () =
   assert.doesNotMatch(apiSource, /body\.message\s*\|\|\s*body\.prompt/);
 });
 
+test("agent supervisor stores native input and redacted summaries", () => {
+  assert.match(apiSource, /input:\s*normalizeBeepInput\(body\.input/);
+  assert.match(apiSource, /inputSummary:\s*summarizeBeepInput\(nativeInput\)/);
+  assert.match(apiSource, /redactedInput:\s*request\.input \? redactBeepInput\(request\.input\) : null/);
+  assert.match(apiSource, /label:\s*request\.input \? labelBeepInput\(request\.input\) : null/);
+  assert.doesNotMatch(apiSource, /message:\s*request\.message/);
+});
+
+test("steer and follow-up use the same native input contract as submit", () => {
+  assert.match(apiSource, /action === "steer"[\s\S]*normalizeBeepInput\(body\.input/);
+  assert.match(apiSource, /agentSupervisor\.steer\(input\)/);
+  assert.match(apiSource, /action === "follow-up"[\s\S]*normalizeBeepInput\(body\.input/);
+  assert.match(apiSource, /agentSupervisor\.followUp\(input\)/);
+});
+
 test("native Pi run config reports actual SDK extension loader results", () => {
   const createIndex = piNativeSource.indexOf("result = await sdk.codingAgent.createAgentSession");
   const loaderResultIndex = piNativeSource.indexOf("result.extensionsResult", createIndex);
