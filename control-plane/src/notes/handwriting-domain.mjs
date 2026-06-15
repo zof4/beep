@@ -144,7 +144,7 @@ export function buildHandwritingContext({ enabled = false, profile, samples = {}
       imagePart: {
         type: "localImage",
         path: text(sample.image?.workspacePath, "sample image workspacePath"),
-        detail: sample.image?.detail || "original",
+        detail: "original",
       },
     }));
   return {

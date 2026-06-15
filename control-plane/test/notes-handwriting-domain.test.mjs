@@ -113,7 +113,7 @@ test("buildHandwritingContext selects newest active samples", () => {
       active: true,
       updatedAt: "2026-06-15T17:04:00.000Z",
       referenceText: "new",
-      image: { workspacePath: "notes-captures/new.png", mimeType: "image/png" },
+      image: { workspacePath: "notes-captures/new.png", mimeType: "image/png", detail: "auto" },
       coverage: { domainTerms: ["new"] },
     },
     sample_mid: {
