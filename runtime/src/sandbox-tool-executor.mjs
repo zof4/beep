@@ -179,13 +179,13 @@ function terminateProcessTree(child) {
   }, PROCESS_GROUP_KILL_GRACE_MS);
 }
 
-function spawnCapture(command, args, { cwd, timeoutMs }) {
+function spawnCapture(command, args, { cwd, timeoutMs, input = undefined }) {
   return new Promise((resolveResult) => {
     const child = spawn(command, args, {
       cwd,
       detached: process.platform !== "win32",
       env: processEnv(cwd),
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: ["pipe", "pipe", "pipe"],
     });
     const stdout = boundedTextCollector();
     const stderr = boundedTextCollector();
@@ -204,6 +204,7 @@ function spawnCapture(command, args, { cwd, timeoutMs }) {
     child.stderr.on("data", (chunk) => {
       stderr.append(chunk);
     });
+    child.stdin.on("error", () => {});
     child.on("error", (error) => {
       clearTimeout(timeout);
       if (killTimer) clearTimeout(killTimer);
@@ -237,6 +238,7 @@ function spawnCapture(command, args, { cwd, timeoutMs }) {
         timedOut,
       });
     });
+    child.stdin.end(input === undefined ? undefined : input);
   });
 }
 
@@ -571,6 +573,59 @@ async function runFind(request) {
   });
 }
 
+async function runDynamicCli(request) {
+  const dynamicTool = request.dynamicTool;
+  if (!dynamicTool?.command?.argv?.length) {
+    throw Object.assign(new Error("dynamic_cli requires dynamicTool.command.argv."), { status: 400 });
+  }
+
+  const { root } = containedWorkspacePath(request.cwd, ".");
+  const scriptPath = dynamicTool.command.argv[1];
+  const scriptCandidate = resolve(root, scriptPath);
+  assertPathInside(root, scriptCandidate, scriptPath);
+  const realRoot = await realpath(root);
+  const realScriptPath = await realpath(scriptCandidate);
+  assertPathInside(realRoot, realScriptPath, scriptPath);
+
+  const input = JSON.stringify({
+    action: dynamicTool.action,
+    args: request.args,
+    toolCallId: request.toolCallId,
+  });
+  const result = await spawnCapture(dynamicTool.command.argv[0], dynamicTool.command.argv.slice(1), {
+    cwd: realRoot,
+    timeoutMs: dynamicTool.command.timeoutMs || request.timeoutMs,
+    input,
+  });
+  const combined = result.stderr ? `${result.stdout}${result.stdout ? "\n" : ""}${result.stderr}` : result.stdout;
+  const output = truncateOutput(combined || "(no output)");
+  const details = {
+    exitCode: result.exitCode,
+    signal: result.signal,
+    stdout: result.stdout,
+    stderr: result.stderr,
+    stdoutTruncated: result.stdoutTruncated,
+    stderrTruncated: result.stderrTruncated,
+    truncated: output.truncated || result.truncated,
+    timedOut: result.timedOut,
+    ...(result.spawnError ? { spawnError: result.spawnError } : {}),
+  };
+
+  if (!result.spawnError && result.exitCode === 0 && !result.signal && !result.timedOut) {
+    return sandboxToolOkResult({
+      toolCallId: request.toolCallId,
+      content: textContent(output.text),
+      details,
+    });
+  }
+
+  return sandboxToolErrorResult({
+    toolCallId: request.toolCallId,
+    error: output.text || result.spawnError || `dynamic_cli exited with ${result.exitCode ?? result.signal}`,
+    details,
+  });
+}
+
 export async function executeSandboxTool(request) {
   try {
     if (request.toolName === "bash") return await runBash(request);
@@ -580,6 +635,7 @@ export async function executeSandboxTool(request) {
     if (request.toolName === "ls") return await runLs(request);
     if (request.toolName === "grep") return await runGrep(request);
     if (request.toolName === "find") return await runFind(request);
+    if (request.toolName === "dynamic_cli") return await runDynamicCli(request);
     throw Object.assign(new Error(`Unsupported sandbox tool: ${request.toolName}`), { status: 400 });
   } catch (error) {
     return sandboxToolErrorResult({

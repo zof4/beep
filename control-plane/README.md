@@ -117,6 +117,23 @@ container, records audit, and returns URLs. Managed preview containers are
 stopped through `POST /api/sites/<siteId>/stop`; the runtime cannot stop or
 remove containers directly.
 
+Managed static previews can be updated in place through
+`preview.container.updateStaticSite`, exposed to Pi as
+`preview_container_update_static_site`. The update action is also restricted:
+the runtime can request it, but the control plane revalidates the source path,
+builds a fresh read-only snapshot, starts a replacement container, swaps the site
+record, and keeps the existing `/sites/<siteId>/` proxy URL stable. The direct
+Docker-mapped localhost URL may change after each update.
+
+Operators can exercise the same path with:
+
+```bash
+curl -sS -X POST "$CONTROL_PLANE_URL/api/sites/<siteId>/update" \
+  -H "authorization: Bearer $OPERATOR_TOKEN" \
+  -H "content-type: application/json" \
+  -d '{"sourcePath":"/workspace/api-sessions/agent_beep/site"}'
+```
+
 The pure reconciliation smoke for this local slice lives at
 `scripts/smoke-test-control-plane-reconciliation.sh`.
 

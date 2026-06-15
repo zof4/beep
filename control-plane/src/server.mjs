@@ -14,15 +14,31 @@ import { handleRuntimeAgentRoute, unsafeRuntimeAgentRequestTargetError } from ".
 import { RuntimeManager } from "./runtime-manager.mjs";
 import { handleSiteRoute } from "./site-routes.mjs";
 import { StateStore } from "./state-store.mjs";
+import { handleToolPackageRoute } from "./tool-package-routes.mjs";
 import { ToolBroker, hostPortForContainerPort, validatePreviewPort } from "./tool-broker.mjs";
+import { createWebRunExecutor } from "./openai-web-search.mjs";
 import { Gatekeeper } from "./gatekeeper/index.mjs";
+import { ToolRegistry } from "./tool-registry.mjs";
+import { normalizeBeepInput, summarizeBeepInput } from "../../shared/native-input.mjs";
+
+export const MAX_NATIVE_REQUEST_BYTES = 40 * 1024 * 1024;
 
 export function createDefaultComponents() {
   const store = new StateStore();
   const runtimeManager = new RuntimeManager({ store });
   const gatekeeper = new Gatekeeper({ store });
-  const toolBroker = new ToolBroker({ store, gatekeeper });
-  return { store, runtimeManager, gatekeeper, toolBroker };
+  const registry = new ToolRegistry({ store });
+  const webSearch = createWebRunExecutor({
+    credentialResolver: () => resolveCodexCredentialFromAuthPath(RUNTIME_AUTH_PATH),
+  });
+  const sandboxToolCaller = (body) =>
+    runtimeManager.proxyToRuntime("/internal/sandbox/tools/call", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  const toolBroker = new ToolBroker({ store, gatekeeper, registry, webSearch, sandboxToolCaller });
+  return { store, runtimeManager, gatekeeper, registry, webSearch, toolBroker };
 }
 
 async function proxyLocalPort(request, response, hostPort, suffixPath) {
@@ -131,6 +147,18 @@ export function createControlPlaneHandler({ store, runtimeManager, toolBroker, l
       return;
     }
 
+    if (pathname === "/api/tools/packages" || pathname.startsWith("/api/tools/packages/")) {
+      await handleToolPackageRoute({
+        request,
+        response,
+        pathname,
+        url,
+        store,
+        requireOperatorAuth,
+      });
+      return;
+    }
+
     if (request.method === "GET" && pathname === "/api/tools") {
       sendJson(response, 200, { ok: true, ...toolBroker.manifest() });
       return;
@@ -191,16 +219,28 @@ export function createControlPlaneHandler({ store, runtimeManager, toolBroker, l
 
     if (request.method === "POST" && pathname === "/api/requests") {
       requireOperatorAuth(request);
-      const body = await readJsonBody(request);
+      const body = await readJsonBody(request, MAX_NATIVE_REQUEST_BYTES);
+      let input;
+      let inputSummary;
+      try {
+        input = normalizeBeepInput(body.input);
+        inputSummary = summarizeBeepInput(input);
+      } catch (error) {
+        if (error instanceof Error) {
+          error.status = 400;
+        }
+        throw error;
+      }
       await runtimeManager.ensureRuntime();
       const controlPlaneRequest = store.createAgentRequest({
         runtimeId: RUNTIME_ID,
-        message: String(body.message || ""),
+        input,
+        inputSummary,
         status: "forwarding",
         source: "api",
       });
       const runtimeBody = {
-        message: String(body.message || ""),
+        input,
         waitForCompletion: body.waitForCompletion !== false,
         timeoutMs: Number(body.timeoutMs || DEFAULT_REQUEST_TIMEOUT_MS),
       };

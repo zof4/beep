@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
-import { createControlPlaneHandler } from "../src/server.mjs";
+import { createControlPlaneHandler, MAX_NATIVE_REQUEST_BYTES } from "../src/server.mjs";
 import { StateStore } from "../src/state-store.mjs";
 
 function tempStore() {
@@ -89,7 +89,10 @@ test("request list returns stable persisted request records", async () => {
     const handler = handlerFor({ store });
     const first = store.createAgentRequest({
       runtimeId: "local",
-      message: "first",
+      input: [
+        { type: "text", text: "first" },
+        { type: "image", mimeType: "image/png", data: "ZmFrZQ==", detail: "high" },
+      ],
       source: "api",
       internalNote: "do not expose",
     });
@@ -125,7 +128,8 @@ test("request list returns stable persisted request records", async () => {
     assert.deepEqual(Object.keys(payload.requests[0]).sort(), [
       "createdAt",
       "error",
-      "message",
+      "inputSummary",
+      "redactedInput",
       "requestId",
       "runtimeId",
       "runtimeRequestId",
@@ -136,6 +140,8 @@ test("request list returns stable persisted request records", async () => {
       "updatedAt",
     ]);
     assert.equal(payload.requests[0].requestId, first.requestId);
+    assert.equal(payload.requests[0].redactedInput[1].data, "[redacted]");
+    assert.equal(payload.requests[0].input?.[1]?.data, undefined);
     assert.equal(payload.requests[0].runtimeRequestId, "runtime-1");
     assert.deepEqual(payload.requests[0].runtimeResult, {
       ok: true,
@@ -161,15 +167,58 @@ test("request list returns stable persisted request records", async () => {
   }
 });
 
+test("request read routes tolerate legacy records without native input", async () => {
+  const { store, cleanup } = tempStore();
+  try {
+    const legacyRequestId = "cp_req_legacy";
+    store.update((state) => {
+      state.agentRequests[legacyRequestId] = {
+        schemaVersion: 1,
+        requestId: legacyRequestId,
+        runtimeId: "local",
+        runtimeRequestId: "runtime-legacy",
+        message: "legacy secret",
+        status: "submitted",
+        source: "api",
+        error: null,
+        createdAt: "2026-06-02T01:00:00.000Z",
+        updatedAt: "2026-06-02T01:00:00.000Z",
+      };
+    });
+    const handler = handlerFor({ store });
+
+    const listResponse = captureResponse();
+    await handler(request("GET", "/api/requests", operatorHeaders(store)), listResponse.response);
+    const list = listResponse.json();
+    assert.equal(list.statusCode, 200);
+    assert.equal(list.payload.requests[0].requestId, legacyRequestId);
+    assert.equal(list.payload.requests[0].inputSummary, null);
+    assert.deepEqual(list.payload.requests[0].redactedInput, []);
+    assert.equal(list.payload.requests[0].message, undefined);
+    assert.equal(list.payload.requests[0].input, undefined);
+
+    const singleResponse = captureResponse();
+    await handler(request("GET", `/api/requests/${legacyRequestId}`, operatorHeaders(store)), singleResponse.response);
+    const single = singleResponse.json();
+    assert.equal(single.statusCode, 200);
+    assert.equal(single.payload.request.inputSummary, null);
+    assert.deepEqual(single.payload.request.redactedInput, []);
+    assert.equal(single.payload.request.message, undefined);
+    assert.equal(single.payload.request.input, undefined);
+  } finally {
+    cleanup();
+  }
+});
+
 test("request list passes runtimeId filter and clamps limit", async () => {
   const { store, cleanup } = tempStore();
   try {
     const handler = handlerFor({ store });
-    store.createAgentRequest({ runtimeId: "other", message: "other" });
-    store.createAgentRequest({ runtimeId: "local", message: "local-a" });
-    store.createAgentRequest({ runtimeId: "local", message: "local-b" });
+    store.createAgentRequest({ runtimeId: "other", input: [{ type: "text", text: "other" }] });
+    store.createAgentRequest({ runtimeId: "local", input: [{ type: "text", text: "local-a" }] });
+    store.createAgentRequest({ runtimeId: "local", input: [{ type: "text", text: "local-b" }] });
     for (let index = 0; index < 205; index += 1) {
-      store.createAgentRequest({ runtimeId: "bulk", message: `bulk-${index}` });
+      store.createAgentRequest({ runtimeId: "bulk", input: [{ type: "text", text: `bulk-${index}` }] });
     }
 
     const response = captureResponse();
@@ -208,7 +257,7 @@ test("single request route returns one stable persisted request record", async (
     const handler = handlerFor({ store });
     const created = store.createAgentRequest({
       runtimeId: "local",
-      message: "run this",
+      input: [{ type: "text", text: "run this" }],
       source: "api",
       internalNote: "do not expose",
     });
@@ -265,7 +314,7 @@ test("single request route requires operator auth", async () => {
   const { store, cleanup } = tempStore();
   try {
     const handler = handlerFor({ store });
-    const created = store.createAgentRequest({ runtimeId: "local", message: "run this" });
+    const created = store.createAgentRequest({ runtimeId: "local", input: [{ type: "text", text: "run this" }] });
     const response = captureResponse();
 
     await handler(request("GET", `/api/requests/${created.requestId}`), response.response);
@@ -327,7 +376,7 @@ test("request read routes return 405 for unsupported authenticated methods", asy
   }
 });
 
-test("POST request submission keeps the existing runtime forwarding behavior", async () => {
+test("POST request submission forwards native input unchanged and persists a redacted summary", async () => {
   const { store, cleanup } = tempStore();
   try {
     let ensureRuntimeCalls = 0;
@@ -353,7 +402,12 @@ test("POST request submission keeps the existing runtime forwarding behavior", a
         "POST",
         "/api/requests",
         { ...operatorHeaders(store), "content-type": "application/json" },
-        JSON.stringify({ message: "submit me" }),
+        JSON.stringify({
+          input: [
+            { type: "text", text: "submit me" },
+            { type: "image", mimeType: "image/png", data: "ZmFrZQ==", detail: "high" },
+          ],
+        }),
       ),
       response.response,
     );
@@ -365,8 +419,97 @@ test("POST request submission keeps the existing runtime forwarding behavior", a
     assert.equal(ensureRuntimeCalls, 1);
     assert.equal(forwarded.length, 1);
     assert.equal(forwarded[0].path, "/agent/submit");
-    assert.equal(JSON.parse(forwarded[0].options.body).message, "submit me");
+    assert.deepEqual(JSON.parse(forwarded[0].options.body).input, [
+      { type: "text", text: "submit me" },
+      { type: "image", mimeType: "image/png", data: "ZmFrZQ==", detail: "high" },
+    ]);
     assert.equal(persisted.runtimeRequestId, "runtime-post-1");
+    assert.equal(persisted.input[1].data, "ZmFrZQ==");
+    assert.equal(persisted.inputSummary.imageParts[0].byteLength, 4);
+  } finally {
+    cleanup();
+  }
+});
+
+test("POST request submission accepts native image bodies larger than the default JSON limit", async () => {
+  const { store, cleanup } = tempStore();
+  try {
+    assert.ok(MAX_NATIVE_REQUEST_BYTES >= 36 * 1024 * 1024);
+    const inlineImageBytes = 1024 * 1024 + 1;
+    const imageData = Buffer.alloc(inlineImageBytes, 1).toString("base64");
+    const forwarded = [];
+    const handler = handlerFor({
+      store,
+      runtimeManager: {
+        status: async () => ({ runtimeId: "local", running: false }),
+        ensureRuntime: async () => ({ runtimeId: "local", running: true }),
+        proxyToRuntime: async (path, options) => {
+          forwarded.push({ path, options });
+          return { ok: true, request: { id: "runtime-large-post-1" } };
+        },
+      },
+    });
+    const response = captureResponse();
+
+    await handler(
+      request(
+        "POST",
+        "/api/requests",
+        { ...operatorHeaders(store), "content-type": "application/json" },
+        JSON.stringify({
+          input: [
+            { type: "text", text: "large image" },
+            { type: "image", mimeType: "image/png", data: imageData },
+          ],
+        }),
+      ),
+      response.response,
+    );
+
+    const { statusCode, payload } = response.json();
+    assert.equal(statusCode, 200);
+    assert.equal(payload.ok, true);
+    assert.equal(forwarded.length, 1);
+    assert.equal(JSON.parse(forwarded[0].options.body).input[1].data.length, imageData.length);
+  } finally {
+    cleanup();
+  }
+});
+
+test("POST request submission returns 400 for invalid native input", async () => {
+  const { store, cleanup } = tempStore();
+  try {
+    let ensureRuntimeCalls = 0;
+    const handler = handlerFor({
+      store,
+      runtimeManager: {
+        status: async () => ({ runtimeId: "local", running: false }),
+        ensureRuntime: async () => {
+          ensureRuntimeCalls += 1;
+          return { runtimeId: "local", running: true };
+        },
+        proxyToRuntime: async () => {
+          throw new Error("runtime proxy should not be called");
+        },
+      },
+    });
+    const response = captureResponse();
+
+    await handler(
+      request(
+        "POST",
+        "/api/requests",
+        { ...operatorHeaders(store), "content-type": "application/json" },
+        JSON.stringify({ input: [{ type: "text", text: "" }] }),
+      ),
+      response.response,
+    );
+
+    const { statusCode, payload } = response.json();
+    assert.equal(statusCode, 400);
+    assert.equal(payload.ok, false);
+    assert.match(payload.error, /empty text/);
+    assert.equal(ensureRuntimeCalls, 0);
   } finally {
     cleanup();
   }

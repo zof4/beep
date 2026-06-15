@@ -1,12 +1,13 @@
-function boolEnv(name, fallback = false) {
-  const value = process.env[name];
-  if (value === undefined) return fallback;
-  return !["0", "false", "no", "off"].includes(value.toLowerCase());
+function positiveInteger(value, fallback) {
+  const parsed = Number.parseInt(String(value ?? ""), 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
-function positiveIntegerEnv(name, fallback) {
-  const parsed = Number.parseInt(String(process.env[name] ?? ""), 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+function readBeepExtensionConfig() {
+  const registry = globalThis.__BEEP_PI_EXTENSION_CONFIGS__;
+  const configId = process.env.BEEP_PI_EXTENSION_CONFIG_ID;
+  if (!(registry instanceof Map) || !configId) return {};
+  return registry.get(configId) || {};
 }
 
 function textFromContent(content) {
@@ -54,12 +55,14 @@ async function postJson(url, body, { token, timeoutMs }) {
 }
 
 export default function beepLcmContextExtension(pi) {
-  pi.on("context", async (event) => {
-    if (!boolEnv("BEEP_LCM_CONTEXT_ENABLED", true)) return undefined;
+  const config = readBeepExtensionConfig().lcmContext || {};
 
-    const url = process.env.BEEP_LCM_CONTEXT_URL;
-    const token = process.env.BEEP_LCM_CONTEXT_TOKEN;
-    const runtimeSessionId = process.env.BEEP_LCM_RUNTIME_SESSION_ID;
+  pi.on("context", async (event) => {
+    if (!config.enabled) return undefined;
+
+    const url = config.url;
+    const token = config.token;
+    const runtimeSessionId = config.runtimeSessionId;
     if (!url || !token || !runtimeSessionId) return undefined;
 
     const messages = Array.isArray(event.messages) ? event.messages : [];
@@ -69,11 +72,11 @@ export default function beepLcmContextExtension(pi) {
         runtimeSessionId,
         messages,
         prompt: latestUserPrompt(messages),
-        tokenBudget: positiveIntegerEnv("BEEP_LCM_CONTEXT_TOKEN_BUDGET", 128_000),
+        tokenBudget: positiveInteger(config.tokenBudget, 128_000),
       },
       {
         token,
-        timeoutMs: positiveIntegerEnv("BEEP_LCM_CONTEXT_TIMEOUT_MS", 15_000),
+        timeoutMs: positiveInteger(config.timeoutMs, 15_000),
       },
     );
 

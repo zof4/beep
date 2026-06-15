@@ -24,6 +24,7 @@ const STATE_OBJECT_MAP_FIELDS = [
   "approvals",
   "gatekeeperReviews",
   "sites",
+  "toolPackages",
 ];
 const STATE_MAP_ID_FIELDS = {
   agentRequests: "requestId",
@@ -31,6 +32,7 @@ const STATE_MAP_ID_FIELDS = {
   gatekeeperReviews: "reviewId",
   runtimes: "runtimeId",
   sites: "siteId",
+  toolPackages: "packageVersionId",
 };
 const UNSAFE_STATE_MAP_KEYS = new Set(["__proto__", "prototype", "constructor"]);
 const sleepArray = new Int32Array(new SharedArrayBuffer(4));
@@ -73,6 +75,7 @@ function initialState() {
     approvals: {},
     gatekeeperReviews: {},
     sites: {},
+    toolPackages: {},
     audit: [],
   };
 }
@@ -121,13 +124,42 @@ function assertValidStateIdentity(value) {
   }
 }
 
+function assertValidToolPackageIdentityPart(value, label) {
+  assertValidStateIdentity(value);
+  if (value.includes("@")) {
+    throw new Error(`invalid tool package ${label}: must not contain @`);
+  }
+}
+
+function isValidToolPackageIdentityPart(value) {
+  return isValidStateIdentity(value) && !value.includes("@");
+}
+
 function invalidStateShape(path, message) {
   throw new Error(`invalid state shape: ${path}: ${message}`);
+}
+
+function notFoundError(message) {
+  const error = new Error(message);
+  error.status = 404;
+  return error;
+}
+
+function conflictError(message) {
+  const error = new Error(message);
+  error.status = 409;
+  return error;
 }
 
 function validateStateIdentity(value, path, label) {
   if (!isValidStateIdentity(value)) {
     invalidStateShape(path, `${label} must be a non-empty safe string`);
+  }
+}
+
+function validateToolPackageIdentityPart(value, path, label) {
+  if (!isValidToolPackageIdentityPart(value)) {
+    invalidStateShape(path, `${label} must be a non-empty safe string without @`);
   }
 }
 
@@ -143,6 +175,7 @@ function validateStateMapRecords(state, field, path) {
       invalidStateShape(path, `${field}.${key}.${idField} must match map key`);
     }
     if (field === "exposures") validateExposureRecord(key, record, path);
+    if (field === "toolPackages") validateToolPackageRecord(key, record, path);
   }
 }
 
@@ -161,6 +194,44 @@ function validateExposureRecord(key, record, path) {
   if (`${record.runtimeId}:${containerPort}` !== key) {
     invalidStateShape(path, `exposures.${key} key must match runtimeId and containerPort`);
   }
+}
+
+function validateToolPackageRecord(key, record, path) {
+  validateToolPackageIdentityPart(record.packageId, path, `toolPackages.${key}.packageId`);
+  validateToolPackageIdentityPart(record.version, path, `toolPackages.${key}.version`);
+  validateStateIdentity(record.packageVersionId, path, `toolPackages.${key}.packageVersionId`);
+  const expectedKey = `${record.packageId}@${record.version}`;
+  if (key !== expectedKey) {
+    invalidStateShape(path, `toolPackages.${key} key must match packageId and version`);
+  }
+  if (record.packageVersionId !== key) {
+    invalidStateShape(path, `toolPackages.${key}.packageVersionId must match map key`);
+  }
+}
+
+function operatorOwnedEnabledTools(enabledTools, knownToolNames) {
+  if (!isPlainObject(enabledTools)) return {};
+  const filtered = {};
+  for (const [toolName, entry] of Object.entries(enabledTools)) {
+    if (!isValidStateIdentity(toolName) || !knownToolNames.has(toolName) || !isPlainObject(entry)) continue;
+    if (entry.decidedBy !== "operator" || typeof entry.enabled !== "boolean") continue;
+    if (typeof entry.decidedAt !== "string" || entry.decidedAt.trim() === "") continue;
+    filtered[toolName] = {
+      enabled: entry.enabled,
+      decidedBy: entry.decidedBy,
+      decidedAt: entry.decidedAt,
+    };
+  }
+  return filtered;
+}
+
+function sanitizedToolPackageRecord(pkg) {
+  const tools = Array.isArray(pkg.tools) ? pkg.tools : [];
+  const knownToolNames = new Set(tools.map((tool) => tool?.name));
+  return {
+    ...pkg,
+    enabledTools: operatorOwnedEnabledTools(pkg.enabledTools, knownToolNames),
+  };
 }
 
 function normalizeStateShape(state, path) {
@@ -397,7 +468,8 @@ export class StateStore {
       schemaVersion: 1,
       requestId,
       runtimeId: request.runtimeId || null,
-      message: request.message || "",
+      input: Array.isArray(request.input) ? request.input : [],
+      inputSummary: request.inputSummary || null,
       status: "submitted",
       source: request.source || "control-plane",
       createdAt,
@@ -410,6 +482,7 @@ export class StateStore {
         requestId,
         runtimeId: created.runtimeId,
         status: created.status,
+        inputSummary: created.inputSummary,
       });
     });
     return created;
@@ -474,6 +547,116 @@ export class StateStore {
       .filter((site) => !status || site.status === status)
       .sort((left, right) => String(right.updatedAt).localeCompare(String(left.updatedAt)))
       .slice(0, limit);
+  }
+
+  toolPackageVersionId({ packageId, version }) {
+    assertValidToolPackageIdentityPart(packageId, "packageId");
+    assertValidToolPackageIdentityPart(version, "version");
+    return `${packageId}@${version}`;
+  }
+
+  installToolPackage(pkg) {
+    const packageVersionId = this.toolPackageVersionId(pkg);
+    const timestamp = nowIso();
+    const packageFields = { ...pkg };
+    delete packageFields.enabledTools;
+    let installed = null;
+    this.update((state) => {
+      const existing = state.toolPackages[packageVersionId] || {};
+      const knownToolNames = new Set((Array.isArray(pkg.tools) ? pkg.tools : []).map((tool) => tool?.name));
+      installed = {
+        ...packageFields,
+        packageVersionId,
+        status: pkg.status || "installed",
+        enabledTools: operatorOwnedEnabledTools(existing.enabledTools, knownToolNames),
+        installedAt: existing.installedAt || pkg.installedAt || timestamp,
+        updatedAt: timestamp,
+      };
+      state.toolPackages[packageVersionId] = installed;
+      appendAuditEvent(state, {
+        kind: "tool_package_install",
+        packageVersionId,
+        packageId: pkg.packageId,
+        version: pkg.version,
+        packageHash: pkg.packageHash,
+      });
+    });
+    return installed;
+  }
+
+  listToolPackages() {
+    return Object.values(this.readState().toolPackages || {}).map((pkg) => sanitizedToolPackageRecord(pkg));
+  }
+
+  getToolPackage(packageId, version) {
+    const packageVersionId = this.toolPackageVersionId({ packageId, version });
+    const pkg = this.readState().toolPackages?.[packageVersionId] || null;
+    return pkg ? sanitizedToolPackageRecord(pkg) : null;
+  }
+
+  setToolPackageToolEnabled({ packageId, version, toolName, enabled, decidedBy = "operator" }) {
+    const packageVersionId = this.toolPackageVersionId({ packageId, version });
+    assertValidStateIdentity(toolName);
+    let next = null;
+    this.update((state) => {
+      const current = state.toolPackages[packageVersionId];
+      if (!current) throw notFoundError(`tool package not found: ${packageVersionId}`);
+
+      const tool = Array.isArray(current.tools) ? current.tools.find((candidate) => candidate?.name === toolName) : null;
+      if (!tool) throw notFoundError(`tool not found in package ${packageVersionId}: ${toolName}`);
+
+      const decidedAt = nowIso();
+      if (enabled) {
+        for (const [otherPackageVersionId, otherPackage] of Object.entries(state.toolPackages || {})) {
+          if (otherPackageVersionId === packageVersionId) continue;
+          const otherTools = Array.isArray(otherPackage.tools) ? otherPackage.tools : [];
+          const conflictingTool = otherTools.find(
+            (candidate) => candidate?.action === tool.action && otherPackage.enabledTools?.[candidate.name]?.enabled === true,
+          );
+          if (conflictingTool) {
+            throw conflictError(`tool action already enabled in package ${otherPackageVersionId}: ${tool.action}`);
+          }
+        }
+      }
+      next = {
+        ...current,
+        enabledTools: {
+          ...(current.enabledTools || {}),
+          [toolName]: {
+            enabled: Boolean(enabled),
+            decidedBy,
+            decidedAt,
+          },
+        },
+        updatedAt: decidedAt,
+      };
+      state.toolPackages[packageVersionId] = next;
+      appendAuditEvent(state, {
+        kind: enabled ? "tool_enable" : "tool_disable",
+        packageVersionId,
+        packageId,
+        version,
+        toolName,
+        action: tool.action,
+        decidedBy,
+      });
+    });
+    return next;
+  }
+
+  listEnabledToolDefinitions() {
+    return this.listToolPackages().flatMap((pkg) => {
+      const tools = Array.isArray(pkg.tools) ? pkg.tools : [];
+      return tools
+        .filter((tool) => pkg.enabledTools[tool.name]?.enabled === true)
+        .map((tool) => ({
+          ...tool,
+          packageId: pkg.packageId,
+          version: pkg.version,
+          packageVersionId: pkg.packageVersionId,
+          packageHash: pkg.packageHash,
+        }));
+    });
   }
 
   createApproval(approval) {

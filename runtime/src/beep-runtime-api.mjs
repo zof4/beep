@@ -1,27 +1,25 @@
 import { randomUUID } from "node:crypto";
 import { createServer } from "node:http";
-import { spawn } from "node:child_process";
 import {
-  createWriteStream,
   existsSync,
   mkdirSync,
   readdirSync,
   readFileSync,
   renameSync,
-  statSync,
   writeFileSync,
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { resolveCodexAccessToken } from "./codex-auth-for-pi.mjs";
 import { DockerSandboxManager } from "./docker-sandbox-manager.mjs";
+import { PiNativeSession } from "./pi-native-session.mjs";
 import { authorizeRuntimeApiRequest, createRuntimeHealthProof } from "./runtime-api-auth.mjs";
 import { executeSandboxTool } from "./sandbox-tool-executor.mjs";
 import { normalizeSandboxToolRequest } from "./sandbox-tool-protocol.mjs";
+import { labelBeepInput, normalizeBeepInput, redactBeepInput, summarizeBeepInput } from "../../shared/native-input.mjs";
 import {
   defaultLcmService,
   lcmSessionIdForRuntimeSession,
   lcmSessionKeyForRuntimeSession,
-  writeLcmSummaryFile,
 } from "./lcm-service.mjs";
 import { defaultMemoryCoordinator } from "./memory-coordinator.mjs";
 
@@ -49,6 +47,22 @@ const LCM_CONTEXT_URL = process.env.BEEP_LCM_CONTEXT_URL || `http://127.0.0.1:${
 const LCM_CONTEXT_TOKEN = process.env.BEEP_LCM_CONTEXT_TOKEN || randomUUID();
 const LCM_CONTEXT_TOKEN_BUDGET = process.env.BEEP_LCM_CONTEXT_TOKEN_BUDGET || "128000";
 const LCM_CONTEXT_TIMEOUT_MS = process.env.BEEP_LCM_CONTEXT_TIMEOUT_MS || "15000";
+const CODEX_WEB_SEARCH_EXTENSION_ENABLED =
+  !["0", "false", "no", "off"].includes(String(process.env.BEEP_CODEX_WEB_SEARCH_EXTENSION_ENABLED || "1").toLowerCase());
+const CODEX_WEB_SEARCH_ENABLED =
+  !["0", "false", "no", "off"].includes(String(process.env.BEEP_CODEX_WEB_SEARCH_ENABLED || "1").toLowerCase());
+const CODEX_WEB_SEARCH_EXTENSION_PATH =
+  process.env.BEEP_CODEX_WEB_SEARCH_EXTENSION_PATH || "/runtime/pi-extensions/codex-web-search-extension.mjs";
+const CODEX_WEB_SEARCH_MODE = process.env.BEEP_CODEX_WEB_SEARCH_MODE || "live";
+const CODEX_WEB_SEARCH_OPTIONAL_ENV_KEYS = [
+  "BEEP_CODEX_WEB_SEARCH_ALLOWED_DOMAINS",
+  "BEEP_CODEX_WEB_SEARCH_CONTEXT_SIZE",
+  "BEEP_CODEX_WEB_SEARCH_CONTENT_TYPES",
+  "BEEP_CODEX_WEB_SEARCH_LOCATION_COUNTRY",
+  "BEEP_CODEX_WEB_SEARCH_LOCATION_REGION",
+  "BEEP_CODEX_WEB_SEARCH_LOCATION_CITY",
+  "BEEP_CODEX_WEB_SEARCH_LOCATION_TIMEZONE",
+];
 const CONTROL_PLANE_TOOLS_ENABLED =
   !["0", "false", "no", "off"].includes(String(process.env.BEEP_CONTROL_PLANE_TOOLS_ENABLED || "0").toLowerCase());
 const CONTROL_PLANE_TOOLS_EXTENSION_PATH =
@@ -70,10 +84,29 @@ const SANDBOX_LOCAL_BACKEND_ENABLED =
 const SANDBOX_WORKSPACE_ROOT = process.env.BEEP_SANDBOX_WORKSPACE_ROOT || join(WORKSPACE_DIR, "sandboxes");
 const SANDBOX_DOCKER_WORKSPACE_ROOT = process.env.BEEP_SANDBOX_DOCKER_WORKSPACE_ROOT || SANDBOX_WORKSPACE_ROOT;
 const DEFAULT_PROMPT_TIMEOUT_MS = 10 * 60 * 1000;
-const DEFAULT_RPC_TIMEOUT_MS = 60 * 1000;
 const MAX_REQUEST_BYTES = Number.parseInt(process.env.BEEP_MAX_REQUEST_BYTES || `${8 * 1024 * 1024}`, 10);
-const EVENT_MEMORY_LIMIT = 2_000;
 const THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh"]);
+const CODEX_AUTH_ENV = {
+  BEEP_MODEL_GATEWAY_CREDENTIAL_URL: process.env.BEEP_MODEL_GATEWAY_CREDENTIAL_URL || "",
+  BEEP_MODEL_GATEWAY_CAPABILITY_TOKEN: process.env.BEEP_MODEL_GATEWAY_CAPABILITY_TOKEN || "",
+  BEEP_ALLOW_RUNTIME_CODEX_AUTH: process.env.BEEP_ALLOW_RUNTIME_CODEX_AUTH || "",
+  BEEP_PI_CODEX_MODEL: process.env.BEEP_PI_CODEX_MODEL || DEFAULT_MODEL,
+};
+
+function scrubSensitiveRuntimeEnv() {
+  delete process.env.BEEP_RUNTIME_API_TOKEN;
+  delete process.env.BEEP_CONTROL_PLANE_OPERATOR_TOKEN;
+  delete process.env.BEEP_OPERATOR_TOKEN;
+  delete process.env.BEEP_MODEL_GATEWAY_CREDENTIAL_URL;
+  delete process.env.BEEP_MODEL_GATEWAY_CAPABILITY_TOKEN;
+  delete process.env.BEEP_MODEL_CREDENTIAL_TOKEN;
+  delete process.env.BEEP_MODEL_GATEWAY_TOKEN;
+  delete process.env.BEEP_CONTROL_PLANE_RUNTIME_TOKEN;
+  delete process.env.BEEP_LCM_CONTEXT_TOKEN;
+  delete process.env.BEEP_SANDBOX_TOOL_PORTAL_TOKEN;
+}
+
+scrubSensitiveRuntimeEnv();
 
 const sessions = new Map();
 const defaultSandboxManager = new DockerSandboxManager({
@@ -145,23 +178,6 @@ function newRequestId(prefix = "req") {
   return `${prefix}_${Date.now().toString(36)}_${randomUUID().slice(0, 8)}`;
 }
 
-function readTextLines(path) {
-  if (!existsSync(path)) return [];
-  return readFileSync(path, "utf8").split(/\r?\n/u);
-}
-
-function listSessionFiles(sessionDir) {
-  if (!existsSync(sessionDir)) return [];
-  return readdirSync(sessionDir)
-    .filter((name) => name.endsWith(".jsonl"))
-    .map((name) => {
-      const path = join(sessionDir, name);
-      const stats = statSync(path);
-      return { name, path, modifiedAtMs: stats.mtimeMs };
-    })
-    .sort((left, right) => right.modifiedAtMs - left.modifiedAtMs);
-}
-
 function parseJsonl(path) {
   if (!existsSync(path)) return [];
   return readFileSync(path, "utf8")
@@ -180,69 +196,6 @@ function parseJsonl(path) {
         };
       }
     });
-}
-
-function listDirectory(path) {
-  if (!existsSync(path)) return [];
-  return readdirSync(path)
-    .map((name) => {
-      const fullPath = join(path, name);
-      const stats = statSync(fullPath);
-      return {
-        name,
-        type: stats.isDirectory() ? "directory" : "file",
-        bytes: stats.isFile() ? stats.size : null,
-        modifiedAt: new Date(stats.mtimeMs).toISOString(),
-      };
-    })
-    .sort((left, right) => left.name.localeCompare(right.name));
-}
-
-function textFromContent(content) {
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-  return content
-    .map((part) => {
-      if (!part || typeof part !== "object") return "";
-      if (part.type === "text") return part.text || "";
-      if (part.type === "thinking") return part.thinking ? `[thinking] ${part.thinking}` : "[thinking]";
-      if (part.type === "toolCall") return `[tool:${part.name || "unknown"}] ${JSON.stringify(part.arguments ?? {})}`;
-      return "";
-    })
-    .filter(Boolean)
-    .join("\n");
-}
-
-function summarizeEvents(events) {
-  const byType = {};
-  let responses = 0;
-  let failedResponses = 0;
-  let parseErrors = 0;
-  let finalAssistantText = null;
-  let lastUsage = null;
-  for (const event of events) {
-    const type = event?.type || "unknown";
-    byType[type] = (byType[type] || 0) + 1;
-    if (type === "parse_error") parseErrors += 1;
-    if (type === "response") {
-      responses += 1;
-      if (event.success === false) failedResponses += 1;
-    }
-    const message = event?.message;
-    if ((type === "message_end" || type === "turn_end") && message?.role === "assistant") {
-      finalAssistantText = textFromContent(message.content) || finalAssistantText;
-      if (message.usage) lastUsage = message.usage;
-    }
-  }
-  return {
-    total: events.length,
-    byType,
-    responses,
-    failedResponses,
-    parseErrors,
-    finalAssistantText,
-    lastUsage,
-  };
 }
 
 function jsonResponse(res, status, payload, extraHeaders = {}) {
@@ -289,20 +242,14 @@ async function readRequestJson(req) {
   }
 }
 
-function commandPath() {
-  return {
-    tsxBin: join(PI_ROOT, "node_modules/.bin/tsx"),
-    piCli: join(PI_ROOT, "packages/coding-agent/src/cli.ts"),
-  };
-}
-
 function validateRuntimeReady() {
-  const { tsxBin, piCli } = commandPath();
-  if (!existsSync(tsxBin)) {
-    throw new Error(`Pi dependencies are not installed at ${tsxBin}. Rebuild the runtime image.`);
+  const codingAgentDist = join(PI_ROOT, "packages/coding-agent/dist/index.js");
+  const aiDist = join(PI_ROOT, "packages/ai/dist/index.js");
+  if (!existsSync(codingAgentDist)) {
+    throw new Error(`Vendored Pi coding-agent SDK is missing at ${codingAgentDist}. Rebuild the runtime image.`);
   }
-  if (!existsSync(piCli)) {
-    throw new Error(`Vendored Pi CLI source is missing at ${piCli}.`);
+  if (!existsSync(aiDist)) {
+    throw new Error(`Vendored Pi AI SDK is missing at ${aiDist}. Rebuild the runtime image.`);
   }
 }
 
@@ -312,658 +259,66 @@ function validateThinking(thinking) {
   }
 }
 
-function buildPiChildEnv(session, { lcmContextExtensionLoaded, controlPlaneToolsExtensionLoaded, sandboxToolPortalExtensionLoaded }) {
-  const env = {
-    PATH: process.env.PATH || "",
-    HOME: process.env.HOME || join(STATE_DIR, "home"),
-    TMPDIR: process.env.TMPDIR || "/tmp",
-    CODEX_HOME,
-    BEEP_STATE_DIR: STATE_DIR,
-    BEEP_WORKSPACE_DIR: WORKSPACE_DIR,
-    PI_CODING_AGENT_DIR: join(session.rootDir, "pi-agent"),
-    PI_CODING_AGENT_SESSION_DIR: session.sessionDir,
-    BEEP_LCM_CONTEXT_ENABLED: lcmContextExtensionLoaded ? "1" : "0",
-    BEEP_LCM_CONTEXT_URL: LCM_CONTEXT_URL,
-    BEEP_LCM_CONTEXT_TOKEN: LCM_CONTEXT_TOKEN,
-    BEEP_LCM_RUNTIME_SESSION_ID: session.id,
-    BEEP_LCM_CONTEXT_TOKEN_BUDGET: LCM_CONTEXT_TOKEN_BUDGET,
-    BEEP_LCM_CONTEXT_TIMEOUT_MS: LCM_CONTEXT_TIMEOUT_MS,
-    BEEP_CONTROL_PLANE_TOOLS_ENABLED: controlPlaneToolsExtensionLoaded ? "1" : "0",
-    BEEP_SANDBOX_TOOL_PORTAL_ENABLED: sandboxToolPortalExtensionLoaded ? "1" : "0",
-  };
+function buildPiNativeSessionOptions(options = {}) {
+  const runtimeConfig = loadRuntimeConfig();
+  const model = String(options.model || runtimeConfig.model || DEFAULT_MODEL);
+  const thinking = String(options.thinking || runtimeConfig.thinking || DEFAULT_THINKING);
+  validateThinking(thinking);
 
-  if (sandboxToolPortalExtensionLoaded) {
-    env.BEEP_SANDBOX_TOOL_PORTAL_URL = SANDBOX_TOOL_PORTAL_URL;
-    env.BEEP_SANDBOX_TOOL_PORTAL_TOKEN = RUNTIME_API_TOKEN;
-    env.BEEP_SANDBOX_TOOL_PORTAL_TIMEOUT_MS = SANDBOX_TOOL_PORTAL_TIMEOUT_MS;
-  }
-
-  if (controlPlaneToolsExtensionLoaded) {
-    env.BEEP_CONTROL_PLANE_TOOLS_EXTENSION_PATH = CONTROL_PLANE_TOOLS_EXTENSION_PATH;
-    env.BEEP_CONTROL_PLANE_URL = CONTROL_PLANE_URL;
-    env.BEEP_CONTROL_PLANE_RUNTIME_ID = CONTROL_PLANE_RUNTIME_ID;
-    env.BEEP_CONTROL_PLANE_RUNTIME_TOKEN = CONTROL_PLANE_RUNTIME_TOKEN;
-    env.BEEP_CONTROL_PLANE_TOOL_TIMEOUT_MS = CONTROL_PLANE_TOOL_TIMEOUT_MS;
-  }
-
-  delete env.BEEP_MODEL_GATEWAY_CREDENTIAL_URL;
-  delete env.BEEP_MODEL_GATEWAY_CAPABILITY_TOKEN;
-  delete env.BEEP_RUNTIME_API_TOKEN;
-  delete env.BEEP_CONTROL_PLANE_OPERATOR_TOKEN;
-  delete env.BEEP_OPERATOR_TOKEN;
-  delete env.BEEP_MODEL_CREDENTIAL_TOKEN;
-  delete env.BEEP_MODEL_GATEWAY_TOKEN;
-
-  for (const [key, value] of Object.entries(env)) {
-    if (value === undefined || value === null) delete env[key];
-  }
-  return env;
-}
-
-class PiRpcSession {
-  constructor({ id, model, thinking, rootDir, workspace, sessionDir, resumeLatest = false }) {
-    this.id = id;
-    this.model = model;
-    this.thinking = thinking;
-    this.rootDir = rootDir;
-    this.workspace = workspace;
-    this.sessionDir = sessionDir;
-    this.resumeLatest = resumeLatest;
-    this.eventsPath = join(rootDir, "events.jsonl");
-    this.stdoutPath = join(rootDir, "stdout.log");
-    this.stderrPath = join(rootDir, "stderr.log");
-    this.statusPath = join(rootDir, "status.json");
-    this.summaryPath = join(rootDir, "summary.json");
-    this.lcmSummaryPath = join(rootDir, "lcm-summary.json");
-    this.lcmContextInjectionPath = join(rootDir, "lcm-context-injection.json");
-    this.hindsightMemoryPath = join(rootDir, "hindsight-memory.json");
-    const existingEvents = parseJsonl(this.eventsPath);
-    const existingSummary = summarizeEvents(existingEvents);
-    this.createdAt = nowIso();
-    this.updatedAt = this.createdAt;
-    this.phase = "starting";
-    this.exitCode = null;
-    this.signal = null;
-    this.pid = null;
-    this.lastError = null;
-    this.lastAssistantText = existingSummary.finalAssistantText;
-    this.eventCount = existingEvents.length;
-    this.agentEndCount = existingSummary.byType.agent_end || 0;
-    this.recentEvents = [];
-    this.pendingResponses = new Map();
-    this.agentEndWaiters = [];
-    this.closed = false;
-    this.stdoutBuffer = "";
-    this.stderrTail = "";
-  }
-
-  static async start(options = {}) {
-    validateRuntimeReady();
-    const runtimeConfig = loadRuntimeConfig();
-    const model = String(options.model || runtimeConfig.model || DEFAULT_MODEL);
-    const thinking = String(options.thinking || runtimeConfig.thinking || DEFAULT_THINKING);
-    validateThinking(thinking);
-
-    const id = options.id || newSessionId(options.prefix || "sess");
-    const rootDir = join(API_SESSIONS_DIR, id);
-    const workspace = resolve(join(API_WORKSPACE_DIR, id));
-    const sessionDir = join(rootDir, "pi-sessions");
-    ensureDir(rootDir);
-    ensureDir(workspace);
-    ensureDir(sessionDir);
-
-    const session = new PiRpcSession({
-      id,
-      model,
-      thinking,
-      rootDir,
-      workspace,
-      sessionDir,
-      resumeLatest: Boolean(options.resumeLatest),
-    });
-    await session.spawn();
-    sessions.set(id, session);
-    return session;
-  }
-
-  async spawn() {
-    const accessToken = await resolveCodexAccessToken(CODEX_HOME, {
-      provider: "openai-codex",
-      model: this.model,
-      runtimeSessionId: this.id,
-    });
-    const { tsxBin, piCli } = commandPath();
-    const args = [
-      piCli,
-      "--provider",
-      "openai-codex",
-      "--model",
-      this.model,
-      "--thinking",
-      this.thinking,
-      "--api-key",
-      accessToken,
-      "--mode",
-      "rpc",
-      "--session-dir",
-      this.sessionDir,
-    ];
-    const resumedFrom = this.resumeLatest ? listSessionFiles(this.sessionDir)[0]?.path || null : null;
-    if (resumedFrom) {
-      args.push("--continue");
-    }
-    const lcmContextExtensionLoaded = LCM_CONTEXT_ENABLED && existsSync(LCM_CONTEXT_EXTENSION_PATH);
-    if (lcmContextExtensionLoaded) {
-      args.push("--extension", LCM_CONTEXT_EXTENSION_PATH);
-    }
-    const sandboxToolPortalExtensionLoaded =
-      SANDBOX_TOOL_PORTAL_ENABLED && Boolean(RUNTIME_API_TOKEN) && existsSync(SANDBOX_TOOL_PORTAL_EXTENSION_PATH);
-    if (sandboxToolPortalExtensionLoaded) {
-      args.push("--extension", SANDBOX_TOOL_PORTAL_EXTENSION_PATH);
-    }
-    const controlPlaneToolsExtensionLoaded =
-      CONTROL_PLANE_TOOLS_ENABLED &&
-      Boolean(CONTROL_PLANE_URL) &&
-      Boolean(CONTROL_PLANE_RUNTIME_TOKEN) &&
-      existsSync(CONTROL_PLANE_TOOLS_EXTENSION_PATH);
-    if (controlPlaneToolsExtensionLoaded) {
-      args.push("--extension", CONTROL_PLANE_TOOLS_EXTENSION_PATH);
-    }
-
-    writeJsonFile(join(this.rootDir, "run-config.json"), {
-      schemaVersion: 1,
-      id: this.id,
-      provider: "openai-codex",
-      model: this.model,
-      thinking: this.thinking,
-      workspace: this.workspace,
-      sessionDir: this.sessionDir,
-      piRoot: PI_ROOT,
-      codexHome: CODEX_HOME,
-      resumeLatest: this.resumeLatest,
-      resumedFrom,
-      lcmContext: {
-        enabled: LCM_CONTEXT_ENABLED,
-        extensionPath: LCM_CONTEXT_EXTENSION_PATH,
-        extensionLoaded: lcmContextExtensionLoaded,
-        url: LCM_CONTEXT_URL,
-        tokenBudget: Number(LCM_CONTEXT_TOKEN_BUDGET),
-        timeoutMs: Number(LCM_CONTEXT_TIMEOUT_MS),
-      },
-      sandboxToolPortal: {
-        enabled: SANDBOX_TOOL_PORTAL_ENABLED,
-        extensionPath: SANDBOX_TOOL_PORTAL_EXTENSION_PATH,
-        extensionLoaded: sandboxToolPortalExtensionLoaded,
-        url: SANDBOX_TOOL_PORTAL_URL,
-        timeoutMs: Number(SANDBOX_TOOL_PORTAL_TIMEOUT_MS),
-      },
-      controlPlaneTools: {
-        enabled: CONTROL_PLANE_TOOLS_ENABLED,
-        extensionPath: CONTROL_PLANE_TOOLS_EXTENSION_PATH,
-        extensionLoaded: controlPlaneToolsExtensionLoaded,
-        url: CONTROL_PLANE_URL || null,
-        runtimeId: CONTROL_PLANE_RUNTIME_ID,
-        runtimeTokenConfigured: Boolean(CONTROL_PLANE_RUNTIME_TOKEN),
-        timeoutMs: Number(CONTROL_PLANE_TOOL_TIMEOUT_MS),
-      },
-      createdAt: this.createdAt,
-    });
-
-    const env = buildPiChildEnv(this, {
-      lcmContextExtensionLoaded,
-      controlPlaneToolsExtensionLoaded,
-      sandboxToolPortalExtensionLoaded,
-    });
-
-    this.stdoutStream = createWriteStream(this.stdoutPath, { flags: "a" });
-    this.stderrStream = createWriteStream(this.stderrPath, { flags: "a" });
-    this.eventsStream = createWriteStream(this.eventsPath, { flags: "a" });
-    this.child = spawn(tsxBin, args, {
-      cwd: this.workspace,
-      env,
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-    this.pid = this.child.pid ?? null;
-    this.phase = "running";
-    this.updatedAt = nowIso();
-    this.writeStatus();
-
-    this.child.stdout.setEncoding("utf8");
-    this.child.stdout.on("data", (chunk) => this.handleStdout(chunk));
-    this.child.stderr.setEncoding("utf8");
-    this.child.stderr.on("data", (chunk) => this.handleStderr(chunk));
-    this.child.on("error", (error) => {
-      this.lastError = error instanceof Error ? error.message : String(error);
-      this.phase = "failed";
-      this.updatedAt = nowIso();
-      this.writeStatus();
-      this.rejectPending(error);
-    });
-    this.child.on("close", (code, signal) => {
-      this.closed = true;
-      this.exitCode = code;
-      this.signal = signal;
-      if (this.stdoutBuffer.trim()) {
-        this.handleLine(this.stdoutBuffer.trim());
-        this.stdoutBuffer = "";
-      }
-      this.phase = code === 0 ? "closed" : this.phase === "stopping" ? "closed" : "failed";
-      this.updatedAt = nowIso();
-      this.writeSummary();
-      this.writeStatus();
-      this.rejectPending(new Error(`Pi RPC session closed with code ${code ?? "null"} signal ${signal ?? "none"}.`));
-      this.resolveAgentEndWaiters();
-      this.stdoutStream?.end();
-      this.stderrStream?.end();
-      this.eventsStream?.end();
-    });
-
-    if (lcmContextExtensionLoaded) {
-      try {
-        const response = await this.send({ type: "set_auto_compaction", enabled: false }, DEFAULT_RPC_TIMEOUT_MS);
-        this.recordLcmContextInjection({
-          kind: "pi_auto_compaction",
-          ok: response.success !== false,
-          at: nowIso(),
-          detail: "Pi native auto-compaction disabled so Beep LCM owns context assembly.",
-        });
-      } catch (error) {
-        this.lastError = `Failed to disable Pi auto-compaction: ${error instanceof Error ? error.message : String(error)}`;
-        this.recordLcmContextInjection({
-          kind: "pi_auto_compaction",
-          ok: false,
-          at: nowIso(),
-          error: this.lastError,
-        });
-      }
-      this.writeStatus();
-    }
-  }
-
-  handleStdout(chunk) {
-    this.stdoutStream.write(chunk);
-    this.stdoutBuffer += chunk;
-    let newlineIndex = this.stdoutBuffer.indexOf("\n");
-    while (newlineIndex !== -1) {
-      const line = this.stdoutBuffer.slice(0, newlineIndex).trim();
-      this.stdoutBuffer = this.stdoutBuffer.slice(newlineIndex + 1);
-      if (line) this.handleLine(line);
-      newlineIndex = this.stdoutBuffer.indexOf("\n");
-    }
-  }
-
-  handleStderr(chunk) {
-    this.stderrStream.write(chunk);
-    this.stderrTail = `${this.stderrTail}${chunk}`.slice(-8_000);
-    this.updatedAt = nowIso();
-    this.writeStatus();
-  }
-
-  handleLine(line) {
-    this.eventsStream.write(`${line}\n`);
-    let event;
-    try {
-      event = JSON.parse(line);
-    } catch (error) {
-      event = {
-        type: "parse_error",
-        message: error instanceof Error ? error.message : String(error),
-        raw: line,
-      };
-    }
-
-    this.eventCount += 1;
-    this.recentEvents.push(event);
-    if (this.recentEvents.length > EVENT_MEMORY_LIMIT) this.recentEvents.shift();
-
-    if (event.type === "agent_start") {
-      this.phase = "agent_running";
-    } else if (event.type === "agent_end") {
-      this.agentEndCount += 1;
-      this.phase = "idle";
-      this.resolveAgentEndWaiters();
-      this.writeSummary();
-    } else if (event.type === "turn_start") {
-      this.phase = "turn_running";
-    } else if (event.type === "turn_end") {
-      this.phase = "turn_complete";
-    }
-
-    if ((event.type === "message_end" || event.type === "turn_end") && event.message?.role === "assistant") {
-      this.lastAssistantText = textFromContent(event.message.content) || this.lastAssistantText;
-    }
-
-    if (event.type === "response" && event.id && this.pendingResponses.has(event.id)) {
-      const pending = this.pendingResponses.get(event.id);
-      this.pendingResponses.delete(event.id);
-      clearTimeout(pending.timeout);
-      pending.resolve(event);
-    }
-
-    this.updatedAt = nowIso();
-    this.writeStatus();
-  }
-
-  writeStatus() {
-    writeJsonFile(this.statusPath, this.status());
-  }
-
-  writeSummary(extra = {}) {
-    const events = parseJsonl(this.eventsPath);
-    const summary = {
-      ok: this.exitCode === null || this.exitCode === 0,
-      sessionId: this.id,
-      provider: "openai-codex",
-      model: this.model,
-      thinking: this.thinking,
-      phase: this.phase,
-      createdAt: this.createdAt,
-      updatedAt: this.updatedAt,
-      workspace: {
-        path: this.workspace,
-        entries: listDirectory(this.workspace),
-      },
-      events: {
-        path: this.eventsPath,
-        ...summarizeEvents(events),
-      },
-      lastAssistantText: this.lastAssistantText,
-      lcm: readJsonFile(this.lcmSummaryPath, null),
-      lcmContextInjection: this.readLcmContextInjection(),
-      hindsightMemory: this.readHindsightMemory(),
+  const id = options.id || newSessionId(options.prefix || "sess");
+  const rootDir = options.rootDir || join(API_SESSIONS_DIR, id);
+  const workspace = options.workspace || resolve(join(API_WORKSPACE_DIR, id));
+  const sessionDir = options.sessionDir || join(rootDir, "pi-sessions");
+  return {
+    id,
+    model,
+    thinking,
+    rootDir,
+    workspace,
+    sessionDir,
+    piRoot: PI_ROOT,
+    codexHome: CODEX_HOME,
+    resumeLatest: Boolean(options.resumeLatest),
+    resolveAccessToken: () =>
+      resolveCodexAccessToken(CODEX_HOME, {
+        provider: "openai-codex",
+        model,
+        runtimeSessionId: id,
+        env: CODEX_AUTH_ENV,
+      }),
+    extensionConfig: {
+      STATE_DIR,
+      WORKSPACE_DIR,
+      RUNTIME_API_TOKEN,
+      LCM_CONTEXT_ENABLED,
+      LCM_CONTEXT_EXTENSION_PATH,
+      LCM_CONTEXT_URL,
+      LCM_CONTEXT_TOKEN,
+      LCM_CONTEXT_TOKEN_BUDGET,
+      LCM_CONTEXT_TIMEOUT_MS,
+      CODEX_WEB_SEARCH_EXTENSION_ENABLED,
+      CODEX_WEB_SEARCH_ENABLED,
+      CODEX_WEB_SEARCH_EXTENSION_PATH,
+      CODEX_WEB_SEARCH_MODE,
+      CODEX_WEB_SEARCH_OPTIONAL_ENV_KEYS,
+      CONTROL_PLANE_TOOLS_ENABLED,
+      CONTROL_PLANE_TOOLS_EXTENSION_PATH,
+      CONTROL_PLANE_URL,
+      CONTROL_PLANE_RUNTIME_ID,
+      CONTROL_PLANE_RUNTIME_TOKEN,
+      CONTROL_PLANE_TOOL_TIMEOUT_MS,
+      SANDBOX_TOOL_PORTAL_ENABLED,
+      SANDBOX_TOOL_PORTAL_EXTENSION_PATH,
+      SANDBOX_TOOL_PORTAL_URL,
+      SANDBOX_TOOL_PORTAL_TIMEOUT_MS,
+    },
+    writeSummaryExtra: (session) => ({
       sandbox: {
         backend: SANDBOX_TOOL_BACKEND,
-        active: defaultSandboxManager.status(this.id),
+        active: defaultSandboxManager.status(session.id),
       },
-      ...extra,
-    };
-    writeJsonFile(this.summaryPath, summary);
-    return summary;
-  }
-
-  status() {
-    return {
-      id: this.id,
-      provider: "openai-codex",
-      model: this.model,
-      thinking: this.thinking,
-      phase: this.phase,
-      pid: this.pid,
-      closed: this.closed,
-      exitCode: this.exitCode,
-      signal: this.signal,
-      createdAt: this.createdAt,
-      updatedAt: this.updatedAt,
-      workspace: this.workspace,
-      rootDir: this.rootDir,
-      sessionDir: this.sessionDir,
-      eventsPath: this.eventsPath,
-      summaryPath: this.summaryPath,
-      lcmContextInjectionPath: this.lcmContextInjectionPath,
-      lcmContextInjection: this.readLcmContextInjection(),
-      hindsightMemoryPath: this.hindsightMemoryPath,
-      hindsightMemory: this.readHindsightMemory(),
-      eventCount: this.eventCount,
-      agentEndCount: this.agentEndCount,
-      pendingResponseCount: this.pendingResponses.size,
-      lastAssistantText: this.lastAssistantText,
-      lastError: this.lastError,
-      stderrTail: this.stderrTail,
-    };
-  }
-
-  readLcmContextInjection() {
-    return readJsonFile(this.lcmContextInjectionPath, {
-      schemaVersion: 1,
-      enabled: LCM_CONTEXT_ENABLED,
-      total: 0,
-      failures: 0,
-      history: [],
-    });
-  }
-
-  recordLcmContextInjection(event) {
-    const current = this.readLcmContextInjection();
-    const history = Array.isArray(current.history) ? current.history : [];
-    const nextEvent = {
-      ...event,
-      at: event.at || nowIso(),
-    };
-    const byKind = { ...(current.byKind && typeof current.byKind === "object" ? current.byKind : {}) };
-    const kind = nextEvent.kind || "unknown";
-    byKind[kind] = Number(byKind[kind] || 0) + 1;
-    const next = {
-      schemaVersion: 1,
-      enabled: LCM_CONTEXT_ENABLED,
-      extensionPath: LCM_CONTEXT_EXTENSION_PATH,
-      total: Number(current.total || 0) + 1,
-      byKind,
-      failures: Number(current.failures || 0) + (nextEvent.ok === false ? 1 : 0),
-      latest: nextEvent,
-      history: [...history, nextEvent].slice(-50),
-    };
-    writeJsonFile(this.lcmContextInjectionPath, next);
-    return next;
-  }
-
-  readHindsightMemory() {
-    return readJsonFile(this.hindsightMemoryPath, {
-      schemaVersion: 1,
-      enabled: false,
-      total: 0,
-      failures: 0,
-      history: [],
-    });
-  }
-
-  recordHindsightMemory(event) {
-    const current = this.readHindsightMemory();
-    const history = Array.isArray(current.history) ? current.history : [];
-    const nextEvent = {
-      ...event,
-      kind: event.kind || "unknown",
-      at: event.at || nowIso(),
-    };
-    const byKind = { ...(current.byKind && typeof current.byKind === "object" ? current.byKind : {}) };
-    const kind = nextEvent.kind || "unknown";
-    byKind[kind] = Number(byKind[kind] || 0) + 1;
-    const next = {
-      schemaVersion: 1,
-      enabled: Boolean(current.enabled || nextEvent.enabled),
-      total: Number(current.total || 0) + 1,
-      byKind,
-      failures: Number(current.failures || 0) + (nextEvent.ok === false ? 1 : 0),
-      latest: nextEvent,
-      history: [...history, nextEvent].slice(-50),
-    };
-    writeJsonFile(this.hindsightMemoryPath, next);
-    return next;
-  }
-
-  send(command, timeoutMs = DEFAULT_RPC_TIMEOUT_MS) {
-    if (this.closed || !this.child || !this.child.stdin.writable) {
-      throw new Error(`Pi RPC session ${this.id} is not running.`);
-    }
-    const id = command.id || `cmd_${randomUUID()}`;
-    const rpcCommand = { ...command, id };
-    const line = `${JSON.stringify(rpcCommand)}\n`;
-    return new Promise((resolvePromise, rejectPromise) => {
-      const timeout = setTimeout(() => {
-        this.pendingResponses.delete(id);
-        rejectPromise(new Error(`Timed out waiting for Pi RPC response to ${rpcCommand.type}.`));
-      }, timeoutMs);
-      this.pendingResponses.set(id, { resolve: resolvePromise, reject: rejectPromise, timeout });
-      this.child.stdin.write(line, "utf8", (error) => {
-        if (!error) return;
-        clearTimeout(timeout);
-        this.pendingResponses.delete(id);
-        rejectPromise(error);
-      });
-    });
-  }
-
-  async prompt(message, options = {}) {
-    if (typeof message !== "string" || message.trim().length === 0) {
-      throw new Error("Prompt message is required.");
-    }
-    const waitForCompletion = Boolean(options.waitForCompletion);
-    const timeoutMs = safeNumber(options.timeoutMs, DEFAULT_PROMPT_TIMEOUT_MS);
-    const beforeAgentEndCount = this.agentEndCount;
-    const response = await this.send(
-      {
-        type: "prompt",
-        message,
-        ...(options.streamingBehavior ? { streamingBehavior: options.streamingBehavior } : {}),
-      },
-      Math.min(timeoutMs, DEFAULT_RPC_TIMEOUT_MS),
-    );
-    if (response.success === false) {
-      return { response, completed: false, finalText: this.lastAssistantText, summary: this.writeSummary() };
-    }
-    if (waitForCompletion) {
-      await this.waitForAgentEndAfter(beforeAgentEndCount, timeoutMs);
-    }
-    let finalText = this.lastAssistantText;
-    if (waitForCompletion) {
-      const finalResponse = await this.send({ type: "get_last_assistant_text" });
-      finalText = finalResponse?.data?.text || finalText;
-      this.lastAssistantText = finalText;
-    }
-    return {
-      response,
-      completed: waitForCompletion ? this.agentEndCount > beforeAgentEndCount || this.closed : null,
-      finalText,
-      summary: this.writeSummary(),
-    };
-  }
-
-  waitForAgentEndAfter(agentEndCount, timeoutMs = DEFAULT_PROMPT_TIMEOUT_MS) {
-    if (this.agentEndCount > agentEndCount || this.closed) return Promise.resolve();
-    return new Promise((resolvePromise, rejectPromise) => {
-      const timeout = setTimeout(() => {
-        this.agentEndWaiters = this.agentEndWaiters.filter((waiter) => waiter.resolve !== resolvePromise);
-        rejectPromise(new Error(`Timed out waiting for Pi agent completion in session ${this.id}.`));
-      }, timeoutMs);
-      this.agentEndWaiters.push({
-        after: agentEndCount,
-        resolve: () => {
-          clearTimeout(timeout);
-          resolvePromise();
-        },
-        reject: (error) => {
-          clearTimeout(timeout);
-          rejectPromise(error);
-        },
-      });
-    });
-  }
-
-  resolveAgentEndWaiters() {
-    const remaining = [];
-    for (const waiter of this.agentEndWaiters) {
-      if (this.closed || this.agentEndCount > waiter.after) {
-        waiter.resolve();
-      } else {
-        remaining.push(waiter);
-      }
-    }
-    this.agentEndWaiters = remaining;
-  }
-
-  rejectPending(error) {
-    for (const pending of this.pendingResponses.values()) {
-      clearTimeout(pending.timeout);
-      pending.reject(error);
-    }
-    this.pendingResponses.clear();
-    for (const waiter of this.agentEndWaiters) {
-      waiter.reject(error);
-    }
-    this.agentEndWaiters = [];
-  }
-
-  flushEvents() {
-    if (!this.eventsStream || this.eventsStream.destroyed || this.eventsStream.closed) {
-      return Promise.resolve();
-    }
-    return new Promise((resolvePromise, rejectPromise) => {
-      this.eventsStream.write("", (error) => {
-        if (error) rejectPromise(error);
-        else resolvePromise();
-      });
-    });
-  }
-
-  lcmIdentity() {
-    return {
-      sessionId: lcmSessionIdForRuntimeSession(this.id),
-      sessionKey: lcmSessionKeyForRuntimeSession(this.id),
-    };
-  }
-
-  async resolvePiSessionFile() {
-    await this.flushEvents();
-    const eventLineCount = readTextLines(this.eventsPath).map((line) => line.trim()).filter(Boolean).length;
-    let sessionFile = null;
-    let sessionStats = null;
-    try {
-      const statsResponse = await this.send({ type: "get_session_stats" });
-      sessionStats = statsResponse?.data ?? null;
-      sessionFile = typeof sessionStats?.sessionFile === "string" ? sessionStats.sessionFile : null;
-    } catch {
-      sessionStats = null;
-    }
-    if (!sessionFile) {
-      sessionFile = listSessionFiles(this.sessionDir)[0]?.path || null;
-    }
-    if (!sessionFile) {
-      throw new Error(`LCM operation failed: no Pi session file found in ${this.sessionDir}.`);
-    }
-    return { sessionFile, sessionStats, eventLineCount };
-  }
-
-  async recordLcm({ force = false } = {}) {
-    const checkpointPath = join(this.rootDir, "lcm-checkpoint.json");
-    const checkpoint = force ? { messageEntryCount: 0 } : readJsonFile(checkpointPath, { messageEntryCount: 0 });
-    const { sessionFile, sessionStats, eventLineCount } = await this.resolvePiSessionFile();
-    const fromMessageCount = Math.max(0, Number(checkpoint?.messageEntryCount || 0));
-    const summary = await defaultLcmService.ingestPiSession({
-      sessionPath: sessionFile,
-      workspacePath: this.workspace,
-      runtimeSessionId: this.id,
-      proofDir: this.rootDir,
-      fromMessageCount,
-    });
-    writeLcmSummaryFile(this.lcmSummaryPath, summary);
-    writeJsonFile(checkpointPath, {
-      messageEntryCount: Number(summary?.session?.nextMessageEntryCount ?? fromMessageCount),
-      sessionFile,
-      eventLineCount,
-      updatedAt: nowIso(),
-      latestSessionStats: sessionStats,
-      latestSummary: summary,
-    });
-    return summary;
-  }
-
-  async stop() {
-    if (this.closed) return this.status();
-    this.phase = "stopping";
-    this.updatedAt = nowIso();
-    this.writeStatus();
-    this.child.stdin.end();
-    await new Promise((resolvePromise) => {
-      const timeout = setTimeout(() => {
-        if (!this.closed) this.child.kill("SIGTERM");
-        resolvePromise();
-      }, 2_000);
-      this.child.once("close", () => {
-        clearTimeout(timeout);
-        resolvePromise();
-      });
-    });
-    return this.status();
-  }
+    }),
+  };
 }
 
 class AgentSupervisor {
@@ -1020,11 +375,14 @@ class AgentSupervisor {
   async start() {
     if (this.session && !this.session.closed) return this.session;
     if (this.starting) return this.starting;
-    this.starting = PiRpcSession.start({
-      id: this.sessionId,
-      resumeLatest: true,
-    })
+    this.starting = PiNativeSession.start(
+      buildPiNativeSessionOptions({
+        id: this.sessionId,
+        resumeLatest: true,
+      }),
+    )
       .then((session) => {
+        sessions.set(session.id, session);
         this.session = session;
         this.state.lastError = null;
         this.persistState();
@@ -1092,7 +450,9 @@ class AgentSupervisor {
       createdAt: request.createdAt,
       startedAt: request.startedAt || null,
       completedAt: request.completedAt || null,
-      message: request.message,
+      inputSummary: request.inputSummary || summarizeBeepInput(request.input || []),
+      redactedInput: request.input ? redactBeepInput(request.input) : null,
+      label: request.input ? labelBeepInput(request.input) : null,
       finalText: request.finalText || null,
       error: request.error || null,
       memoryError: request.memoryError || null,
@@ -1102,17 +462,16 @@ class AgentSupervisor {
     };
   }
 
-  enqueuePrompt({ message, timeoutMs, recordLcm = true, streamingBehavior = undefined } = {}) {
-    if (typeof message !== "string" || message.trim().length === 0) {
-      throw Object.assign(new Error("Agent submit requires a message or prompt string."), { statusCode: 400 });
-    }
+  enqueuePrompt({ input, timeoutMs, recordLcm = true, streamingBehavior = undefined } = {}) {
+    const nativeInput = normalizeBeepInput(input, { workspaceRoot: WORKSPACE_DIR });
     this.state.sequence += 1;
     const request = {
       id: newRequestId("agent_req"),
       sequence: this.state.sequence,
       status: "queued",
       type: "prompt",
-      message,
+      input: nativeInput,
+      inputSummary: summarizeBeepInput(nativeInput),
       timeoutMs: safeNumber(timeoutMs, DEFAULT_PROMPT_TIMEOUT_MS),
       recordLcm: recordLcm !== false,
       streamingBehavior,
@@ -1158,7 +517,7 @@ class AgentSupervisor {
 
     try {
       const session = await this.start();
-      const promptResult = await session.prompt(request.message, {
+      const promptResult = await session.prompt(request.input, {
         waitForCompletion: true,
         timeoutMs: request.timeoutMs,
         streamingBehavior: request.streamingBehavior,
@@ -1280,19 +639,19 @@ class AgentSupervisor {
     return this.status();
   }
 
-  async steer(message) {
+  async steer(input) {
     const session = await this.start();
-    return session.send({ type: "steer", message });
+    return session.steer(input);
   }
 
-  async followUp(message) {
+  async followUp(input) {
     const session = await this.start();
-    return session.send({ type: "follow_up", message });
+    return session.followUp(input);
   }
 
   async abort() {
     const session = await this.start();
-    return session.send({ type: "abort" });
+    return session.abort();
   }
 
   async recordLcm(options = {}) {
@@ -1452,7 +811,7 @@ async function handleCapabilities(_req, res) {
     schemaVersion: 1,
     runner: {
       harness: "pi",
-      transport: "pi-rpc",
+      transport: "pi-native",
       provider: "openai-codex",
       auth: "chatgpt-codex-oauth",
       codexEndpoint: "https://chatgpt.com/backend-api/codex/responses",
@@ -1469,6 +828,18 @@ async function handleCapabilities(_req, res) {
       tokenBudget: Number(LCM_CONTEXT_TOKEN_BUDGET),
       timeoutMs: Number(LCM_CONTEXT_TIMEOUT_MS),
       route: "POST /internal/lcm/context",
+    },
+    codexWebSearch: {
+      enabled: CODEX_WEB_SEARCH_ENABLED,
+      extensionEnabled: CODEX_WEB_SEARCH_EXTENSION_ENABLED,
+      extensionPath: CODEX_WEB_SEARCH_EXTENSION_PATH,
+      extensionAvailable: CODEX_WEB_SEARCH_EXTENSION_ENABLED && existsSync(CODEX_WEB_SEARCH_EXTENSION_PATH),
+      effectiveEnabled: CODEX_WEB_SEARCH_ENABLED && CODEX_WEB_SEARCH_EXTENSION_ENABLED && existsSync(CODEX_WEB_SEARCH_EXTENSION_PATH),
+      mode: CODEX_WEB_SEARCH_MODE,
+      allowedDomainsConfigured: Boolean(process.env.BEEP_CODEX_WEB_SEARCH_ALLOWED_DOMAINS),
+      contextSizeConfigured: Boolean(process.env.BEEP_CODEX_WEB_SEARCH_CONTEXT_SIZE),
+      contentTypesConfigured: Boolean(process.env.BEEP_CODEX_WEB_SEARCH_CONTENT_TYPES),
+      userLocationConfigured: CODEX_WEB_SEARCH_OPTIONAL_ENV_KEYS.some((key) => key.startsWith("BEEP_CODEX_WEB_SEARCH_LOCATION_") && Boolean(process.env[key])),
     },
     controlPlaneTools: {
       enabled: CONTROL_PLANE_TOOLS_ENABLED,
@@ -1532,59 +903,49 @@ async function handleCapabilities(_req, res) {
       "POST /sessions/:id/steer",
       "POST /sessions/:id/follow-up",
       "POST /sessions/:id/abort",
-      "POST /sessions/:id/rpc",
       "POST /sessions/:id/lcm",
       "DELETE /sessions/:id",
       "POST /internal/sandbox/tools/call",
       "POST /runs",
     ],
-    piRpcCommands: [
-      "prompt",
-      "steer",
-      "follow_up",
-      "abort",
-      "get_state",
-      "set_model",
-      "get_available_models",
-      "set_thinking_level",
-      "compact",
-      "set_auto_compaction",
-      "bash",
-      "get_session_stats",
-      "get_messages",
-      "get_last_assistant_text",
-      "get_commands",
-    ],
+    nativeInput: {
+      parts: ["text", "image", "localImage"],
+      imageSources: ["base64", "https-url", "workspace-local"],
+      detail: ["low", "high", "original", "auto"],
+    },
   });
 }
 
 async function handleCreateSession(req, res) {
   const body = await readRequestJson(req);
-  const session = await PiRpcSession.start({
-    model: body.model,
-    thinking: body.thinking,
-    prefix: body.prefix,
-  });
+  const session = await PiNativeSession.start(
+    buildPiNativeSessionOptions({
+      model: body.model,
+      thinking: body.thinking,
+      prefix: body.prefix,
+    }),
+  );
+  sessions.set(session.id, session);
   jsonResponse(res, 201, { ok: true, session: session.status() });
 }
 
 async function handleRun(req, res) {
   const body = await readRequestJson(req);
-  const prompt = body.prompt || body.message;
-  if (typeof prompt !== "string" || prompt.trim().length === 0) {
-    routeError(res, 400, "POST /runs requires a prompt string.");
-    return;
-  }
-  const session = await PiRpcSession.start({
-    model: body.model,
-    thinking: body.thinking,
-    prefix: body.prefix || "run",
-  });
+  const session = await PiNativeSession.start(
+    buildPiNativeSessionOptions({
+      model: body.model,
+      thinking: body.thinking,
+      prefix: body.prefix || "run",
+    }),
+  );
+  sessions.set(session.id, session);
+  let input = null;
   let promptResult;
   let lcm = null;
   let hindsight = null;
   try {
-    promptResult = await session.prompt(prompt, {
+    input = normalizeBeepInput(body.input, { workspaceRoot: session.workspace });
+    promptResult = await session.prompt(input, {
       waitForCompletion: true,
       timeoutMs: body.timeoutMs,
       streamingBehavior: body.streamingBehavior,
@@ -1621,6 +982,10 @@ async function handleRun(req, res) {
     runId: session.id,
     session: readSessionStatus(session.id) || session.status(),
     prompt: promptResult,
+    input: {
+      summary: summarizeBeepInput(input),
+      redacted: redactBeepInput(input),
+    },
     lcm,
     hindsight,
   });
@@ -1896,7 +1261,7 @@ async function handleAgentRoute(req, res, url, parts) {
 
   if (action === "submit") {
     const request = agentSupervisor.enqueuePrompt({
-      message: body.message || body.prompt,
+      input: body.input,
       timeoutMs: body.timeoutMs,
       recordLcm: body.recordLcm,
       streamingBehavior: body.streamingBehavior,
@@ -1925,13 +1290,19 @@ async function handleAgentRoute(req, res, url, parts) {
   }
 
   if (action === "steer") {
-    const response = await agentSupervisor.steer(body.message || body.prompt);
+    const input = normalizeBeepInput(body.input, {
+      workspaceRoot: agentSupervisor.session?.workspace || resolve(join(API_WORKSPACE_DIR, agentSupervisor.sessionId)),
+    });
+    const response = await agentSupervisor.steer(input);
     jsonResponse(res, response.success === false ? 422 : 200, { ok: response.success !== false, response });
     return;
   }
 
   if (action === "follow-up") {
-    const response = await agentSupervisor.followUp(body.message || body.prompt);
+    const input = normalizeBeepInput(body.input, {
+      workspaceRoot: agentSupervisor.session?.workspace || resolve(join(API_WORKSPACE_DIR, agentSupervisor.sessionId)),
+    });
+    const response = await agentSupervisor.followUp(input);
     jsonResponse(res, response.success === false ? 422 : 200, { ok: response.success !== false, response });
     return;
   }
@@ -2029,7 +1400,8 @@ async function handleSessionRoute(req, res, url, parts) {
   const body = await readRequestJson(req);
 
   if (action === "prompt") {
-    const result = await session.prompt(body.message || body.prompt, {
+    const input = normalizeBeepInput(body.input, { workspaceRoot: session.workspace });
+    const result = await session.prompt(input, {
       waitForCompletion: Boolean(body.waitForCompletion),
       timeoutMs: body.timeoutMs,
       streamingBehavior: body.streamingBehavior,
@@ -2039,30 +1411,21 @@ async function handleSessionRoute(req, res, url, parts) {
   }
 
   if (action === "steer") {
-    const response = await session.send({ type: "steer", message: body.message, images: body.images });
+    const input = normalizeBeepInput(body.input, { workspaceRoot: session.workspace });
+    const response = await session.steer(input);
     jsonResponse(res, response.success === false ? 422 : 200, { ok: response.success !== false, response });
     return;
   }
 
   if (action === "follow-up") {
-    const response = await session.send({ type: "follow_up", message: body.message, images: body.images });
+    const input = normalizeBeepInput(body.input, { workspaceRoot: session.workspace });
+    const response = await session.followUp(input);
     jsonResponse(res, response.success === false ? 422 : 200, { ok: response.success !== false, response });
     return;
   }
 
   if (action === "abort") {
-    const response = await session.send({ type: "abort" });
-    jsonResponse(res, response.success === false ? 422 : 200, { ok: response.success !== false, response });
-    return;
-  }
-
-  if (action === "rpc") {
-    const command = body.command || body;
-    if (!command || typeof command.type !== "string") {
-      routeError(res, 400, "POST /sessions/:id/rpc requires a command object with type.");
-      return;
-    }
-    const response = await session.send(command, body.timeoutMs);
+    const response = await session.abort();
     jsonResponse(res, response.success === false ? 422 : 200, { ok: response.success !== false, response });
     return;
   }

@@ -1,3 +1,5 @@
+import { redactBeepInput, summarizeBeepInput } from "../../shared/native-input.mjs";
+
 const RUNTIME_STOPPED_ERROR = "runtime is not running";
 const UNSAFE_RUNTIME_STATUS_KEYS = new Set([
   "cwd",
@@ -72,17 +74,75 @@ function projectFields(record, fields) {
   return projected;
 }
 
+function numberOrNull(value) {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function stringOrNull(value, key = "") {
+  return typeof value === "string" ? sanitizeNativeInputObject(value, key) : null;
+}
+
+function projectImageSummaryPart(part) {
+  if (!isPlainObject(part)) return null;
+  const projected = {
+    index: numberOrNull(part.index),
+    source: stringOrNull(part.source, "source"),
+    mimeType: stringOrNull(part.mimeType, "mimeType"),
+    byteLength: numberOrNull(part.byteLength),
+    detail: stringOrNull(part.detail, "detail"),
+  };
+  const url = stringOrNull(part.url);
+  if (url) projected.url = url;
+  const path = stringOrNull(part.path);
+  if (path) projected.path = path;
+
+  return Object.fromEntries(Object.entries(projected).filter(([, value]) => value !== null));
+}
+
+function publicSummaryShape(summary) {
+  if (!isPlainObject(summary)) return null;
+  return {
+    partCount: numberOrNull(summary.partCount),
+    textPartCount: numberOrNull(summary.textPartCount),
+    imagePartCount: numberOrNull(summary.imagePartCount),
+    localImagePartCount: numberOrNull(summary.localImagePartCount),
+    totalInlineImageBytes: numberOrNull(summary.totalInlineImageBytes),
+    textPreview: stringOrNull(summary.textPreview) || "",
+    imageParts: Array.isArray(summary.imageParts) ? summary.imageParts.map(projectImageSummaryPart).filter(Boolean) : [],
+  };
+}
+
+function publicInputSummary(record) {
+  if (record?.inputSummary) return publicSummaryShape(record.inputSummary);
+  if (!Array.isArray(record?.input) || record.input.length === 0) return null;
+  try {
+    return publicSummaryShape(summarizeBeepInput(record.input));
+  } catch {
+    return null;
+  }
+}
+
+function publicRedactedInput(record) {
+  if (!Array.isArray(record?.input) || record.input.length === 0) return [];
+  try {
+    return sanitizeNativeInputObject(redactBeepInput(record.input));
+  } catch {
+    return [];
+  }
+}
+
 function projectAgentRequest(request) {
   const projected = projectFields(request, [
     "requestId",
     "runtimeId",
     "runtimeRequestId",
     "status",
-    "message",
     "error",
     "createdAt",
     "updatedAt",
   ]);
+  projected.inputSummary = publicInputSummary(request);
+  projected.redactedInput = publicRedactedInput(request);
   if (projected.error !== null) projected.error = redactRuntimeString(projected.error);
   return projected;
 }
@@ -120,6 +180,22 @@ function isUnsafeStatusKey(key) {
 
 function isScalarTelemetry(value) {
   return value === null || typeof value === "number" || typeof value === "boolean";
+}
+
+function sanitizeNativeInputObject(value, key = "") {
+  if (Array.isArray(value)) return value.map((entry) => sanitizeNativeInputObject(entry, key));
+  if (typeof value === "string") {
+    if (["type", "source", "mimeType", "detail"].includes(key)) return value;
+    if (key === "data") return "[redacted]";
+    return redactRuntimeString(value);
+  }
+  if (!isPlainObject(value)) return value;
+
+  const sanitized = {};
+  for (const [nestedKey, nested] of Object.entries(value)) {
+    sanitized[nestedKey] = sanitizeNativeInputObject(nested, nestedKey);
+  }
+  return sanitized;
 }
 
 function sanitizeOperationalObject(value) {

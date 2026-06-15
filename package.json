@@ -4,6 +4,7 @@
     "test": "node --test test/*.test.mjs",
     "test:control-plane": "node --test control-plane/test/*.test.mjs",
     "test:first-usable-backend": "node --test test/*.test.mjs control-plane/test/*.test.mjs && bash -n scripts/smoke-test-first-usable-backend.sh",
+    "test:full-stack-e2e": "node --test test/full-stack-e2e-script.test.mjs && bash -n scripts/test-full-stack-e2e.sh && bash -n scripts/smoke-test-first-usable-backend.sh",
     "test:hindsight": "node --test test/hindsight-service.test.mjs test/external-memory-hints.test.mjs test/memory-coordinator.test.mjs test/codex-auth-file.test.mjs test/hindsight-smoke-scripts.test.mjs",
     "test:lcm": "node --test test/lcm-external-memory.test.mjs",
     "test:proof": "node --test test/proof-memory-lifecycle.test.mjs",
@@ -11,6 +12,8 @@
     "test:host-loop-static": "node --test test/sandbox-tool-protocol.test.mjs test/sandbox-tool-executor.test.mjs test/sandbox-tool-portal-extension.test.mjs test/sandbox-tool-runner.test.mjs test/runtime-integration-static.test.mjs",
     "test:host-loop": "npm run test:host-loop-static && bash -n scripts/smoke-test-host-loop-sandbox.sh",
     "test:runtime-static": "node --test test/runtime-integration-static.test.mjs",
+    "vendor:codex:update": "bash scripts/update-vendor-openai-codex.sh",
+    "test:tools": "node --test test/codex-web-search-vendor-drift.test.mjs test/vendor-codex-sync-script.test.mjs control-plane/test/state-store.test.mjs control-plane/test/tool-broker.test.mjs test/dynamic-sandbox-cli-tool.test.mjs control-plane/test/tool-package-validator.test.mjs control-plane/test/tool-registry.test.mjs control-plane/test/openai-web-search.test.mjs control-plane/test/tool-package-routes.test.mjs test/runtime-control-plane-tools-extension.test.mjs test/full-stack-e2e-script.test.mjs",
     "test:notes-backbone": "node --test control-plane/test/notes-*.test.mjs",
     "test:notes-backbone-static": "node --test control-plane/test/notes-workspace-domain.test.mjs control-plane/test/notes-workspace-store.test.mjs control-plane/test/notes-pipeline-engine.test.mjs control-plane/test/notes-beep-gateway.test.mjs control-plane/test/notes-routes.test.mjs control-plane/test/notes-demo-web.test.mjs && bash -n scripts/smoke-test-beep-notes-backbone.sh"
   }
