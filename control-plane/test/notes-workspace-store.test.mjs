@@ -1223,6 +1223,57 @@ test("workspace store rejects unsafe inline handwriting prompt ids", () => {
   });
 });
 
+test("workspace store rejects explicitly blank handwriting profile ids", () => {
+  withTempNotesStore((notesStore) => {
+    const source = createHandwritingImageSource(notesStore);
+    const prompt = createDefaultHandwritingPrompt({ createdAt: "2026-06-14T18:00:00.000Z" });
+
+    assert.throws(
+      () =>
+        notesStore.createHandwritingSample({
+          id: "hw_sample_blank_profile",
+          profileId: "",
+          prompt,
+          sourceArtifactId: source.id,
+          image: source.media.files[0],
+        }),
+      /handwriting profile id is required/,
+    );
+
+    const workspace = notesStore.readWorkspace();
+    assert.equal(Object.hasOwn(workspace.handwritingSamples, "hw_sample_blank_profile"), false);
+    assert.deepEqual(workspace.handwritingProfiles[DEFAULT_HANDWRITING_PROFILE_ID].activeSampleIds, []);
+    assert.deepEqual(workspace.handwritingSampleOrder, []);
+  });
+});
+
+test("workspace store rejects explicitly blank inline handwriting prompt ids", () => {
+  withTempNotesStore((notesStore) => {
+    const source = createHandwritingImageSource(notesStore);
+    const prompt = {
+      ...createDefaultHandwritingPrompt({ createdAt: "2026-06-14T18:00:00.000Z" }),
+      id: "",
+    };
+
+    assert.throws(
+      () =>
+        notesStore.createHandwritingSample({
+          id: "hw_sample_blank_inline_prompt",
+          profileId: DEFAULT_HANDWRITING_PROFILE_ID,
+          prompt,
+          sourceArtifactId: source.id,
+          image: source.media.files[0],
+        }),
+      /handwriting prompt id is required/,
+    );
+
+    const workspace = notesStore.readWorkspace();
+    assert.equal(Object.hasOwn(workspace.handwritingSamples, "hw_sample_blank_inline_prompt"), false);
+    assert.deepEqual(workspace.handwritingProfiles[DEFAULT_HANDWRITING_PROFILE_ID].activeSampleIds, []);
+    assert.deepEqual(workspace.handwritingSampleOrder, []);
+  });
+});
+
 test("workspace store rejects explicitly blank handwriting prompt ids with inline prompts", () => {
   withTempNotesStore((notesStore) => {
     const source = createHandwritingImageSource(notesStore);

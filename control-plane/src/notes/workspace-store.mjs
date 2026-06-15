@@ -218,9 +218,15 @@ export class NotesWorkspaceStore {
 
   createHandwritingSample(input) {
     const sampleId = createRecordId(input, "hw_sample", "handwriting sample id");
-    const profileId = canonicalId(input.profileId || DEFAULT_HANDWRITING_PROFILE_ID, "handwriting profile id");
+    const profileIdInput = Object.hasOwn(input, "profileId") ? input.profileId : undefined;
+    const profileId = canonicalId(
+      profileIdInput === undefined ? DEFAULT_HANDWRITING_PROFILE_ID : profileIdInput,
+      "handwriting profile id",
+    );
+    const inlinePromptId = input.prompt && Object.hasOwn(input.prompt, "id") ? input.prompt.id : undefined;
+    const promptIdInput = Object.hasOwn(input, "promptId") ? input.promptId : inlinePromptId;
     const promptId = canonicalId(
-      Object.hasOwn(input, "promptId") ? input.promptId : input.prompt?.id || DEFAULT_HANDWRITING_PROMPT_ID,
+      promptIdInput === undefined ? DEFAULT_HANDWRITING_PROMPT_ID : promptIdInput,
       "handwriting prompt id",
     );
     const sourceArtifactId = canonicalId(input.sourceArtifactId, "source artifact id");
