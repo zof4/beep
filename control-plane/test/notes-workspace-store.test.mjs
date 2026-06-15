@@ -85,6 +85,25 @@ function withObjectPrototypeRecords(records, callback) {
   }
 }
 
+function createHandwritingImageSource(notesStore, id = "src_hw_sample") {
+  return notesStore.createSourceArtifact({
+    id,
+    kind: "image",
+    media: {
+      schemaVersion: 1,
+      files: [
+        {
+          kind: "image",
+          name: "sample.png",
+          mimeType: "image/png",
+          sizeBytes: 100,
+          workspacePath: "notes-captures/sample.png",
+        },
+      ],
+    },
+  });
+}
+
 test("workspace store creates notes and todos", () => {
   const { notesStore, cleanup } = tempNotesStore();
   try {
@@ -1149,6 +1168,114 @@ test("workspace store toggles handwriting sample active state", () => {
     assert.deepEqual(workspace.handwritingProfiles[DEFAULT_HANDWRITING_PROFILE_ID].activeSampleIds, ["hw_sample_1"]);
   } finally {
     cleanup();
+  }
+});
+
+test("workspace store rejects unsafe explicit handwriting prompt ids with inline prompts", () => {
+  withTempNotesStore((notesStore) => {
+    const source = createHandwritingImageSource(notesStore);
+    const prompt = createDefaultHandwritingPrompt({ createdAt: "2026-06-14T18:00:00.000Z" });
+
+    assert.throws(
+      () =>
+        notesStore.createHandwritingSample({
+          id: "hw_sample_unsafe_prompt",
+          profileId: DEFAULT_HANDWRITING_PROFILE_ID,
+          promptId: "__proto__",
+          prompt,
+          sourceArtifactId: source.id,
+          image: source.media.files[0],
+        }),
+      /unsafe state map key: __proto__/,
+    );
+
+    const workspace = notesStore.readWorkspace();
+    assert.equal(Object.hasOwn(workspace.handwritingSamples, "hw_sample_unsafe_prompt"), false);
+    assert.deepEqual(workspace.handwritingProfiles[DEFAULT_HANDWRITING_PROFILE_ID].activeSampleIds, []);
+    assert.deepEqual(workspace.handwritingSampleOrder, []);
+  });
+});
+
+test("workspace store rejects unsafe inline handwriting prompt ids", () => {
+  withTempNotesStore((notesStore) => {
+    const source = createHandwritingImageSource(notesStore);
+    const prompt = {
+      ...createDefaultHandwritingPrompt({ createdAt: "2026-06-14T18:00:00.000Z" }),
+      id: "__proto__",
+    };
+
+    assert.throws(
+      () =>
+        notesStore.createHandwritingSample({
+          id: "hw_sample_unsafe_inline_prompt",
+          profileId: DEFAULT_HANDWRITING_PROFILE_ID,
+          prompt,
+          sourceArtifactId: source.id,
+          image: source.media.files[0],
+        }),
+      /unsafe state map key: __proto__/,
+    );
+
+    const workspace = notesStore.readWorkspace();
+    assert.equal(Object.hasOwn(workspace.handwritingSamples, "hw_sample_unsafe_inline_prompt"), false);
+    assert.deepEqual(workspace.handwritingProfiles[DEFAULT_HANDWRITING_PROFILE_ID].activeSampleIds, []);
+    assert.deepEqual(workspace.handwritingSampleOrder, []);
+  });
+});
+
+test("workspace store rejects explicitly blank handwriting prompt ids with inline prompts", () => {
+  withTempNotesStore((notesStore) => {
+    const source = createHandwritingImageSource(notesStore);
+    const prompt = createDefaultHandwritingPrompt({ createdAt: "2026-06-14T18:00:00.000Z" });
+
+    assert.throws(
+      () =>
+        notesStore.createHandwritingSample({
+          id: "hw_sample_blank_prompt",
+          profileId: DEFAULT_HANDWRITING_PROFILE_ID,
+          promptId: "",
+          prompt,
+          sourceArtifactId: source.id,
+          image: source.media.files[0],
+        }),
+      /handwriting prompt id is required/,
+    );
+
+    const workspace = notesStore.readWorkspace();
+    assert.equal(Object.hasOwn(workspace.handwritingSamples, "hw_sample_blank_prompt"), false);
+    assert.deepEqual(workspace.handwritingProfiles[DEFAULT_HANDWRITING_PROFILE_ID].activeSampleIds, []);
+    assert.deepEqual(workspace.handwritingSampleOrder, []);
+  });
+});
+
+test("workspace store rejects unsafe handwriting sample ids and references", () => {
+  for (const { label, input } of [
+    { label: "sample", input: { id: "__proto__" } },
+    { label: "profile", input: { id: "hw_sample_unsafe_profile", profileId: "__proto__" } },
+    { label: "source", input: { id: "hw_sample_unsafe_source", sourceArtifactId: "__proto__" } },
+  ]) {
+    withTempNotesStore((notesStore) => {
+      const source = createHandwritingImageSource(notesStore);
+      const prompt = createDefaultHandwritingPrompt({ createdAt: "2026-06-14T18:00:00.000Z" });
+
+      assert.throws(
+        () =>
+          notesStore.createHandwritingSample({
+            id: `hw_sample_unsafe_${label}`,
+            profileId: DEFAULT_HANDWRITING_PROFILE_ID,
+            prompt,
+            sourceArtifactId: source.id,
+            image: source.media.files[0],
+            ...input,
+          }),
+        /unsafe state map key: __proto__/,
+      );
+
+      const workspace = notesStore.readWorkspace();
+      assert.equal(Object.hasOwn(workspace.handwritingSamples, input.id || `hw_sample_unsafe_${label}`), false);
+      assert.deepEqual(workspace.handwritingProfiles[DEFAULT_HANDWRITING_PROFILE_ID].activeSampleIds, []);
+      assert.deepEqual(workspace.handwritingSampleOrder, []);
+    });
   }
 });
 

@@ -219,6 +219,10 @@ export class NotesWorkspaceStore {
   createHandwritingSample(input) {
     const sampleId = createRecordId(input, "hw_sample", "handwriting sample id");
     const profileId = canonicalId(input.profileId || DEFAULT_HANDWRITING_PROFILE_ID, "handwriting profile id");
+    const promptId = canonicalId(
+      Object.hasOwn(input, "promptId") ? input.promptId : input.prompt?.id || DEFAULT_HANDWRITING_PROMPT_ID,
+      "handwriting prompt id",
+    );
     const sourceArtifactId = canonicalId(input.sourceArtifactId, "source artifact id");
     return this.updateWorkspace((workspace) => {
       assertUniqueId(workspace.handwritingSamples, sampleId, "handwriting sample id");
@@ -226,11 +230,10 @@ export class NotesWorkspaceStore {
         throw new Error(`unknown handwriting profile: ${profileId}`);
       }
       const profile = workspace.handwritingProfiles[profileId];
-      const promptId = input.promptId || DEFAULT_HANDWRITING_PROMPT_ID;
       let prompt = input.prompt;
       if (!prompt) {
         if (!Object.hasOwn(workspace.handwritingPrompts, promptId)) {
-          throw new Error(`unknown handwriting prompt: ${input.promptId}`);
+          throw new Error(`unknown handwriting prompt: ${promptId}`);
         }
         prompt = workspace.handwritingPrompts[promptId];
       }
@@ -241,6 +244,7 @@ export class NotesWorkspaceStore {
         ...input,
         id: sampleId,
         profileId,
+        promptId,
         prompt,
         sourceArtifactId,
         createdAt: input.createdAt || this.now(),
