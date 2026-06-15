@@ -462,8 +462,8 @@ class AgentSupervisor {
     };
   }
 
-  enqueuePrompt({ input, timeoutMs, recordLcm = true, streamingBehavior = undefined, workspaceRoot = WORKSPACE_DIR } = {}) {
-    const nativeInput = normalizeBeepInput(input, { workspaceRoot });
+  enqueuePrompt({ input, timeoutMs, recordLcm = true, streamingBehavior = undefined } = {}) {
+    const nativeInput = normalizeBeepInput(input, { workspaceRoot: WORKSPACE_DIR });
     this.state.sequence += 1;
     const request = {
       id: newRequestId("agent_req"),
@@ -1260,10 +1260,8 @@ async function handleAgentRoute(req, res, url, parts) {
   }
 
   if (action === "submit") {
-    const workspaceRoot = agentSupervisor.session?.workspace || resolve(join(API_WORKSPACE_DIR, agentSupervisor.sessionId));
     const request = agentSupervisor.enqueuePrompt({
-      input: normalizeBeepInput(body.input, { workspaceRoot }),
-      workspaceRoot,
+      input: body.input,
       timeoutMs: body.timeoutMs,
       recordLcm: body.recordLcm,
       streamingBehavior: body.streamingBehavior,

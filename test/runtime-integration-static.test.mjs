@@ -277,7 +277,8 @@ test("runtime routes require native input instead of message prompt shims", () =
 });
 
 test("agent supervisor stores native input and redacted summaries", () => {
-  assert.match(apiSource, /input:\s*normalizeBeepInput\(body\.input/);
+  assert.match(apiSource, /enqueuePrompt\(\{\s*input:\s*body\.input,/);
+  assert.match(apiSource, /const nativeInput = normalizeBeepInput\(input, \{ workspaceRoot: WORKSPACE_DIR \}\)/);
   assert.match(apiSource, /inputSummary:\s*summarizeBeepInput\(nativeInput\)/);
   assert.match(apiSource, /redactedInput:\s*request\.input \? redactBeepInput\(request\.input\) : null/);
   assert.match(apiSource, /label:\s*request\.input \? labelBeepInput\(request\.input\) : null/);
