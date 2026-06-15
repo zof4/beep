@@ -317,6 +317,19 @@ test("runtime scrubs sensitive process env after capturing constants", () => {
   assert.match(apiSource, /scrubSensitiveRuntimeEnv\(\)/);
 });
 
+test("runtime passes captured auth env to Codex token resolution after scrub", () => {
+  assert.match(apiSource, /const CODEX_AUTH_ENV = \{/);
+  assert.match(apiSource, /BEEP_MODEL_GATEWAY_CREDENTIAL_URL:\s*process\.env\.BEEP_MODEL_GATEWAY_CREDENTIAL_URL/);
+  assert.match(apiSource, /BEEP_MODEL_GATEWAY_CAPABILITY_TOKEN:\s*process\.env\.BEEP_MODEL_GATEWAY_CAPABILITY_TOKEN/);
+  assert.match(apiSource, /BEEP_ALLOW_RUNTIME_CODEX_AUTH:\s*process\.env\.BEEP_ALLOW_RUNTIME_CODEX_AUTH/);
+  assert.match(
+    apiSource,
+    /resolveCodexAccessToken\(CODEX_HOME, \{[\s\S]*runtimeSessionId: id,[\s\S]*env: CODEX_AUTH_ENV,[\s\S]*\}\)/,
+  );
+  assert.match(apiSource, /delete process\.env\.BEEP_MODEL_GATEWAY_CREDENTIAL_URL/);
+  assert.match(apiSource, /delete process\.env\.BEEP_MODEL_GATEWAY_CAPABILITY_TOKEN/);
+});
+
 test("LCM context extension captures explicit config instead of reading env per event", () => {
   assert.match(lcmContextExtensionSource, /function readBeepExtensionConfig\(\)/);
   assert.match(lcmContextExtensionSource, /const config = readBeepExtensionConfig\(\)\.lcmContext \|\| \{\}/);

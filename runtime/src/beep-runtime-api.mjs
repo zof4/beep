@@ -86,6 +86,12 @@ const SANDBOX_DOCKER_WORKSPACE_ROOT = process.env.BEEP_SANDBOX_DOCKER_WORKSPACE_
 const DEFAULT_PROMPT_TIMEOUT_MS = 10 * 60 * 1000;
 const MAX_REQUEST_BYTES = Number.parseInt(process.env.BEEP_MAX_REQUEST_BYTES || `${8 * 1024 * 1024}`, 10);
 const THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh"]);
+const CODEX_AUTH_ENV = {
+  BEEP_MODEL_GATEWAY_CREDENTIAL_URL: process.env.BEEP_MODEL_GATEWAY_CREDENTIAL_URL || "",
+  BEEP_MODEL_GATEWAY_CAPABILITY_TOKEN: process.env.BEEP_MODEL_GATEWAY_CAPABILITY_TOKEN || "",
+  BEEP_ALLOW_RUNTIME_CODEX_AUTH: process.env.BEEP_ALLOW_RUNTIME_CODEX_AUTH || "",
+  BEEP_PI_CODEX_MODEL: process.env.BEEP_PI_CODEX_MODEL || DEFAULT_MODEL,
+};
 
 function scrubSensitiveRuntimeEnv() {
   delete process.env.BEEP_RUNTIME_API_TOKEN;
@@ -278,6 +284,7 @@ function buildPiNativeSessionOptions(options = {}) {
         provider: "openai-codex",
         model,
         runtimeSessionId: id,
+        env: CODEX_AUTH_ENV,
       }),
     extensionConfig: {
       STATE_DIR,
