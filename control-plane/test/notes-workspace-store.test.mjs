@@ -67,6 +67,24 @@ function withCleanPrototypeWorkspaceLinks(callback) {
   }
 }
 
+function withObjectPrototypeRecords(records, callback) {
+  const fields = Object.keys(records);
+  for (const field of fields) delete Object.prototype[field];
+  try {
+    for (const [field, value] of Object.entries(records)) {
+      Object.defineProperty(Object.prototype, field, {
+        configurable: true,
+        enumerable: true,
+        writable: true,
+        value,
+      });
+    }
+    return callback();
+  } finally {
+    for (const field of fields) delete Object.prototype[field];
+  }
+}
+
 test("workspace store creates notes and todos", () => {
   const { notesStore, cleanup } = tempNotesStore();
   try {
@@ -1132,6 +1150,211 @@ test("workspace store toggles handwriting sample active state", () => {
   } finally {
     cleanup();
   }
+});
+
+test("workspace store rejects inherited handwriting profiles when creating samples", () => {
+  withObjectPrototypeRecords(
+    {
+      profile_inherited: {
+        id: "profile_inherited",
+        label: "Inherited profile",
+        activeSampleIds: [],
+        lexicon: [],
+        createdAt: "2026-06-14T18:00:00.000Z",
+        updatedAt: "2026-06-14T18:00:00.000Z",
+      },
+    },
+    () => {
+      withTempNotesStore((notesStore) => {
+        const source = notesStore.createSourceArtifact({
+          id: "src_hw_sample",
+          kind: "image",
+          media: {
+            schemaVersion: 1,
+            files: [
+              {
+                kind: "image",
+                name: "sample.png",
+                mimeType: "image/png",
+                sizeBytes: 100,
+                workspacePath: "notes-captures/sample.png",
+              },
+            ],
+          },
+        });
+        const prompt = createDefaultHandwritingPrompt({ createdAt: "2026-06-14T18:00:00.000Z" });
+
+        assert.throws(
+          () =>
+            notesStore.createHandwritingSample({
+              id: "hw_sample_inherited_profile",
+              profileId: "profile_inherited",
+              prompt,
+              sourceArtifactId: source.id,
+              image: source.media.files[0],
+            }),
+          /unknown handwriting profile: profile_inherited/,
+        );
+
+        const workspace = notesStore.readWorkspace();
+        assert.equal(Object.hasOwn(workspace.handwritingProfiles, "profile_inherited"), false);
+        assert.equal(Object.hasOwn(workspace.handwritingSamples, "hw_sample_inherited_profile"), false);
+        assert.deepEqual(workspace.handwritingSampleOrder, []);
+      });
+    },
+  );
+});
+
+test("workspace store rejects inherited handwriting prompts when creating samples", () => {
+  withObjectPrototypeRecords(
+    {
+      hw_prompt_inherited: {
+        ...createDefaultHandwritingPrompt({ createdAt: "2026-06-14T18:00:00.000Z" }),
+        id: "hw_prompt_inherited",
+      },
+    },
+    () => {
+      withTempNotesStore((notesStore) => {
+        const source = notesStore.createSourceArtifact({
+          id: "src_hw_sample",
+          kind: "image",
+          media: {
+            schemaVersion: 1,
+            files: [
+              {
+                kind: "image",
+                name: "sample.png",
+                mimeType: "image/png",
+                sizeBytes: 100,
+                workspacePath: "notes-captures/sample.png",
+              },
+            ],
+          },
+        });
+
+        assert.throws(
+          () =>
+            notesStore.createHandwritingSample({
+              id: "hw_sample_inherited_prompt",
+              profileId: DEFAULT_HANDWRITING_PROFILE_ID,
+              promptId: "hw_prompt_inherited",
+              sourceArtifactId: source.id,
+              image: source.media.files[0],
+            }),
+          /unknown handwriting prompt: hw_prompt_inherited/,
+        );
+
+        const workspace = notesStore.readWorkspace();
+        assert.equal(Object.hasOwn(workspace.handwritingPrompts, "hw_prompt_inherited"), false);
+        assert.equal(Object.hasOwn(workspace.handwritingSamples, "hw_sample_inherited_prompt"), false);
+        assert.deepEqual(workspace.handwritingProfiles[DEFAULT_HANDWRITING_PROFILE_ID].activeSampleIds, []);
+        assert.deepEqual(workspace.handwritingSampleOrder, []);
+      });
+    },
+  );
+});
+
+test("workspace store rejects inherited handwriting samples when toggling", () => {
+  withObjectPrototypeRecords(
+    {
+      hw_sample_inherited: {
+        id: "hw_sample_inherited",
+        profileId: DEFAULT_HANDWRITING_PROFILE_ID,
+        promptId: DEFAULT_HANDWRITING_PROMPT_ID,
+        sourceArtifactId: "src_hw_sample",
+        image: {
+          kind: "image",
+          name: "sample.png",
+          mimeType: "image/png",
+          sizeBytes: 100,
+          workspacePath: "notes-captures/sample.png",
+        },
+        referenceText: "Inherited sample",
+        coverage: {},
+        active: false,
+        createdAt: "2026-06-14T18:00:00.000Z",
+        updatedAt: "2026-06-14T18:00:00.000Z",
+      },
+    },
+    () => {
+      withTempNotesStore((notesStore) => {
+        assert.throws(
+          () => notesStore.toggleHandwritingSample("hw_sample_inherited", { active: true }),
+          /unknown handwriting sample: hw_sample_inherited/,
+        );
+
+        const workspace = notesStore.readWorkspace();
+        assert.equal(Object.hasOwn(workspace.handwritingSamples, "hw_sample_inherited"), false);
+        assert.deepEqual(workspace.handwritingProfiles[DEFAULT_HANDWRITING_PROFILE_ID].activeSampleIds, []);
+      });
+    },
+  );
+});
+
+test("workspace store rejects inherited handwriting profiles when toggling samples", () => {
+  withObjectPrototypeRecords(
+    {
+      profile_inherited_toggle: {
+        id: "profile_inherited_toggle",
+        label: "Inherited profile",
+        activeSampleIds: [],
+        lexicon: [],
+        createdAt: "2026-06-14T18:00:00.000Z",
+        updatedAt: "2026-06-14T18:00:00.000Z",
+      },
+    },
+    () => {
+      withTempNotesStore((notesStore, stateStore) => {
+        notesStore.createSourceArtifact({
+          id: "src_hw_sample",
+          kind: "image",
+          media: {
+            schemaVersion: 1,
+            files: [
+              {
+                kind: "image",
+                name: "sample.png",
+                mimeType: "image/png",
+                sizeBytes: 100,
+                workspacePath: "notes-captures/sample.png",
+              },
+            ],
+          },
+        });
+        stateStore.update((state) => {
+          state.notesBackbone.handwritingSamples.hw_sample_inherited_profile = {
+            id: "hw_sample_inherited_profile",
+            profileId: "profile_inherited_toggle",
+            promptId: DEFAULT_HANDWRITING_PROMPT_ID,
+            sourceArtifactId: "src_hw_sample",
+            image: {
+              kind: "image",
+              name: "sample.png",
+              mimeType: "image/png",
+              sizeBytes: 100,
+              workspacePath: "notes-captures/sample.png",
+            },
+            referenceText: "Sample with inherited profile",
+            coverage: {},
+            active: false,
+            createdAt: "2026-06-14T18:00:00.000Z",
+            updatedAt: "2026-06-14T18:00:00.000Z",
+          };
+          state.notesBackbone.handwritingSampleOrder.push("hw_sample_inherited_profile");
+        });
+
+        assert.throws(
+          () => notesStore.toggleHandwritingSample("hw_sample_inherited_profile", { active: true }),
+          /unknown handwriting profile: profile_inherited_toggle/,
+        );
+
+        const workspace = notesStore.readWorkspace();
+        assert.equal(Object.hasOwn(workspace.handwritingProfiles, "profile_inherited_toggle"), false);
+        assert.equal(workspace.handwritingSamples.hw_sample_inherited_profile.active, false);
+        assert.deepEqual(workspace.handwritingSampleOrder, ["hw_sample_inherited_profile"]);
+      });
+    },
+  );
 });
 
 test("workspace store read returns a clone", () => {

@@ -222,10 +222,18 @@ export class NotesWorkspaceStore {
     const sourceArtifactId = canonicalId(input.sourceArtifactId, "source artifact id");
     return this.updateWorkspace((workspace) => {
       assertUniqueId(workspace.handwritingSamples, sampleId, "handwriting sample id");
+      if (!Object.hasOwn(workspace.handwritingProfiles, profileId)) {
+        throw new Error(`unknown handwriting profile: ${profileId}`);
+      }
       const profile = workspace.handwritingProfiles[profileId];
-      if (!profile) throw new Error(`unknown handwriting profile: ${profileId}`);
-      const prompt = input.prompt || workspace.handwritingPrompts[input.promptId || DEFAULT_HANDWRITING_PROMPT_ID];
-      if (!prompt) throw new Error(`unknown handwriting prompt: ${input.promptId}`);
+      const promptId = input.promptId || DEFAULT_HANDWRITING_PROMPT_ID;
+      let prompt = input.prompt;
+      if (!prompt) {
+        if (!Object.hasOwn(workspace.handwritingPrompts, promptId)) {
+          throw new Error(`unknown handwriting prompt: ${input.promptId}`);
+        }
+        prompt = workspace.handwritingPrompts[promptId];
+      }
       if (!Object.hasOwn(workspace.sourceArtifacts, sourceArtifactId)) {
         throw new Error(`unknown source artifact: ${sourceArtifactId}`);
       }
@@ -254,10 +262,14 @@ export class NotesWorkspaceStore {
   toggleHandwritingSample(sampleId, { active }) {
     const id = canonicalId(sampleId, "handwriting sample id");
     return this.updateWorkspace((workspace) => {
+      if (!Object.hasOwn(workspace.handwritingSamples, id)) {
+        throw new Error(`unknown handwriting sample: ${id}`);
+      }
       const sample = workspace.handwritingSamples[id];
-      if (!sample) throw new Error(`unknown handwriting sample: ${id}`);
+      if (!Object.hasOwn(workspace.handwritingProfiles, sample.profileId)) {
+        throw new Error(`unknown handwriting profile: ${sample.profileId}`);
+      }
       const profile = workspace.handwritingProfiles[sample.profileId];
-      if (!profile) throw new Error(`unknown handwriting profile: ${sample.profileId}`);
       const toggled = toggleHandwritingSampleActive({ profile, sample, active, updatedAt: this.now() });
       workspace.handwritingProfiles[sample.profileId] = toggled.profile;
       workspace.handwritingSamples[id] = toggled.sample;
