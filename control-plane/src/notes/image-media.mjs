@@ -70,10 +70,25 @@ function convertedUploadName(originalName, mimeType) {
   return `${baseName}${extension}`;
 }
 
-function normalizeConverterOutput(output) {
+function normalizeTargetFormat(value) {
+  const targetFormat = String(value || "jpeg").trim().toLowerCase();
+  if (targetFormat !== "jpeg" && targetFormat !== "png") {
+    throw new Error("image target format must be jpeg or png");
+  }
+  return targetFormat;
+}
+
+function targetMimeTypeForFormat(targetFormat) {
+  return targetFormat === "png" ? "image/png" : "image/jpeg";
+}
+
+function normalizeConverterOutput(output, expectedMimeType) {
   const mimeType = String(output?.mimeType ?? "").trim().toLowerCase();
   if (!NATIVE_NOTES_IMAGE_MIME_TYPES.has(mimeType)) {
     throw new Error(`unsupported converted image MIME type: ${mimeType || "unknown"}`);
+  }
+  if (mimeType !== expectedMimeType) {
+    throw new Error(`converted image MIME type ${mimeType} does not match requested ${expectedMimeType}`);
   }
   const data = output?.data ?? output?.buffer;
   if (!Buffer.isBuffer(data)) {
@@ -182,10 +197,8 @@ export async function normalizeUploadedImageMediaFile(upload, options = {}) {
   let mimeType = originalMimeType;
   let data = upload.data;
   if (HEIF_IMAGE_MIME_TYPES.has(originalMimeType)) {
-    const targetFormat = options.targetFormat || "jpeg";
-    if (targetFormat !== "jpeg" && targetFormat !== "png") {
-      throw new Error("image target format must be jpeg or png");
-    }
+    const targetFormat = normalizeTargetFormat(options.targetFormat);
+    const targetMimeType = targetMimeTypeForFormat(targetFormat);
     const convertHeif =
       options.convertHeif || (targetFormat === "png" ? convertHeifToPngWithSips : convertHeifToJpegWithSips);
     const converted = normalizeConverterOutput(
@@ -194,7 +207,10 @@ export async function normalizeUploadedImageMediaFile(upload, options = {}) {
         data: upload.data,
         detail: options.detail,
         name: originalName,
+        targetFormat,
+        targetMimeType,
       }),
+      targetMimeType,
     );
     mimeType = converted.mimeType;
     data = converted.data;
