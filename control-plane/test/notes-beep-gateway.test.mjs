@@ -302,7 +302,7 @@ test("local agent gateway calls injected submitter with native input parts", asy
   assert.equal(Object.hasOwn(calls[0], "message"), false);
   assert.equal(calls[0].input.length, 2);
   assert.equal(calls[0].input[0].type, "text");
-  assert.match(calls[0].input[0].text, /Return JSON only/u);
+  assert.match(calls[0].input[0].text, /Return exactly one JSON object/u);
   assert.deepEqual(calls[0].input[1], {
     type: "image",
     mimeType: "image/png",
@@ -310,6 +310,37 @@ test("local agent gateway calls injected submitter with native input parts", asy
     detail: "high",
   });
   assert.equal(output.comments[0].body, "Agent comment.");
+});
+
+test("local agent gateway prompt declares exact Notes JSON schema for source-only image stages", async () => {
+  const calls = [];
+  const gateway = new NotesBeepGateway({
+    mode: "localAgent",
+    submitToAgent: async (payload) => {
+      calls.push(payload);
+      return {
+        finalText: JSON.stringify({
+          derivedArtifacts: [{ kind: "readableRendition", body: "Readable text.", sourceArtifactIds: ["src_image"] }],
+        }),
+      };
+    },
+  });
+
+  await gateway.runStage("readableRendition", {
+    targetItemId: null,
+    sourceArtifactId: "src_image",
+    attachments: [{ type: "localImage", path: "notes-captures/capture.jpg", detail: "auto" }],
+  });
+
+  const prompt = calls[0].input[0].text;
+  assert.match(prompt, /derivedArtifacts.*kind.*body.*sourceArtifactIds/su);
+  assert.match(prompt, /comments.*targetId.*body/su);
+  assert.match(prompt, /Use `body`, not `text` or `content`/u);
+  assert.match(prompt, /Use `kind`, not `type`/u);
+  assert.match(prompt, /Target item is none.*do not create comments/su);
+  assert.match(prompt, /readableRendition.*derivedArtifacts/su);
+  assert.equal(prompt.includes('sourceArtifactIds: ["src_image"]'), true);
+  assert.deepEqual(calls[0].input[1], { type: "localImage", path: "notes-captures/capture.jpg", detail: "auto" });
 });
 
 test("local agent gateway parses text response", async () => {

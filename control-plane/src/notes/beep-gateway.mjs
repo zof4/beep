@@ -124,13 +124,37 @@ export function validateStageOutput(raw) {
   return { comments, proposals, derivedArtifacts };
 }
 
+function jsonExample(value) {
+  return JSON.stringify(value);
+}
+
 function stagePrompt(stage, context) {
+  const targetItemId = context.targetItemId || "none";
+  const sourceArtifactId = context.sourceArtifactId || "none";
+  const sourceArtifactIdsExample = context.sourceArtifactId ? jsonExample([context.sourceArtifactId]) : "[]";
   return [
     `You are running Beep Notes pipeline stage: ${stage}.`,
-    `Target item: ${context.targetItemId || "none"}.`,
-    `Source artifact: ${context.sourceArtifactId || "none"}.`,
-    "Return JSON only with optional arrays: comments, proposals, derivedArtifacts.",
-    "Do not mutate original user content. Create comments and proposals only.",
+    `Target item: ${targetItemId}.`,
+    `Source artifact: ${sourceArtifactId}.`,
+    "Return exactly one JSON object. Do not include markdown, prose, code fences, or thinking text.",
+    "Allowed top-level keys are comments, proposals, and derivedArtifacts. Omit arrays you do not need.",
+    "derivedArtifacts: array of objects with kind, body, sourceArtifactIds, and optional sourceItemIds.",
+    "comments: array of objects with targetId, body, optional sourceItemIds, sourceArtifactIds, and uncertainty.",
+    "proposals: array of objects with kind, title, body, optional sourceItemIds, sourceArtifactIds, estimateMinutes, and confidence.",
+    "Use `body`, not `text` or `content`. Use `kind`, not `type`.",
+    ...(context.targetItemId
+      ? [`If you create comments, set targetId to ${jsonExample(context.targetItemId)}.`]
+      : ["Target item is none; do not create comments because comments require a workspace item targetId."]),
+    ...(stage === "readableRendition"
+      ? [
+          `For readableRendition, put the transcription or readable summary in derivedArtifacts with kind: "readableRendition", body, and sourceArtifactIds: ${sourceArtifactIdsExample}.`,
+        ]
+      : []),
+    ...(stage === "formattedNote"
+      ? [
+          `For formattedNote, put cleaned-up note text in derivedArtifacts with kind: "formattedNote", body, and sourceArtifactIds: ${sourceArtifactIdsExample}.`,
+        ]
+      : []),
     ...(Array.isArray(context.attachments) && context.attachments.length > 0
       ? ["Attached images are part of the original capture. Inspect those image input parts directly."]
       : []),

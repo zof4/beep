@@ -105,14 +105,14 @@ function parseJsonl(path) {
     });
 }
 
-function textFromContent(content) {
+export function assistantFinalTextFromContent(content) {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
   return content
     .map((part) => {
       if (!part || typeof part !== "object") return "";
       if (part.type === "text") return part.text || "";
-      if (part.type === "thinking") return part.thinking ? `[thinking] ${part.thinking}` : "[thinking]";
+      if (part.type === "thinking") return "";
       if (part.type === "toolCall") return `[tool:${part.name || "unknown"}] ${JSON.stringify(part.arguments ?? {})}`;
       if (part.type === "image") return "[image]";
       if (part.type === "localImage") return `[image:${part.path || "local"}]`;
@@ -139,7 +139,7 @@ function summarizeEvents(events) {
     }
     const message = event?.message;
     if ((type === "message_end" || type === "turn_end") && message?.role === "assistant") {
-      finalAssistantText = textFromContent(message.content) || finalAssistantText;
+      finalAssistantText = assistantFinalTextFromContent(message.content) || finalAssistantText;
       if (message.usage) lastUsage = message.usage;
     }
   }
@@ -342,11 +342,11 @@ function nativeContent(input) {
   return input.map((part) => ({ ...part }));
 }
 
-function lastAssistantTextFromSession(piSession) {
+export function lastAssistantTextFromSession(piSession) {
   const messages = Array.isArray(piSession?.state?.messages) ? piSession.state.messages : [];
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
-    if (message?.role === "assistant") return textFromContent(message.content);
+    if (message?.role === "assistant") return assistantFinalTextFromContent(message.content);
   }
   return null;
 }
@@ -606,7 +606,7 @@ export class PiNativeSession {
       this.writeSummary();
     }
     if ((raw.type === "message_end" || raw.type === "turn_end") && raw.message?.role === "assistant") {
-      this.lastAssistantText = textFromContent(raw.message.content) || this.lastAssistantText;
+      this.lastAssistantText = assistantFinalTextFromContent(raw.message.content) || this.lastAssistantText;
     }
     const stateText = lastAssistantTextFromSession(this.piSession);
     if (stateText) this.lastAssistantText = stateText;
