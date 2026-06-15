@@ -18,6 +18,7 @@ import { NotesWorkspaceStore } from "./workspace-store.mjs";
 
 const IMAGE_DETAIL_VALUES = new Set(["low", "high", "original", "auto"]);
 const MAX_MULTIPART_CAPTURE_BYTES = MAX_IMAGE_UPLOAD_BYTES + 1024 * 1024;
+const UNSAFE_STATE_MAP_KEYS = new Set(["__proto__", "prototype", "constructor"]);
 
 function newRouteId(prefix) {
   return `${prefix}_${Date.now().toString(36)}_${randomBytes(6).toString("base64url")}`;
@@ -45,12 +46,14 @@ function expectedNotesErrorStatus(error) {
   if (explicitStatus) return explicitStatus;
 
   const message = errorMessage(error);
-  if (/^unknown (?:item|proposal|source artifact|run): /u.test(message)) return 404;
+  if (/^unknown (?:item|proposal|source artifact|run|handwriting (?:sample|profile|prompt)): /u.test(message)) return 404;
   if (/^proposal is not pending: /u.test(message)) return 409;
   if (/^proposal kind cannot be promoted: /u.test(message)) return 400;
   if (/^duplicate /u.test(message)) return 409;
   if (
-    /(?: is required| must be | entries must be |^unsupported |^unsafe state map key: |^invalid )/u.test(message)
+    /(?: is required| must be | must include | must use | entries must be |^multipart |^unsupported |^unsafe state map key: |^invalid )/u.test(
+      message,
+    )
   ) {
     return 400;
   }
@@ -86,6 +89,13 @@ function normalizeImageDetail(value) {
   const detail = String(value).trim();
   if (!IMAGE_DETAIL_VALUES.has(detail)) throw new Error("image detail must be low, high, original, or auto");
   return detail;
+}
+
+function requiredRouteRecordId(value, label) {
+  const id = String(value ?? "").trim();
+  if (!id) throw new Error(`${label} is required`);
+  if (UNSAFE_STATE_MAP_KEYS.has(id)) throw new Error(`unsafe state map key: ${id}`);
+  return id;
 }
 
 function isMultipartFormData(request) {
@@ -246,6 +256,21 @@ async function normalizeMultipartHandwritingSampleInput(request, options = {}) {
   if (files.length !== 1) throw new Error("handwriting sample multipart body must include one image file");
   const referenceText = String(fields.referenceText ?? "").trim();
   if (!referenceText) throw new Error("referenceText is required");
+  const profileId = requiredRouteRecordId(
+    Object.hasOwn(fields, "profileId") ? fields.profileId : DEFAULT_HANDWRITING_PROFILE_ID,
+    "handwriting profile id",
+  );
+  const promptId = requiredRouteRecordId(
+    Object.hasOwn(fields, "promptId") ? fields.promptId : DEFAULT_HANDWRITING_PROMPT_ID,
+    "handwriting prompt id",
+  );
+  const workspace = options.notesStore.readWorkspace();
+  if (!Object.hasOwn(workspace.handwritingProfiles, profileId)) {
+    throw new Error(`unknown handwriting profile: ${profileId}`);
+  }
+  if (!Object.hasOwn(workspace.handwritingPrompts, promptId)) {
+    throw new Error(`unknown handwriting prompt: ${promptId}`);
+  }
   const file = await normalizeUploadedImageMediaFile(files[0], {
     detail: "original",
     workspaceHostPath: options.workspaceHostPath,
@@ -253,8 +278,8 @@ async function normalizeMultipartHandwritingSampleInput(request, options = {}) {
     convertHeif: options.convertHeifToPng || options.convertHeifToJpeg,
   });
   return {
-    profileId: Object.hasOwn(fields, "profileId") ? String(fields.profileId).trim() : DEFAULT_HANDWRITING_PROFILE_ID,
-    promptId: Object.hasOwn(fields, "promptId") ? String(fields.promptId).trim() : DEFAULT_HANDWRITING_PROMPT_ID,
+    profileId,
+    promptId,
     referenceText,
     file,
   };
@@ -436,6 +461,7 @@ export async function handleNotesRoute({
       throw error;
     }
     const input = await normalizeMultipartHandwritingSampleInput(request, {
+      notesStore,
       workspaceHostPath: notesWorkspaceHostPath,
       convertHeifToPng: notesImageConverter,
     });

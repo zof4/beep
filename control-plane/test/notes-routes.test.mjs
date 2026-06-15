@@ -81,6 +81,20 @@ function multipartBody({ boundary, fields = {}, file }) {
   return Buffer.concat(chunks);
 }
 
+function multipartFieldsBody({ boundary, fields = {} }) {
+  const chunks = [];
+  for (const [name, value] of Object.entries(fields)) {
+    chunks.push(
+      Buffer.from(
+        `--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${String(value)}\r\n`,
+        "utf8",
+      ),
+    );
+  }
+  chunks.push(Buffer.from(`--${boundary}--\r\n`, "utf8"));
+  return Buffer.concat(chunks);
+}
+
 function captureResponse() {
   let statusCode = 0;
   let body = "";
@@ -115,6 +129,16 @@ function runtimePromptFromSubmitBody(body) {
   const { input } = JSON.parse(body);
   assert.ok(Array.isArray(input), "runtime submit body should contain native input parts");
   return input.find((part) => part?.type === "text")?.text || "";
+}
+
+async function assertNoHandwritingSampleState(handler, auth) {
+  const workspace = await call(handler, "GET", "/api/notes/workspace", null, auth);
+  assert.equal(workspace.statusCode, 200);
+  assert.deepEqual(workspace.payload.workspace.sourceArtifacts, {});
+  assert.deepEqual(workspace.payload.workspace.sourceOrder, []);
+  assert.deepEqual(workspace.payload.workspace.handwritingSamples, {});
+  assert.deepEqual(workspace.payload.workspace.handwritingSampleOrder, []);
+  assert.deepEqual(workspace.payload.workspace.handwritingProfiles.profile_default.activeSampleIds, []);
 }
 
 test("notes workspace route requires operator auth", async () => {
@@ -504,6 +528,232 @@ test("handwriting sample toggle route deactivates a sample and updates profile p
     assert.equal(toggled.payload.ok, true);
     assert.equal(toggled.payload.sample.active, false);
     assert.deepEqual(toggled.payload.profile.activeSampleIds, []);
+  } finally {
+    cleanup();
+    rmSync(workspaceDir, { recursive: true, force: true });
+  }
+});
+
+test("handwriting sample toggle route maps unknown sample to 404", async () => {
+  const { handler, auth, cleanup } = tempHandler();
+  try {
+    const result = await call(
+      handler,
+      "POST",
+      "/api/notes/handwriting/samples/hw_sample_missing/toggle",
+      { active: false },
+      auth,
+    );
+
+    assert.equal(result.statusCode, 404);
+    assert.match(result.payload.error, /unknown handwriting sample: hw_sample_missing/u);
+  } finally {
+    cleanup();
+  }
+});
+
+test("handwriting sample route rejects unknown profile or prompt without persisting sample state", async () => {
+  const referenceText = "Monday Jan 5 at 10:30 AM - Call Sam about the research plan.";
+  const cases = [
+    {
+      name: "unknown profile",
+      fields: { profileId: "profile_missing", promptId: "hw_prompt_v1", referenceText },
+      expectedError: /unknown handwriting profile: profile_missing/u,
+    },
+    {
+      name: "unknown prompt",
+      fields: { profileId: "profile_default", promptId: "hw_prompt_missing", referenceText },
+      expectedError: /unknown handwriting prompt: hw_prompt_missing/u,
+    },
+  ];
+
+  for (const testCase of cases) {
+    const converterCalls = [];
+    const workspaceDir = mkdtempSync(join(tmpdir(), "beep-notes-workspace-test-"));
+    const { handler, auth, cleanup } = tempHandler({
+      notesWorkspaceHostPath: workspaceDir,
+      notesImageConverter: async (input) => {
+        converterCalls.push(input);
+        return { mimeType: "image/png", data: Buffer.from("converted-png") };
+      },
+    });
+    try {
+      const boundary = `beep-notes-handwriting-${testCase.name.replace(/\s+/gu, "-")}`;
+      const body = multipartBody({
+        boundary,
+        fields: testCase.fields,
+        file: { filename: "sample.HEIC", mimeType: "image/heic", data: Buffer.from("fake-heic") },
+      });
+      const result = await callRaw(handler, "POST", "/api/notes/handwriting/samples", body, {
+        ...auth,
+        "content-type": `multipart/form-data; boundary=${boundary}`,
+        "content-length": String(body.byteLength),
+      });
+
+      assert.equal(result.statusCode, 404, testCase.name);
+      assert.match(result.payload.error, testCase.expectedError);
+      assert.deepEqual(converterCalls, []);
+      await assertNoHandwritingSampleState(handler, auth);
+    } finally {
+      cleanup();
+      rmSync(workspaceDir, { recursive: true, force: true });
+    }
+  }
+});
+
+test("handwriting sample route rejects blank profile or prompt without persisting sample state", async () => {
+  const referenceText = "Monday Jan 5 at 10:30 AM - Call Sam about the research plan.";
+  const cases = [
+    {
+      name: "blank profile",
+      fields: { profileId: " ", promptId: "hw_prompt_v1", referenceText },
+      expectedError: /handwriting profile id is required/u,
+    },
+    {
+      name: "blank prompt",
+      fields: { profileId: "profile_default", promptId: " ", referenceText },
+      expectedError: /handwriting prompt id is required/u,
+    },
+  ];
+
+  for (const testCase of cases) {
+    const converterCalls = [];
+    const workspaceDir = mkdtempSync(join(tmpdir(), "beep-notes-workspace-test-"));
+    const { handler, auth, cleanup } = tempHandler({
+      notesWorkspaceHostPath: workspaceDir,
+      notesImageConverter: async (input) => {
+        converterCalls.push(input);
+        return { mimeType: "image/png", data: Buffer.from("converted-png") };
+      },
+    });
+    try {
+      const boundary = `beep-notes-handwriting-${testCase.name.replace(/\s+/gu, "-")}`;
+      const body = multipartBody({
+        boundary,
+        fields: testCase.fields,
+        file: { filename: "sample.HEIC", mimeType: "image/heic", data: Buffer.from("fake-heic") },
+      });
+      const result = await callRaw(handler, "POST", "/api/notes/handwriting/samples", body, {
+        ...auth,
+        "content-type": `multipart/form-data; boundary=${boundary}`,
+        "content-length": String(body.byteLength),
+      });
+
+      assert.equal(result.statusCode, 400, testCase.name);
+      assert.match(result.payload.error, testCase.expectedError);
+      assert.deepEqual(converterCalls, []);
+      await assertNoHandwritingSampleState(handler, auth);
+    } finally {
+      cleanup();
+      rmSync(workspaceDir, { recursive: true, force: true });
+    }
+  }
+});
+
+test("handwriting sample route rejects non-multipart uploads as client errors", async () => {
+  const { handler, auth, cleanup } = tempHandler();
+  try {
+    const result = await call(
+      handler,
+      "POST",
+      "/api/notes/handwriting/samples",
+      { profileId: "profile_default", promptId: "hw_prompt_v1", referenceText: "Text" },
+      auth,
+    );
+
+    assert.equal(result.statusCode, 400);
+    assert.match(result.payload.error, /multipart\/form-data/u);
+    await assertNoHandwritingSampleState(handler, auth);
+  } finally {
+    cleanup();
+  }
+});
+
+test("handwriting sample route rejects multipart uploads without an image file", async () => {
+  const workspaceDir = mkdtempSync(join(tmpdir(), "beep-notes-workspace-test-"));
+  const { handler, auth, cleanup } = tempHandler({ notesWorkspaceHostPath: workspaceDir });
+  try {
+    const boundary = "beep-notes-handwriting-missing-image";
+    const body = multipartFieldsBody({
+      boundary,
+      fields: {
+        profileId: "profile_default",
+        promptId: "hw_prompt_v1",
+        referenceText: "Monday Jan 5 at 10:30 AM - Call Sam about the research plan.",
+      },
+    });
+    const result = await callRaw(handler, "POST", "/api/notes/handwriting/samples", body, {
+      ...auth,
+      "content-type": `multipart/form-data; boundary=${boundary}`,
+      "content-length": String(body.byteLength),
+    });
+
+    assert.equal(result.statusCode, 400);
+    assert.match(result.payload.error, /handwriting sample multipart body must include one image file/u);
+    await assertNoHandwritingSampleState(handler, auth);
+  } finally {
+    cleanup();
+    rmSync(workspaceDir, { recursive: true, force: true });
+  }
+});
+
+test("handwriting sample route rejects multipart uploads without referenceText", async () => {
+  const workspaceDir = mkdtempSync(join(tmpdir(), "beep-notes-workspace-test-"));
+  const { handler, auth, cleanup } = tempHandler({ notesWorkspaceHostPath: workspaceDir });
+  try {
+    const boundary = "beep-notes-handwriting-missing-reference";
+    const body = multipartBody({
+      boundary,
+      fields: { profileId: "profile_default", promptId: "hw_prompt_v1" },
+      file: { filename: "sample.png", mimeType: "image/png", data: Buffer.from("fake-png") },
+    });
+    const result = await callRaw(handler, "POST", "/api/notes/handwriting/samples", body, {
+      ...auth,
+      "content-type": `multipart/form-data; boundary=${boundary}`,
+      "content-length": String(body.byteLength),
+    });
+
+    assert.equal(result.statusCode, 400);
+    assert.match(result.payload.error, /referenceText is required/u);
+    await assertNoHandwritingSampleState(handler, auth);
+  } finally {
+    cleanup();
+    rmSync(workspaceDir, { recursive: true, force: true });
+  }
+});
+
+test("handwriting sample toggle route rejects non-boolean active values", async () => {
+  const workspaceDir = mkdtempSync(join(tmpdir(), "beep-notes-workspace-test-"));
+  const { handler, auth, cleanup } = tempHandler({ notesWorkspaceHostPath: workspaceDir });
+  try {
+    const boundary = "beep-notes-handwriting-invalid-active";
+    const body = multipartBody({
+      boundary,
+      fields: {
+        profileId: "profile_default",
+        promptId: "hw_prompt_v1",
+        referenceText: "Monday Jan 5 at 10:30 AM - Call Sam about the research plan.",
+      },
+      file: { filename: "sample.png", mimeType: "image/png", data: Buffer.from("fake-png") },
+    });
+    const created = await callRaw(handler, "POST", "/api/notes/handwriting/samples", body, {
+      ...auth,
+      "content-type": `multipart/form-data; boundary=${boundary}`,
+      "content-length": String(body.byteLength),
+    });
+    const result = await call(
+      handler,
+      "POST",
+      `/api/notes/handwriting/samples/${created.payload.sample.id}/toggle`,
+      { active: "false" },
+      auth,
+    );
+    const profile = await call(handler, "GET", "/api/notes/handwriting/profile", null, auth);
+
+    assert.equal(created.statusCode, 200);
+    assert.equal(result.statusCode, 400);
+    assert.match(result.payload.error, /active must be a boolean/u);
+    assert.deepEqual(profile.payload.profile.activeSampleIds, [created.payload.sample.id]);
   } finally {
     cleanup();
     rmSync(workspaceDir, { recursive: true, force: true });
