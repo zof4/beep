@@ -3,6 +3,10 @@ import { normalizeBeepInput } from "../../../shared/native-input.mjs";
 import { readJsonBody, sendJson } from "../http-utils.mjs";
 import { NotesBeepGateway } from "./beep-gateway.mjs";
 import {
+  DEFAULT_HANDWRITING_PROFILE_ID,
+  DEFAULT_HANDWRITING_PROMPT_ID,
+} from "./handwriting-domain.mjs";
+import {
   MAX_IMAGE_UPLOAD_BYTES,
   NATIVE_NOTES_IMAGE_MIME_TYPES,
   captureMimeTypeFromUpload,
@@ -230,6 +234,32 @@ async function normalizeMultipartCaptureInput(request, options = {}) {
   };
 }
 
+async function normalizeMultipartHandwritingSampleInput(request, options = {}) {
+  const body = await readRequestBuffer(request, MAX_MULTIPART_CAPTURE_BYTES);
+  const parts = parseMultipartFormData(body, multipartBoundary(request));
+  const fields = {};
+  const files = [];
+  for (const part of parts) {
+    if (part.filename) files.push(part);
+    else fields[part.name] = part.data.toString("utf8");
+  }
+  if (files.length !== 1) throw new Error("handwriting sample multipart body must include one image file");
+  const referenceText = String(fields.referenceText ?? "").trim();
+  if (!referenceText) throw new Error("referenceText is required");
+  const file = await normalizeUploadedImageMediaFile(files[0], {
+    detail: "original",
+    workspaceHostPath: options.workspaceHostPath,
+    targetFormat: "png",
+    convertHeif: options.convertHeifToPng || options.convertHeifToJpeg,
+  });
+  return {
+    profileId: Object.hasOwn(fields, "profileId") ? String(fields.profileId).trim() : DEFAULT_HANDWRITING_PROFILE_ID,
+    promptId: Object.hasOwn(fields, "promptId") ? String(fields.promptId).trim() : DEFAULT_HANDWRITING_PROMPT_ID,
+    referenceText,
+    file,
+  };
+}
+
 async function imageInputPartsForSource(source, options = {}) {
   if (source?.kind !== "image") return [];
   const files = Array.isArray(source.media?.files) ? source.media.files : [];
@@ -351,6 +381,16 @@ function attachedLayers(workspace, item) {
   };
 }
 
+function handwritingProfileProjection(notesStore) {
+  const workspace = notesStore.readWorkspace();
+  const profile = workspace.handwritingProfiles[DEFAULT_HANDWRITING_PROFILE_ID];
+  const prompt = workspace.handwritingPrompts[DEFAULT_HANDWRITING_PROMPT_ID];
+  const samples = (profile.activeSampleIds || [])
+    .map((id) => workspace.handwritingSamples[id])
+    .filter(Boolean);
+  return { profile, prompt, samples };
+}
+
 export async function handleNotesRoute({
   request,
   response,
@@ -367,6 +407,65 @@ export async function handleNotesRoute({
   const parts = pathname.split("/").filter(Boolean);
 
   try {
+  if (parts.length === 5 && parts[2] === "handwriting" && parts[3] === "prompts" && parts[4] === "default") {
+    if (request.method !== "GET") {
+      sendMethodNotAllowed(response);
+      return true;
+    }
+    sendJson(response, 200, { ok: true, prompt: notesStore.getDefaultHandwritingPrompt() });
+    return true;
+  }
+
+  if (parts.length === 4 && parts[2] === "handwriting" && parts[3] === "profile") {
+    if (request.method !== "GET") {
+      sendMethodNotAllowed(response);
+      return true;
+    }
+    sendJson(response, 200, { ok: true, ...handwritingProfileProjection(notesStore) });
+    return true;
+  }
+
+  if (parts.length === 4 && parts[2] === "handwriting" && parts[3] === "samples") {
+    if (request.method !== "POST") {
+      sendMethodNotAllowed(response);
+      return true;
+    }
+    if (!isMultipartFormData(request)) {
+      const error = new Error("handwriting samples must use multipart/form-data");
+      error.status = 400;
+      throw error;
+    }
+    const input = await normalizeMultipartHandwritingSampleInput(request, {
+      workspaceHostPath: notesWorkspaceHostPath,
+      convertHeifToPng: notesImageConverter,
+    });
+    const source = notesStore.createSourceArtifact({
+      kind: "image",
+      body: "handwriting calibration sample",
+      media: { schemaVersion: 1, files: [input.file] },
+    });
+    const sample = notesStore.createHandwritingSample({
+      profileId: input.profileId,
+      promptId: input.promptId,
+      referenceText: input.referenceText,
+      sourceArtifactId: source.id,
+      image: input.file,
+    });
+    sendJson(response, 200, { ok: true, source, sample, ...handwritingProfileProjection(notesStore) });
+    return true;
+  }
+
+  if (parts.length === 6 && parts[2] === "handwriting" && parts[3] === "samples" && parts[5] === "toggle") {
+    if (request.method !== "POST") {
+      sendMethodNotAllowed(response);
+      return true;
+    }
+    const body = await readJsonBody(request);
+    const sample = notesStore.toggleHandwritingSample(parts[4], { active: body.active });
+    sendJson(response, 200, { ok: true, sample, ...handwritingProfileProjection(notesStore) });
+    return true;
+  }
+
   if (parts.length === 3 && parts[2] === "workspace") {
     if (request.method !== "GET") {
       sendMethodNotAllowed(response);
