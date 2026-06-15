@@ -9,7 +9,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   defaultLcmService,
@@ -159,11 +159,6 @@ async function loadPiSdk(piRoot) {
   return { codingAgent, ai };
 }
 
-function envEnabled(value, fallback) {
-  if (value === undefined || value === null || value === "") return fallback;
-  return !["0", "false", "no", "off"].includes(String(value).toLowerCase());
-}
-
 function normalizeExtensionConfig(config = {}) {
   return {
     STATE_DIR: config.STATE_DIR || "/state",
@@ -199,7 +194,7 @@ function normalizeExtensionConfig(config = {}) {
   };
 }
 
-function buildPiNativeExtensionEnv(session, { lcmContextExtensionLoaded, codexWebSearchExtensionLoaded, controlPlaneToolsExtensionLoaded, sandboxToolPortalExtensionLoaded }) {
+function buildPiNativeExtensionEnv(session, { lcmContextExtensionAvailable, codexWebSearchExtensionAvailable, controlPlaneToolsExtensionAvailable, sandboxToolPortalExtensionAvailable }) {
   const {
     STATE_DIR,
     WORKSPACE_DIR,
@@ -227,18 +222,18 @@ function buildPiNativeExtensionEnv(session, { lcmContextExtensionLoaded, codexWe
     BEEP_WORKSPACE_DIR: WORKSPACE_DIR,
     PI_CODING_AGENT_DIR: session.agentDir,
     PI_CODING_AGENT_SESSION_DIR: session.sessionDir,
-    BEEP_LCM_CONTEXT_ENABLED: lcmContextExtensionLoaded ? "1" : "0",
+    BEEP_LCM_CONTEXT_ENABLED: lcmContextExtensionAvailable ? "1" : "0",
     BEEP_LCM_CONTEXT_URL: LCM_CONTEXT_URL,
     BEEP_LCM_CONTEXT_TOKEN: LCM_CONTEXT_TOKEN,
     BEEP_LCM_RUNTIME_SESSION_ID: session.id,
     BEEP_LCM_CONTEXT_TOKEN_BUDGET: LCM_CONTEXT_TOKEN_BUDGET,
     BEEP_LCM_CONTEXT_TIMEOUT_MS: LCM_CONTEXT_TIMEOUT_MS,
-    BEEP_CODEX_WEB_SEARCH_ENABLED: codexWebSearchExtensionLoaded && CODEX_WEB_SEARCH_ENABLED ? "1" : "0",
-    BEEP_CONTROL_PLANE_TOOLS_ENABLED: controlPlaneToolsExtensionLoaded ? "1" : "0",
-    BEEP_SANDBOX_TOOL_PORTAL_ENABLED: sandboxToolPortalExtensionLoaded ? "1" : "0",
+    BEEP_CODEX_WEB_SEARCH_ENABLED: codexWebSearchExtensionAvailable && CODEX_WEB_SEARCH_ENABLED ? "1" : "0",
+    BEEP_CONTROL_PLANE_TOOLS_ENABLED: controlPlaneToolsExtensionAvailable ? "1" : "0",
+    BEEP_SANDBOX_TOOL_PORTAL_ENABLED: sandboxToolPortalExtensionAvailable ? "1" : "0",
   };
 
-  if (codexWebSearchExtensionLoaded && CODEX_WEB_SEARCH_ENABLED) {
+  if (codexWebSearchExtensionAvailable && CODEX_WEB_SEARCH_ENABLED) {
     env.BEEP_CODEX_WEB_SEARCH_MODE = CODEX_WEB_SEARCH_MODE;
     for (const key of CODEX_WEB_SEARCH_OPTIONAL_ENV_KEYS) {
       const value = process.env[key];
@@ -246,13 +241,13 @@ function buildPiNativeExtensionEnv(session, { lcmContextExtensionLoaded, codexWe
     }
   }
 
-  if (sandboxToolPortalExtensionLoaded) {
+  if (sandboxToolPortalExtensionAvailable) {
     env.BEEP_SANDBOX_TOOL_PORTAL_URL = SANDBOX_TOOL_PORTAL_URL;
     env.BEEP_SANDBOX_TOOL_PORTAL_TOKEN = RUNTIME_API_TOKEN;
     env.BEEP_SANDBOX_TOOL_PORTAL_TIMEOUT_MS = SANDBOX_TOOL_PORTAL_TIMEOUT_MS;
   }
 
-  if (controlPlaneToolsExtensionLoaded) {
+  if (controlPlaneToolsExtensionAvailable) {
     env.BEEP_CONTROL_PLANE_TOOLS_EXTENSION_PATH = CONTROL_PLANE_TOOLS_EXTENSION_PATH;
     env.BEEP_CONTROL_PLANE_URL = CONTROL_PLANE_URL;
     env.BEEP_CONTROL_PLANE_RUNTIME_ID = CONTROL_PLANE_RUNTIME_ID;
@@ -272,6 +267,28 @@ function buildPiNativeExtensionEnv(session, { lcmContextExtensionLoaded, codexWe
     if (value === undefined || value === null || value === "") delete env[key];
   }
   return env;
+}
+
+function extensionPathSet(extensionsResult) {
+  const loadedExtensionPaths = new Set();
+  for (const extension of extensionsResult?.extensions || []) {
+    if (typeof extension?.path !== "string" || extension.path.length === 0) continue;
+    loadedExtensionPaths.add(extension.path);
+    loadedExtensionPaths.add(resolve(extension.path));
+  }
+  return loadedExtensionPaths;
+}
+
+function normalizeExtensionLoaderErrors(extensionsResult) {
+  return (extensionsResult?.errors || []).map((entry) => {
+    if (entry && typeof entry === "object") {
+      return {
+        path: typeof entry.path === "string" ? entry.path : null,
+        error: typeof entry.error === "string" ? entry.error : JSON.stringify(entry.error ?? entry),
+      };
+    }
+    return { path: null, error: String(entry) };
+  });
 }
 
 function applyScopedEnv(env) {
@@ -351,6 +368,8 @@ export class PiNativeSession {
     this.closed = false;
     this.stderrTail = "";
     this.extensionEnv = null;
+    this.extensionLoader = null;
+    this.requestedExtensionPaths = [];
     this.unsubscribe = null;
     this.sdk = null;
     this.piSession = null;
@@ -397,79 +416,33 @@ export class PiNativeSession {
     } = this.extensionConfig;
 
     const additionalExtensionPaths = [];
-    const lcmContextExtensionLoaded = LCM_CONTEXT_ENABLED && existsSync(LCM_CONTEXT_EXTENSION_PATH);
-    if (lcmContextExtensionLoaded) additionalExtensionPaths.push(LCM_CONTEXT_EXTENSION_PATH);
-    const codexWebSearchExtensionLoaded = CODEX_WEB_SEARCH_EXTENSION_ENABLED && existsSync(CODEX_WEB_SEARCH_EXTENSION_PATH);
-    if (codexWebSearchExtensionLoaded) additionalExtensionPaths.push(CODEX_WEB_SEARCH_EXTENSION_PATH);
-    const sandboxToolPortalExtensionLoaded =
+    const lcmContextExtensionAvailable = LCM_CONTEXT_ENABLED && existsSync(LCM_CONTEXT_EXTENSION_PATH);
+    if (lcmContextExtensionAvailable) additionalExtensionPaths.push(LCM_CONTEXT_EXTENSION_PATH);
+    const codexWebSearchExtensionAvailable = CODEX_WEB_SEARCH_EXTENSION_ENABLED && existsSync(CODEX_WEB_SEARCH_EXTENSION_PATH);
+    if (codexWebSearchExtensionAvailable) additionalExtensionPaths.push(CODEX_WEB_SEARCH_EXTENSION_PATH);
+    const sandboxToolPortalExtensionAvailable =
       SANDBOX_TOOL_PORTAL_ENABLED && Boolean(RUNTIME_API_TOKEN) && existsSync(SANDBOX_TOOL_PORTAL_EXTENSION_PATH);
-    if (sandboxToolPortalExtensionLoaded) additionalExtensionPaths.push(SANDBOX_TOOL_PORTAL_EXTENSION_PATH);
-    const controlPlaneToolsExtensionLoaded =
+    if (sandboxToolPortalExtensionAvailable) additionalExtensionPaths.push(SANDBOX_TOOL_PORTAL_EXTENSION_PATH);
+    const controlPlaneToolsExtensionAvailable =
       CONTROL_PLANE_TOOLS_ENABLED &&
       Boolean(CONTROL_PLANE_URL) &&
       Boolean(CONTROL_PLANE_RUNTIME_TOKEN) &&
       existsSync(CONTROL_PLANE_TOOLS_EXTENSION_PATH);
-    if (controlPlaneToolsExtensionLoaded) additionalExtensionPaths.push(CONTROL_PLANE_TOOLS_EXTENSION_PATH);
+    if (controlPlaneToolsExtensionAvailable) additionalExtensionPaths.push(CONTROL_PLANE_TOOLS_EXTENSION_PATH);
+    this.requestedExtensionPaths = additionalExtensionPaths.slice();
+    const extensionAvailability = {
+      lcmContextExtensionAvailable,
+      codexWebSearchExtensionAvailable,
+      sandboxToolPortalExtensionAvailable,
+      controlPlaneToolsExtensionAvailable,
+    };
 
     const resumedFrom = this.resumeLatest ? listSessionFiles(this.sessionDir)[0]?.path || null : null;
-    this.runConfig = {
-      schemaVersion: 1,
-      id: this.id,
-      provider: "openai-codex",
-      model: this.model,
-      thinking: this.thinking,
-      workspace: this.workspace,
-      sessionDir: this.sessionDir,
-      piRoot: this.piRoot,
-      codexHome: this.codexHome,
-      transport: "pi-native",
-      resumeLatest: this.resumeLatest,
-      resumedFrom,
-      lcmContext: {
-        enabled: LCM_CONTEXT_ENABLED,
-        extensionPath: LCM_CONTEXT_EXTENSION_PATH,
-        extensionLoaded: lcmContextExtensionLoaded,
-        url: LCM_CONTEXT_URL,
-        tokenBudget: Number(LCM_CONTEXT_TOKEN_BUDGET),
-        timeoutMs: Number(LCM_CONTEXT_TIMEOUT_MS),
-      },
-      codexWebSearch: {
-        enabled: CODEX_WEB_SEARCH_ENABLED,
-        extensionEnabled: CODEX_WEB_SEARCH_EXTENSION_ENABLED,
-        extensionPath: CODEX_WEB_SEARCH_EXTENSION_PATH,
-        extensionLoaded: codexWebSearchExtensionLoaded,
-        effectiveEnabled: CODEX_WEB_SEARCH_ENABLED && codexWebSearchExtensionLoaded,
-        mode: CODEX_WEB_SEARCH_MODE,
-        allowedDomainsConfigured: Boolean(process.env.BEEP_CODEX_WEB_SEARCH_ALLOWED_DOMAINS),
-        contextSizeConfigured: Boolean(process.env.BEEP_CODEX_WEB_SEARCH_CONTEXT_SIZE),
-        contentTypesConfigured: Boolean(process.env.BEEP_CODEX_WEB_SEARCH_CONTENT_TYPES),
-        userLocationConfigured: CODEX_WEB_SEARCH_OPTIONAL_ENV_KEYS.some((key) => key.startsWith("BEEP_CODEX_WEB_SEARCH_LOCATION_") && Boolean(process.env[key])),
-      },
-      sandboxToolPortal: {
-        enabled: SANDBOX_TOOL_PORTAL_ENABLED,
-        extensionPath: SANDBOX_TOOL_PORTAL_EXTENSION_PATH,
-        extensionLoaded: sandboxToolPortalExtensionLoaded,
-        url: SANDBOX_TOOL_PORTAL_URL,
-        timeoutMs: Number(SANDBOX_TOOL_PORTAL_TIMEOUT_MS),
-      },
-      controlPlaneTools: {
-        enabled: CONTROL_PLANE_TOOLS_ENABLED,
-        extensionPath: CONTROL_PLANE_TOOLS_EXTENSION_PATH,
-        extensionLoaded: controlPlaneToolsExtensionLoaded,
-        url: CONTROL_PLANE_URL || null,
-        runtimeId: CONTROL_PLANE_RUNTIME_ID,
-        runtimeTokenConfigured: Boolean(CONTROL_PLANE_RUNTIME_TOKEN),
-        timeoutMs: Number(CONTROL_PLANE_TOOL_TIMEOUT_MS),
-      },
-      createdAt: this.createdAt,
-    };
-    writeJsonFile(join(this.rootDir, "run-config.json"), this.runConfig);
-
     const env = buildPiNativeExtensionEnv(this, {
-      lcmContextExtensionLoaded,
-      codexWebSearchExtensionLoaded,
-      controlPlaneToolsExtensionLoaded,
-      sandboxToolPortalExtensionLoaded,
+      lcmContextExtensionAvailable,
+      codexWebSearchExtensionAvailable,
+      controlPlaneToolsExtensionAvailable,
+      sandboxToolPortalExtensionAvailable,
     });
     this.extensionEnv = env;
     const restoreOpenEnv = applyScopedEnv(env);
@@ -506,9 +479,25 @@ export class PiNativeSession {
         sessionManager,
         resourceLoader,
       });
+      const extensionsResult = result.extensionsResult || resourceLoader.getExtensions();
+      const loadedExtensionPaths = extensionPathSet(extensionsResult);
+      const extensionLoaderErrors = normalizeExtensionLoaderErrors(extensionsResult);
+      this.extensionLoader = {
+        requestedPaths: this.requestedExtensionPaths,
+        loadedPaths: [...loadedExtensionPaths],
+        errors: extensionLoaderErrors,
+      };
+      this.runConfig = this.buildRunConfig({
+        resumedFrom,
+        extensionAvailability,
+        loadedExtensionPaths,
+        extensionLoaderErrors,
+      });
+      writeJsonFile(join(this.rootDir, "run-config.json"), this.runConfig);
       this.piSession = result.session;
       this.unsubscribe = this.piSession.subscribe((event) => this.handleNativeEvent(event));
       await this.piSession.bindExtensions({});
+      const lcmContextExtensionLoaded = loadedExtensionPaths.has(LCM_CONTEXT_EXTENSION_PATH);
       if (lcmContextExtensionLoaded && typeof this.piSession.setAutoCompactionEnabled === "function") {
         this.piSession.setAutoCompactionEnabled(false);
         this.recordLcmContextInjection({
@@ -524,6 +513,22 @@ export class PiNativeSession {
       this.writeSummary();
     } catch (error) {
       this.lastError = error instanceof Error ? error.message : String(error);
+      if (!this.extensionLoader) {
+        const extensionLoaderErrors = [{ path: null, error: this.lastError }];
+        const loadedExtensionPaths = new Set();
+        this.extensionLoader = {
+          requestedPaths: this.requestedExtensionPaths,
+          loadedPaths: [],
+          errors: extensionLoaderErrors,
+        };
+        this.runConfig = this.buildRunConfig({
+          resumedFrom,
+          extensionAvailability,
+          loadedExtensionPaths,
+          extensionLoaderErrors,
+        });
+        writeJsonFile(join(this.rootDir, "run-config.json"), this.runConfig);
+      }
       this.stderrTail = `${this.stderrTail}${this.lastError}\n`.slice(-8_000);
       this.stderrStream?.write(`${this.lastError}\n`);
       this.phase = "failed";
@@ -614,6 +619,99 @@ export class PiNativeSession {
     } finally {
       restore();
     }
+  }
+
+  buildRunConfig({ resumedFrom, extensionAvailability, loadedExtensionPaths, extensionLoaderErrors }) {
+    const {
+      LCM_CONTEXT_ENABLED,
+      LCM_CONTEXT_EXTENSION_PATH,
+      LCM_CONTEXT_URL,
+      LCM_CONTEXT_TOKEN_BUDGET,
+      LCM_CONTEXT_TIMEOUT_MS,
+      CODEX_WEB_SEARCH_EXTENSION_ENABLED,
+      CODEX_WEB_SEARCH_ENABLED,
+      CODEX_WEB_SEARCH_EXTENSION_PATH,
+      CODEX_WEB_SEARCH_MODE,
+      CODEX_WEB_SEARCH_OPTIONAL_ENV_KEYS,
+      CONTROL_PLANE_TOOLS_ENABLED,
+      CONTROL_PLANE_TOOLS_EXTENSION_PATH,
+      CONTROL_PLANE_URL,
+      CONTROL_PLANE_RUNTIME_ID,
+      CONTROL_PLANE_RUNTIME_TOKEN,
+      CONTROL_PLANE_TOOL_TIMEOUT_MS,
+      SANDBOX_TOOL_PORTAL_ENABLED,
+      SANDBOX_TOOL_PORTAL_EXTENSION_PATH,
+      SANDBOX_TOOL_PORTAL_URL,
+      SANDBOX_TOOL_PORTAL_TIMEOUT_MS,
+    } = this.extensionConfig;
+    const {
+      lcmContextExtensionAvailable,
+      codexWebSearchExtensionAvailable,
+      sandboxToolPortalExtensionAvailable,
+      controlPlaneToolsExtensionAvailable,
+    } = extensionAvailability;
+
+    return {
+      schemaVersion: 1,
+      id: this.id,
+      provider: "openai-codex",
+      model: this.model,
+      thinking: this.thinking,
+      workspace: this.workspace,
+      sessionDir: this.sessionDir,
+      piRoot: this.piRoot,
+      codexHome: this.codexHome,
+      transport: "pi-native",
+      resumeLatest: this.resumeLatest,
+      resumedFrom,
+      extensionLoader: {
+        requestedPaths: this.requestedExtensionPaths,
+        loadedPaths: [...loadedExtensionPaths],
+        errors: extensionLoaderErrors,
+      },
+      lcmContext: {
+        enabled: LCM_CONTEXT_ENABLED,
+        extensionPath: LCM_CONTEXT_EXTENSION_PATH,
+        extensionAvailable: lcmContextExtensionAvailable,
+        extensionLoaded: loadedExtensionPaths.has(LCM_CONTEXT_EXTENSION_PATH),
+        url: LCM_CONTEXT_URL,
+        tokenBudget: Number(LCM_CONTEXT_TOKEN_BUDGET),
+        timeoutMs: Number(LCM_CONTEXT_TIMEOUT_MS),
+      },
+      codexWebSearch: {
+        enabled: CODEX_WEB_SEARCH_ENABLED,
+        extensionEnabled: CODEX_WEB_SEARCH_EXTENSION_ENABLED,
+        extensionPath: CODEX_WEB_SEARCH_EXTENSION_PATH,
+        extensionAvailable: codexWebSearchExtensionAvailable,
+        extensionLoaded: loadedExtensionPaths.has(CODEX_WEB_SEARCH_EXTENSION_PATH),
+        effectiveEnabled: CODEX_WEB_SEARCH_ENABLED && loadedExtensionPaths.has(CODEX_WEB_SEARCH_EXTENSION_PATH),
+        mode: CODEX_WEB_SEARCH_MODE,
+        allowedDomainsConfigured: Boolean(process.env.BEEP_CODEX_WEB_SEARCH_ALLOWED_DOMAINS),
+        contextSizeConfigured: Boolean(process.env.BEEP_CODEX_WEB_SEARCH_CONTEXT_SIZE),
+        contentTypesConfigured: Boolean(process.env.BEEP_CODEX_WEB_SEARCH_CONTENT_TYPES),
+        userLocationConfigured: CODEX_WEB_SEARCH_OPTIONAL_ENV_KEYS.some((key) => key.startsWith("BEEP_CODEX_WEB_SEARCH_LOCATION_") && Boolean(process.env[key])),
+      },
+      sandboxToolPortal: {
+        enabled: SANDBOX_TOOL_PORTAL_ENABLED,
+        extensionPath: SANDBOX_TOOL_PORTAL_EXTENSION_PATH,
+        extensionAvailable: sandboxToolPortalExtensionAvailable,
+        extensionLoaded: loadedExtensionPaths.has(SANDBOX_TOOL_PORTAL_EXTENSION_PATH),
+        url: SANDBOX_TOOL_PORTAL_URL,
+        timeoutMs: Number(SANDBOX_TOOL_PORTAL_TIMEOUT_MS),
+      },
+      controlPlaneTools: {
+        enabled: CONTROL_PLANE_TOOLS_ENABLED,
+        extensionPath: CONTROL_PLANE_TOOLS_EXTENSION_PATH,
+        extensionAvailable: controlPlaneToolsExtensionAvailable,
+        extensionLoaded: loadedExtensionPaths.has(CONTROL_PLANE_TOOLS_EXTENSION_PATH),
+        url: CONTROL_PLANE_URL || null,
+        runtimeId: CONTROL_PLANE_RUNTIME_ID,
+        runtimeTokenConfigured: Boolean(CONTROL_PLANE_RUNTIME_TOKEN),
+        timeoutMs: Number(CONTROL_PLANE_TOOL_TIMEOUT_MS),
+      },
+      createdAt: this.createdAt,
+      updatedAt: nowIso(),
+    };
   }
 
   waitForAgentEndAfter(agentEndCount, timeoutMs = DEFAULT_PROMPT_TIMEOUT_MS) {
@@ -850,6 +948,7 @@ export class PiNativeSession {
       lastError: this.lastError,
       stderrTail: this.stderrTail,
       transport: "pi-native",
+      extensionLoader: this.extensionLoader,
     };
   }
 

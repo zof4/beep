@@ -85,15 +85,15 @@ test("agent request preserves completed prompt when memory ingest fails", () => 
 test("Pi native session can load control-plane tools extension independently from LCM context extension", () => {
   const lcmPathIndex = apiSource.indexOf("const LCM_CONTEXT_EXTENSION_PATH");
   const toolsPathIndex = apiSource.indexOf("const CONTROL_PLANE_TOOLS_EXTENSION_PATH");
-  const lcmLoadedIndex = piNativeSource.indexOf("const lcmContextExtensionLoaded");
-  const toolsLoadedIndex = piNativeSource.indexOf("const controlPlaneToolsExtensionLoaded");
+  const lcmLoadedIndex = piNativeSource.indexOf("const lcmContextExtensionAvailable");
+  const toolsLoadedIndex = piNativeSource.indexOf("const controlPlaneToolsExtensionAvailable");
   const lcmConfigIndex = piNativeSource.indexOf("lcmContext: {");
   const toolsConfigIndex = piNativeSource.indexOf("controlPlaneTools: {");
 
   assert.ok(lcmPathIndex > 0, "LCM context extension constant should exist");
   assert.ok(toolsPathIndex > 0, "control-plane tools extension constant should exist");
-  assert.ok(lcmLoadedIndex > 0, "LCM context extension loaded guard should exist");
-  assert.ok(toolsLoadedIndex > 0, "control-plane tools extension loaded guard should exist");
+  assert.ok(lcmLoadedIndex > 0, "LCM context extension availability guard should exist");
+  assert.ok(toolsLoadedIndex > 0, "control-plane tools extension availability guard should exist");
   assert.ok(lcmConfigIndex > lcmLoadedIndex, "Pi native run config should record LCM context extension after its guard");
   assert.ok(toolsConfigIndex > toolsLoadedIndex, "Pi native run config should record control-plane tools extension after its guard");
 });
@@ -131,8 +131,8 @@ test("control-plane tools are fail closed by default and Pi native env is saniti
   );
   assert.match(
     piNativeSource,
-    /if \(controlPlaneToolsExtensionLoaded\) \{[\s\S]*env\.BEEP_CONTROL_PLANE_RUNTIME_TOKEN = CONTROL_PLANE_RUNTIME_TOKEN/,
-    "runtime tool token should be assigned inside the control-plane tools loaded guard",
+    /if \(controlPlaneToolsExtensionAvailable\) \{[\s\S]*env\.BEEP_CONTROL_PLANE_RUNTIME_TOKEN = CONTROL_PLANE_RUNTIME_TOKEN/,
+    "runtime tool token should be assigned inside the control-plane tools availability guard",
   );
 });
 
@@ -154,16 +154,16 @@ test("trusted Pi loop can load the sandbox tool portal extension", () => {
   );
   assert.match(
     piNativeSource,
-    /function buildPiNativeExtensionEnv\(session, \{ lcmContextExtensionLoaded, codexWebSearchExtensionLoaded, controlPlaneToolsExtensionLoaded, sandboxToolPortalExtensionLoaded \}\)/,
+    /function buildPiNativeExtensionEnv\(session, \{ lcmContextExtensionAvailable, codexWebSearchExtensionAvailable, controlPlaneToolsExtensionAvailable, sandboxToolPortalExtensionAvailable \}\)/,
   );
   assert.match(
     piNativeSource,
-    /BEEP_SANDBOX_TOOL_PORTAL_ENABLED:\s*sandboxToolPortalExtensionLoaded \? "1" : "0"/,
+    /BEEP_SANDBOX_TOOL_PORTAL_ENABLED:\s*sandboxToolPortalExtensionAvailable \? "1" : "0"/,
   );
   assert.match(
     piNativeSource,
-    /if \(sandboxToolPortalExtensionLoaded\) \{[\s\S]*env\.BEEP_SANDBOX_TOOL_PORTAL_URL = SANDBOX_TOOL_PORTAL_URL[\s\S]*env\.BEEP_SANDBOX_TOOL_PORTAL_TOKEN = RUNTIME_API_TOKEN[\s\S]*env\.BEEP_SANDBOX_TOOL_PORTAL_TIMEOUT_MS = SANDBOX_TOOL_PORTAL_TIMEOUT_MS[\s\S]*\}/,
-    "portal URL, token, and timeout should only be assigned when the portal extension is loaded",
+    /if \(sandboxToolPortalExtensionAvailable\) \{[\s\S]*env\.BEEP_SANDBOX_TOOL_PORTAL_URL = SANDBOX_TOOL_PORTAL_URL[\s\S]*env\.BEEP_SANDBOX_TOOL_PORTAL_TOKEN = RUNTIME_API_TOKEN[\s\S]*env\.BEEP_SANDBOX_TOOL_PORTAL_TIMEOUT_MS = SANDBOX_TOOL_PORTAL_TIMEOUT_MS[\s\S]*\}/,
+    "portal URL, token, and timeout should only be assigned when the portal extension is available for loading",
   );
   assert.doesNotMatch(
     piNativeSource,
@@ -171,9 +171,9 @@ test("trusted Pi loop can load the sandbox tool portal extension", () => {
     "runtime API token must not be unconditionally exposed to Pi",
   );
 
-  const lcmLoadedIndex = piNativeSource.indexOf("const lcmContextExtensionLoaded");
-  const portalLoadedIndex = piNativeSource.indexOf("const sandboxToolPortalExtensionLoaded");
-  const toolsLoadedIndex = piNativeSource.indexOf("const controlPlaneToolsExtensionLoaded");
+  const lcmLoadedIndex = piNativeSource.indexOf("const lcmContextExtensionAvailable");
+  const portalLoadedIndex = piNativeSource.indexOf("const sandboxToolPortalExtensionAvailable");
+  const toolsLoadedIndex = piNativeSource.indexOf("const controlPlaneToolsExtensionAvailable");
   const lcmConfigIndex = piNativeSource.indexOf("lcmContext: {");
   const portalConfigIndex = piNativeSource.indexOf("sandboxToolPortal: {");
   const toolsConfigIndex = piNativeSource.indexOf("controlPlaneTools: {");
@@ -184,17 +184,17 @@ test("trusted Pi loop can load the sandbox tool portal extension", () => {
   assert.ok(toolsConfigIndex > portalConfigIndex, "control-plane tools run config should be recorded after sandbox portal");
   assert.match(
     piNativeSource,
-    /const sandboxToolPortalExtensionLoaded =[\s\S]*SANDBOX_TOOL_PORTAL_ENABLED &&[\s\S]*Boolean\(RUNTIME_API_TOKEN\) &&[\s\S]*existsSync\(SANDBOX_TOOL_PORTAL_EXTENSION_PATH\)/,
+    /const sandboxToolPortalExtensionAvailable =[\s\S]*SANDBOX_TOOL_PORTAL_ENABLED &&[\s\S]*Boolean\(RUNTIME_API_TOKEN\) &&[\s\S]*existsSync\(SANDBOX_TOOL_PORTAL_EXTENSION_PATH\)/,
   );
   assert.match(piNativeSource, /additionalExtensionPaths\.push\(SANDBOX_TOOL_PORTAL_EXTENSION_PATH\)/);
   assert.match(
     piNativeSource,
-    /sandboxToolPortal: \{[\s\S]*enabled: SANDBOX_TOOL_PORTAL_ENABLED[\s\S]*extensionPath: SANDBOX_TOOL_PORTAL_EXTENSION_PATH[\s\S]*extensionLoaded: sandboxToolPortalExtensionLoaded[\s\S]*url: SANDBOX_TOOL_PORTAL_URL[\s\S]*timeoutMs: Number\(SANDBOX_TOOL_PORTAL_TIMEOUT_MS\)/,
+    /sandboxToolPortal: \{[\s\S]*enabled: SANDBOX_TOOL_PORTAL_ENABLED[\s\S]*extensionPath: SANDBOX_TOOL_PORTAL_EXTENSION_PATH[\s\S]*extensionAvailable: sandboxToolPortalExtensionAvailable[\s\S]*extensionLoaded: loadedExtensionPaths\.has\(SANDBOX_TOOL_PORTAL_EXTENSION_PATH\)[\s\S]*url: SANDBOX_TOOL_PORTAL_URL[\s\S]*timeoutMs: Number\(SANDBOX_TOOL_PORTAL_TIMEOUT_MS\)/,
   );
   assert.match(
     piNativeSource,
-    /buildPiNativeExtensionEnv\(this, \{[\s\S]*sandboxToolPortalExtensionLoaded[\s\S]*\}\)/,
-    "Pi native session should pass the portal-loaded guard into the env builder",
+    /buildPiNativeExtensionEnv\(this, \{[\s\S]*sandboxToolPortalExtensionAvailable[\s\S]*\}\)/,
+    "Pi native session should pass the portal availability guard into the env builder",
   );
   assert.match(piNativeSource, /delete env\.BEEP_RUNTIME_API_TOKEN/);
   assert.doesNotMatch(piNativeSource, /delete env\.BEEP_SANDBOX_TOOL_PORTAL_TOKEN/);
@@ -213,23 +213,23 @@ test("trusted Pi loop wires the hosted Codex web-search extension into spawn, en
   );
   assert.match(
     piNativeSource,
-    /function buildPiNativeExtensionEnv\(session, \{ lcmContextExtensionLoaded, codexWebSearchExtensionLoaded, controlPlaneToolsExtensionLoaded, sandboxToolPortalExtensionLoaded \}\)/,
+    /function buildPiNativeExtensionEnv\(session, \{ lcmContextExtensionAvailable, codexWebSearchExtensionAvailable, controlPlaneToolsExtensionAvailable, sandboxToolPortalExtensionAvailable \}\)/,
   );
   assert.match(
     piNativeSource,
-    /BEEP_CODEX_WEB_SEARCH_ENABLED:\s*codexWebSearchExtensionLoaded && CODEX_WEB_SEARCH_ENABLED \? "1" : "0"/,
+    /BEEP_CODEX_WEB_SEARCH_ENABLED:\s*codexWebSearchExtensionAvailable && CODEX_WEB_SEARCH_ENABLED \? "1" : "0"/,
   );
   assert.match(
     piNativeSource,
-    /if \(codexWebSearchExtensionLoaded && CODEX_WEB_SEARCH_ENABLED\) \{[\s\S]*env\.BEEP_CODEX_WEB_SEARCH_MODE = CODEX_WEB_SEARCH_MODE[\s\S]*for \(const key of CODEX_WEB_SEARCH_OPTIONAL_ENV_KEYS\) \{[\s\S]*const value = process\.env\[key\][\s\S]*if \(value\) env\[key\] = value[\s\S]*\}/,
+    /if \(codexWebSearchExtensionAvailable && CODEX_WEB_SEARCH_ENABLED\) \{[\s\S]*env\.BEEP_CODEX_WEB_SEARCH_MODE = CODEX_WEB_SEARCH_MODE[\s\S]*for \(const key of CODEX_WEB_SEARCH_OPTIONAL_ENV_KEYS\) \{[\s\S]*const value = process\.env\[key\][\s\S]*if \(value\) env\[key\] = value[\s\S]*\}/,
     "web-search mode and optional env keys should only be copied through an explicit whitelist",
   );
   assert.doesNotMatch(piNativeSource, /\.\.\.process\.env/, "Pi native env must remain sanitized");
 
-  const lcmLoadedIndex = piNativeSource.indexOf("const lcmContextExtensionLoaded");
-  const webSearchLoadedIndex = piNativeSource.indexOf("const codexWebSearchExtensionLoaded");
-  const portalLoadedIndex = piNativeSource.indexOf("const sandboxToolPortalExtensionLoaded");
-  const toolsLoadedIndex = piNativeSource.indexOf("const controlPlaneToolsExtensionLoaded");
+  const lcmLoadedIndex = piNativeSource.indexOf("const lcmContextExtensionAvailable");
+  const webSearchLoadedIndex = piNativeSource.indexOf("const codexWebSearchExtensionAvailable");
+  const portalLoadedIndex = piNativeSource.indexOf("const sandboxToolPortalExtensionAvailable");
+  const toolsLoadedIndex = piNativeSource.indexOf("const controlPlaneToolsExtensionAvailable");
   const lcmConfigIndex = piNativeSource.indexOf("lcmContext: {");
   const webSearchConfigIndex = piNativeSource.indexOf("codexWebSearch: {");
   const portalConfigIndex = piNativeSource.indexOf("sandboxToolPortal: {");
@@ -243,17 +243,17 @@ test("trusted Pi loop wires the hosted Codex web-search extension into spawn, en
   assert.ok(toolsConfigIndex > portalConfigIndex, "control-plane tools run config should be recorded after sandbox portal");
   assert.match(
     piNativeSource,
-    /const codexWebSearchExtensionLoaded = CODEX_WEB_SEARCH_EXTENSION_ENABLED && existsSync\(CODEX_WEB_SEARCH_EXTENSION_PATH\)/,
+    /const codexWebSearchExtensionAvailable = CODEX_WEB_SEARCH_EXTENSION_ENABLED && existsSync\(CODEX_WEB_SEARCH_EXTENSION_PATH\)/,
   );
   assert.match(piNativeSource, /additionalExtensionPaths\.push\(CODEX_WEB_SEARCH_EXTENSION_PATH\)/);
   assert.match(
     piNativeSource,
-    /codexWebSearch: \{[\s\S]*enabled: CODEX_WEB_SEARCH_ENABLED[\s\S]*extensionEnabled: CODEX_WEB_SEARCH_EXTENSION_ENABLED[\s\S]*extensionPath: CODEX_WEB_SEARCH_EXTENSION_PATH[\s\S]*extensionLoaded: codexWebSearchExtensionLoaded[\s\S]*effectiveEnabled: CODEX_WEB_SEARCH_ENABLED && codexWebSearchExtensionLoaded[\s\S]*mode: CODEX_WEB_SEARCH_MODE[\s\S]*allowedDomainsConfigured: Boolean\(process\.env\.BEEP_CODEX_WEB_SEARCH_ALLOWED_DOMAINS\)[\s\S]*contextSizeConfigured: Boolean\(process\.env\.BEEP_CODEX_WEB_SEARCH_CONTEXT_SIZE\)[\s\S]*contentTypesConfigured: Boolean\(process\.env\.BEEP_CODEX_WEB_SEARCH_CONTENT_TYPES\)[\s\S]*userLocationConfigured: CODEX_WEB_SEARCH_OPTIONAL_ENV_KEYS\.some\(\(key\) => key\.startsWith\("BEEP_CODEX_WEB_SEARCH_LOCATION_"\) && Boolean\(process\.env\[key\]\)\)/,
+    /codexWebSearch: \{[\s\S]*enabled: CODEX_WEB_SEARCH_ENABLED[\s\S]*extensionEnabled: CODEX_WEB_SEARCH_EXTENSION_ENABLED[\s\S]*extensionPath: CODEX_WEB_SEARCH_EXTENSION_PATH[\s\S]*extensionAvailable: codexWebSearchExtensionAvailable[\s\S]*extensionLoaded: loadedExtensionPaths\.has\(CODEX_WEB_SEARCH_EXTENSION_PATH\)[\s\S]*effectiveEnabled: CODEX_WEB_SEARCH_ENABLED && loadedExtensionPaths\.has\(CODEX_WEB_SEARCH_EXTENSION_PATH\)[\s\S]*mode: CODEX_WEB_SEARCH_MODE[\s\S]*allowedDomainsConfigured: Boolean\(process\.env\.BEEP_CODEX_WEB_SEARCH_ALLOWED_DOMAINS\)[\s\S]*contextSizeConfigured: Boolean\(process\.env\.BEEP_CODEX_WEB_SEARCH_CONTEXT_SIZE\)[\s\S]*contentTypesConfigured: Boolean\(process\.env\.BEEP_CODEX_WEB_SEARCH_CONTENT_TYPES\)[\s\S]*userLocationConfigured: CODEX_WEB_SEARCH_OPTIONAL_ENV_KEYS\.some\(\(key\) => key\.startsWith\("BEEP_CODEX_WEB_SEARCH_LOCATION_"\) && Boolean\(process\.env\[key\]\)\)/,
   );
   assert.match(
     piNativeSource,
-    /buildPiNativeExtensionEnv\(this, \{[\s\S]*codexWebSearchExtensionLoaded[\s\S]*\}\)/,
-    "Pi native session should pass the web-search-loaded guard into the env builder",
+    /buildPiNativeExtensionEnv\(this, \{[\s\S]*codexWebSearchExtensionAvailable[\s\S]*\}\)/,
+    "Pi native session should pass the web-search availability guard into the env builder",
   );
 });
 
@@ -270,6 +270,24 @@ test("runtime routes require native input instead of message prompt shims", () =
   assert.match(apiSource, /enqueuePrompt\(\{\s*input:/);
   assert.match(apiSource, /session\.prompt\(request\.input/);
   assert.doesNotMatch(apiSource, /body\.message\s*\|\|\s*body\.prompt/);
+});
+
+test("native Pi run config reports actual SDK extension loader results", () => {
+  const createIndex = piNativeSource.indexOf("const result = await sdk.codingAgent.createAgentSession");
+  const loaderResultIndex = piNativeSource.indexOf("result.extensionsResult", createIndex);
+  const loadedPathsIndex = piNativeSource.indexOf("loadedExtensionPaths", loaderResultIndex);
+  const errorsIndex = piNativeSource.indexOf("extensionLoaderErrors", loaderResultIndex);
+  const runConfigRewriteIndex = piNativeSource.indexOf('writeJsonFile(join(this.rootDir, "run-config.json"), this.runConfig)', loaderResultIndex);
+
+  assert.ok(createIndex > 0, "Pi native session should create through the SDK");
+  assert.ok(loaderResultIndex > createIndex, "run config should inspect result.extensionsResult after SDK creation");
+  assert.ok(loadedPathsIndex > loaderResultIndex, "run config should derive loaded extension paths from SDK results");
+  assert.ok(errorsIndex > loaderResultIndex, "run config should expose extension loader errors");
+  assert.ok(runConfigRewriteIndex > loaderResultIndex, "run-config.json should be written after loader results are known");
+  assert.match(piNativeSource, /extensionLoaded:\s*loadedExtensionPaths\.has\(LCM_CONTEXT_EXTENSION_PATH\)/);
+  assert.match(piNativeSource, /extensionLoaded:\s*loadedExtensionPaths\.has\(CODEX_WEB_SEARCH_EXTENSION_PATH\)/);
+  assert.match(piNativeSource, /extensionLoaded:\s*loadedExtensionPaths\.has\(SANDBOX_TOOL_PORTAL_EXTENSION_PATH\)/);
+  assert.match(piNativeSource, /extensionLoaded:\s*loadedExtensionPaths\.has\(CONTROL_PLANE_TOOLS_EXTENSION_PATH\)/);
 });
 
 test("runtime capabilities surface high-level Codex web-search status", () => {
