@@ -20,6 +20,9 @@ import {
 
 const DEFAULT_PROMPT_TIMEOUT_MS = 10 * 60 * 1000;
 const EVENT_MEMORY_LIMIT = 2_000;
+const EXTENSION_CONFIG_REGISTRY_KEY = "__BEEP_PI_EXTENSION_CONFIGS__";
+
+let extensionEnvCriticalSection = Promise.resolve();
 
 function nowIso() {
   return new Date().toISOString();
@@ -159,6 +162,26 @@ async function loadPiSdk(piRoot) {
   return { codingAgent, ai };
 }
 
+function extensionConfigRegistry() {
+  if (!(globalThis[EXTENSION_CONFIG_REGISTRY_KEY] instanceof Map)) {
+    Object.defineProperty(globalThis, EXTENSION_CONFIG_REGISTRY_KEY, {
+      value: new Map(),
+      configurable: true,
+      enumerable: false,
+      writable: false,
+    });
+  }
+  return globalThis[EXTENSION_CONFIG_REGISTRY_KEY];
+}
+
+function registerExtensionConfig(id, config) {
+  const registry = extensionConfigRegistry();
+  registry.set(id, config);
+  return () => {
+    registry.delete(id);
+  };
+}
+
 function normalizeExtensionConfig(config = {}) {
   return {
     STATE_DIR: config.STATE_DIR || "/state",
@@ -200,10 +223,6 @@ function buildPiNativeExtensionEnv(session, { lcmContextExtensionAvailable, code
     WORKSPACE_DIR,
     CODEX_HOME,
     RUNTIME_API_TOKEN,
-    LCM_CONTEXT_URL,
-    LCM_CONTEXT_TOKEN,
-    LCM_CONTEXT_TOKEN_BUDGET,
-    LCM_CONTEXT_TIMEOUT_MS,
     CODEX_WEB_SEARCH_ENABLED,
     CODEX_WEB_SEARCH_MODE,
     CODEX_WEB_SEARCH_OPTIONAL_ENV_KEYS,
@@ -222,12 +241,8 @@ function buildPiNativeExtensionEnv(session, { lcmContextExtensionAvailable, code
     BEEP_WORKSPACE_DIR: WORKSPACE_DIR,
     PI_CODING_AGENT_DIR: session.agentDir,
     PI_CODING_AGENT_SESSION_DIR: session.sessionDir,
+    BEEP_PI_EXTENSION_CONFIG_ID: session.extensionConfigId,
     BEEP_LCM_CONTEXT_ENABLED: lcmContextExtensionAvailable ? "1" : "0",
-    BEEP_LCM_CONTEXT_URL: LCM_CONTEXT_URL,
-    BEEP_LCM_CONTEXT_TOKEN: LCM_CONTEXT_TOKEN,
-    BEEP_LCM_RUNTIME_SESSION_ID: session.id,
-    BEEP_LCM_CONTEXT_TOKEN_BUDGET: LCM_CONTEXT_TOKEN_BUDGET,
-    BEEP_LCM_CONTEXT_TIMEOUT_MS: LCM_CONTEXT_TIMEOUT_MS,
     BEEP_CODEX_WEB_SEARCH_ENABLED: codexWebSearchExtensionAvailable && CODEX_WEB_SEARCH_ENABLED ? "1" : "0",
     BEEP_CONTROL_PLANE_TOOLS_ENABLED: controlPlaneToolsExtensionAvailable ? "1" : "0",
     BEEP_SANDBOX_TOOL_PORTAL_ENABLED: sandboxToolPortalExtensionAvailable ? "1" : "0",
@@ -305,6 +320,22 @@ function applyScopedEnv(env) {
   };
 }
 
+async function withProcessEnvCriticalSection(env, callback) {
+  const previous = extensionEnvCriticalSection;
+  let release;
+  extensionEnvCriticalSection = new Promise((resolvePromise) => {
+    release = resolvePromise;
+  });
+  await previous;
+  const restore = applyScopedEnv(env);
+  try {
+    return await callback();
+  } finally {
+    restore();
+    release();
+  }
+}
+
 function nativeContent(input) {
   if (typeof input === "string") return input;
   if (!Array.isArray(input)) return "";
@@ -326,6 +357,10 @@ function eventPhase(event) {
   if (event?.type === "turn_end") return "turn_complete";
   if (event?.type === "agent_end") return "idle";
   return null;
+}
+
+function errorMessage(error) {
+  return error instanceof Error ? error.message : String(error);
 }
 
 export class PiNativeSession {
@@ -367,18 +402,19 @@ export class PiNativeSession {
     this.agentEndWaiters = [];
     this.closed = false;
     this.stderrTail = "";
-    this.extensionEnv = null;
+    this.extensionConfigId = randomUUID();
+    this.unregisterExtensionConfig = null;
     this.extensionLoader = null;
     this.requestedExtensionPaths = [];
     this.unsubscribe = null;
     this.sdk = null;
     this.piSession = null;
+    this.activePrompt = null;
   }
 
   static async start(options = {}) {
     const session = new PiNativeSession(options);
     await session.open();
-    options.sessionRegistry?.set?.(session.id, session);
     return session;
   }
 
@@ -444,8 +480,16 @@ export class PiNativeSession {
       controlPlaneToolsExtensionAvailable,
       sandboxToolPortalExtensionAvailable,
     });
-    this.extensionEnv = env;
-    const restoreOpenEnv = applyScopedEnv(env);
+    this.unregisterExtensionConfig = registerExtensionConfig(this.extensionConfigId, {
+      lcmContext: {
+        enabled: lcmContextExtensionAvailable,
+        url: LCM_CONTEXT_URL,
+        token: this.extensionConfig.LCM_CONTEXT_TOKEN,
+        runtimeSessionId: this.id,
+        tokenBudget: Number(LCM_CONTEXT_TOKEN_BUDGET),
+        timeoutMs: Number(LCM_CONTEXT_TIMEOUT_MS),
+      },
+    });
 
     try {
       const accessToken = await this.resolveAccessToken();
@@ -467,21 +511,29 @@ export class PiNativeSession {
         settingsManager,
         additionalExtensionPaths,
       });
-      await resourceLoader.reload();
-      const result = await sdk.codingAgent.createAgentSession({
-        cwd: this.workspace,
-        agentDir: this.agentDir,
-        authStorage,
-        modelRegistry,
-        model,
-        thinkingLevel: this.thinking,
-        settingsManager,
-        sessionManager,
-        resourceLoader,
+      let result;
+      await withProcessEnvCriticalSection(env, async () => {
+        await resourceLoader.reload();
+        result = await sdk.codingAgent.createAgentSession({
+          cwd: this.workspace,
+          agentDir: this.agentDir,
+          authStorage,
+          modelRegistry,
+          model,
+          thinkingLevel: this.thinking,
+          settingsManager,
+          sessionManager,
+          resourceLoader,
+        });
+        this.piSession = result.session;
+        this.unsubscribe = this.piSession.subscribe((event) => this.handleNativeEvent(event));
+        await this.piSession.bindExtensions({});
       });
       const extensionsResult = result.extensionsResult || resourceLoader.getExtensions();
       const loadedExtensionPaths = extensionPathSet(extensionsResult);
       const extensionLoaderErrors = normalizeExtensionLoaderErrors(extensionsResult);
+      this.unregisterExtensionConfig?.();
+      this.unregisterExtensionConfig = null;
       this.extensionLoader = {
         requestedPaths: this.requestedExtensionPaths,
         loadedPaths: [...loadedExtensionPaths],
@@ -494,9 +546,6 @@ export class PiNativeSession {
         extensionLoaderErrors,
       });
       writeJsonFile(join(this.rootDir, "run-config.json"), this.runConfig);
-      this.piSession = result.session;
-      this.unsubscribe = this.piSession.subscribe((event) => this.handleNativeEvent(event));
-      await this.piSession.bindExtensions({});
       const lcmContextExtensionLoaded = loadedExtensionPaths.has(LCM_CONTEXT_EXTENSION_PATH);
       if (lcmContextExtensionLoaded && typeof this.piSession.setAutoCompactionEnabled === "function") {
         this.piSession.setAutoCompactionEnabled(false);
@@ -512,7 +561,7 @@ export class PiNativeSession {
       this.writeStatus();
       this.writeSummary();
     } catch (error) {
-      this.lastError = error instanceof Error ? error.message : String(error);
+      this.lastError = errorMessage(error);
       if (!this.extensionLoader) {
         const extensionLoaderErrors = [{ path: null, error: this.lastError }];
         const loadedExtensionPaths = new Set();
@@ -535,9 +584,10 @@ export class PiNativeSession {
       this.updatedAt = nowIso();
       this.writeStatus();
       this.writeSummary();
+      this.unregisterExtensionConfig?.();
+      this.unregisterExtensionConfig = null;
+      this.closeStreams();
       throw error;
-    } finally {
-      restoreOpenEnv();
     }
   }
 
@@ -569,19 +619,26 @@ export class PiNativeSession {
       throw new Error("Prompt input is required.");
     }
     if (!this.piSession || this.closed) throw new Error(`Pi native session ${this.id} is not running.`);
+    if (this.activePrompt) {
+      throw Object.assign(new Error(`Pi native session ${this.id} is already processing a prompt.`), { statusCode: 409 });
+    }
     const waitForCompletion = Boolean(options.waitForCompletion);
     const timeoutMs = Number.isFinite(Number(options.timeoutMs)) && Number(options.timeoutMs) > 0
       ? Number(options.timeoutMs)
       : DEFAULT_PROMPT_TIMEOUT_MS;
     const beforeAgentEndCount = this.agentEndCount;
-    await this.withExtensionEnv(() =>
-      this.piSession.prompt(nativeContent(input), {
-        expandPromptTemplates: options.expandPromptTemplates ?? true,
-        ...(options.streamingBehavior ? { streamingBehavior: options.streamingBehavior } : {}),
-        source: "interactive",
-      }),
-    );
-    if (waitForCompletion) await this.waitForAgentEndAfter(beforeAgentEndCount, timeoutMs);
+    const promptPromise = this.runPromptWithTimeout(input, options, timeoutMs);
+    this.trackBackgroundPrompt(promptPromise);
+    if (!waitForCompletion) {
+      return {
+        response: { success: true },
+        completed: null,
+        finalText: this.lastAssistantText,
+        summary: this.writeSummary(),
+      };
+    }
+    await promptPromise;
+    await this.waitForAgentEndAfter(beforeAgentEndCount, timeoutMs);
     this.lastAssistantText = lastAssistantTextFromSession(this.piSession) || this.lastAssistantText;
     return {
       response: { success: true },
@@ -593,32 +650,81 @@ export class PiNativeSession {
 
   async steer(input) {
     if (!this.piSession || this.closed) throw new Error(`Pi native session ${this.id} is not running.`);
-    await this.withExtensionEnv(() => this.piSession.steer(nativeContent(input)));
+    await this.piSession.steer(nativeContent(input));
     return { success: true };
   }
 
   async followUp(input) {
     if (!this.piSession || this.closed) throw new Error(`Pi native session ${this.id} is not running.`);
-    await this.withExtensionEnv(() => this.piSession.followUp(nativeContent(input)));
+    await this.piSession.followUp(nativeContent(input));
     return { success: true };
   }
 
   async abort() {
     if (!this.piSession || this.closed) return { success: true };
-    await this.withExtensionEnv(() => this.piSession.abort());
+    await this.piSession.abort();
     this.phase = "idle";
     this.updatedAt = nowIso();
     this.writeStatus();
     return { success: true };
   }
 
-  async withExtensionEnv(callback) {
-    const restore = applyScopedEnv(this.extensionEnv || {});
+  async runPromptWithTimeout(input, options, timeoutMs) {
+    const nativePrompt = this.piSession.prompt(nativeContent(input), {
+      expandPromptTemplates: options.expandPromptTemplates ?? true,
+      ...(options.streamingBehavior ? { streamingBehavior: options.streamingBehavior } : {}),
+      source: "interactive",
+    });
+    let timeout;
+    let timedOut = false;
+    const timeoutPromise = new Promise((_, rejectPromise) => {
+      timeout = setTimeout(() => {
+        timedOut = true;
+        Promise.resolve()
+          .then(async () => {
+            await this.abort();
+            this.lastError = `Timed out waiting for Pi native prompt in session ${this.id}.`;
+            this.phase = "failed";
+            this.updatedAt = nowIso();
+            this.writeStatus();
+          })
+          .catch((error) => {
+            this.stderrTail = `${this.stderrTail}${errorMessage(error)}\n`.slice(-8_000);
+            this.lastError = `Timed out waiting for Pi native prompt in session ${this.id}; abort failed: ${errorMessage(error)}`;
+            this.phase = "failed";
+            this.updatedAt = nowIso();
+            this.writeStatus();
+          })
+          .finally(() => {
+            rejectPromise(new Error(`Timed out waiting for Pi native prompt in session ${this.id}.`));
+          });
+      }, timeoutMs);
+    });
+    nativePrompt.catch((error) => {
+      if (timedOut) {
+        this.stderrTail = `${this.stderrTail}${errorMessage(error)}\n`.slice(-8_000);
+      }
+    });
     try {
-      return await callback();
+      return await Promise.race([nativePrompt, timeoutPromise]);
     } finally {
-      restore();
+      clearTimeout(timeout);
     }
+  }
+
+  trackBackgroundPrompt(promptPromise) {
+    this.activePrompt = promptPromise;
+    promptPromise
+      .catch((error) => {
+        this.lastError = errorMessage(error);
+        this.stderrTail = `${this.stderrTail}${this.lastError}\n`.slice(-8_000);
+        this.updatedAt = nowIso();
+        this.writeStatus();
+        this.writeSummary();
+      })
+      .finally(() => {
+        if (this.activePrompt === promptPromise) this.activePrompt = null;
+      });
   }
 
   buildRunConfig({ resumedFrom, extensionAvailability, loadedExtensionPaths, extensionLoaderErrors }) {
@@ -952,12 +1058,19 @@ export class PiNativeSession {
     };
   }
 
+  closeStreams() {
+    this.stdoutStream?.end();
+    this.stderrStream?.end();
+    this.eventsStream?.end();
+  }
+
   async stop() {
     if (this.closed) return this.status();
     this.phase = "stopping";
     this.updatedAt = nowIso();
     this.writeStatus();
     try {
+      if (this.piSession) await this.abort();
       this.unsubscribe?.();
       this.piSession?.dispose?.();
       this.exitCode = 0;
@@ -965,17 +1078,17 @@ export class PiNativeSession {
     } catch (error) {
       this.exitCode = 1;
       this.phase = "failed";
-      this.lastError = error instanceof Error ? error.message : String(error);
+      this.lastError = errorMessage(error);
       this.rejectAgentEndWaiters(error);
     } finally {
       this.closed = true;
+      this.unregisterExtensionConfig?.();
+      this.unregisterExtensionConfig = null;
       this.updatedAt = nowIso();
       this.writeSummary();
       this.writeStatus();
       this.resolveAgentEndWaiters();
-      this.stdoutStream?.end();
-      this.stderrStream?.end();
-      this.eventsStream?.end();
+      this.closeStreams();
     }
     return this.status();
   }

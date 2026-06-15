@@ -87,6 +87,21 @@ const DEFAULT_PROMPT_TIMEOUT_MS = 10 * 60 * 1000;
 const MAX_REQUEST_BYTES = Number.parseInt(process.env.BEEP_MAX_REQUEST_BYTES || `${8 * 1024 * 1024}`, 10);
 const THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh"]);
 
+function scrubSensitiveRuntimeEnv() {
+  delete process.env.BEEP_RUNTIME_API_TOKEN;
+  delete process.env.BEEP_CONTROL_PLANE_OPERATOR_TOKEN;
+  delete process.env.BEEP_OPERATOR_TOKEN;
+  delete process.env.BEEP_MODEL_GATEWAY_CREDENTIAL_URL;
+  delete process.env.BEEP_MODEL_GATEWAY_CAPABILITY_TOKEN;
+  delete process.env.BEEP_MODEL_CREDENTIAL_TOKEN;
+  delete process.env.BEEP_MODEL_GATEWAY_TOKEN;
+  delete process.env.BEEP_CONTROL_PLANE_RUNTIME_TOKEN;
+  delete process.env.BEEP_LCM_CONTEXT_TOKEN;
+  delete process.env.BEEP_SANDBOX_TOOL_PORTAL_TOKEN;
+}
+
+scrubSensitiveRuntimeEnv();
+
 const sessions = new Map();
 const defaultSandboxManager = new DockerSandboxManager({
   workspaceRoot: SANDBOX_WORKSPACE_ROOT,
@@ -357,7 +372,6 @@ class AgentSupervisor {
       buildPiNativeSessionOptions({
         id: this.sessionId,
         resumeLatest: true,
-        sessionRegistry: sessions,
       }),
     )
       .then((session) => {
@@ -906,7 +920,6 @@ async function handleCreateSession(req, res) {
       model: body.model,
       thinking: body.thinking,
       prefix: body.prefix,
-      sessionRegistry: sessions,
     }),
   );
   sessions.set(session.id, session);
@@ -920,7 +933,6 @@ async function handleRun(req, res) {
       model: body.model,
       thinking: body.thinking,
       prefix: body.prefix || "run",
-      sessionRegistry: sessions,
     }),
   );
   sessions.set(session.id, session);

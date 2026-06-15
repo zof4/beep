@@ -5,6 +5,10 @@ import { existsSync, readFileSync } from "node:fs";
 const apiSource = readFileSync(new URL("../runtime/src/beep-runtime-api.mjs", import.meta.url), "utf8");
 const piNativeSessionUrl = new URL("../runtime/src/pi-native-session.mjs", import.meta.url);
 const piNativeSource = existsSync(piNativeSessionUrl) ? readFileSync(piNativeSessionUrl, "utf8") : "";
+const lcmContextExtensionSource = readFileSync(
+  new URL("../runtime/pi-extensions/lcm-context-extension.mjs", import.meta.url),
+  "utf8",
+);
 const sandboxPortalRuntimeSource = readFileSync(
   new URL("../runtime/pi-extensions/sandbox-tool-portal-runtime.mjs", import.meta.url),
   "utf8",
@@ -273,7 +277,7 @@ test("runtime routes require native input instead of message prompt shims", () =
 });
 
 test("native Pi run config reports actual SDK extension loader results", () => {
-  const createIndex = piNativeSource.indexOf("const result = await sdk.codingAgent.createAgentSession");
+  const createIndex = piNativeSource.indexOf("result = await sdk.codingAgent.createAgentSession");
   const loaderResultIndex = piNativeSource.indexOf("result.extensionsResult", createIndex);
   const loadedPathsIndex = piNativeSource.indexOf("loadedExtensionPaths", loaderResultIndex);
   const errorsIndex = piNativeSource.indexOf("extensionLoaderErrors", loaderResultIndex);
@@ -288,6 +292,63 @@ test("native Pi run config reports actual SDK extension loader results", () => {
   assert.match(piNativeSource, /extensionLoaded:\s*loadedExtensionPaths\.has\(CODEX_WEB_SEARCH_EXTENSION_PATH\)/);
   assert.match(piNativeSource, /extensionLoaded:\s*loadedExtensionPaths\.has\(SANDBOX_TOOL_PORTAL_EXTENSION_PATH\)/);
   assert.match(piNativeSource, /extensionLoaded:\s*loadedExtensionPaths\.has\(CONTROL_PLANE_TOOLS_EXTENSION_PATH\)/);
+});
+
+test("native Pi extension env is scoped to serialized SDK loading", () => {
+  assert.match(piNativeSource, /async function withProcessEnvCriticalSection\(env, callback\)/);
+  assert.match(piNativeSource, /await withProcessEnvCriticalSection\(env, async \(\) => \{/);
+  assert.match(piNativeSource, /BEEP_PI_EXTENSION_CONFIG_ID: session\.extensionConfigId/);
+  assert.doesNotMatch(piNativeSource, /withExtensionEnv/);
+  assert.doesNotMatch(piNativeSource, /BEEP_LCM_CONTEXT_TOKEN:\s*LCM_CONTEXT_TOKEN/);
+  assert.doesNotMatch(piNativeSource, /BEEP_LCM_RUNTIME_SESSION_ID:\s*session\.id/);
+});
+
+test("runtime scrubs sensitive process env after capturing constants", () => {
+  assert.match(apiSource, /function scrubSensitiveRuntimeEnv\(\)/);
+  assert.match(apiSource, /delete process\.env\.BEEP_RUNTIME_API_TOKEN/);
+  assert.match(apiSource, /delete process\.env\.BEEP_CONTROL_PLANE_OPERATOR_TOKEN/);
+  assert.match(apiSource, /delete process\.env\.BEEP_OPERATOR_TOKEN/);
+  assert.match(apiSource, /delete process\.env\.BEEP_MODEL_GATEWAY_CREDENTIAL_URL/);
+  assert.match(apiSource, /delete process\.env\.BEEP_MODEL_GATEWAY_CAPABILITY_TOKEN/);
+  assert.match(apiSource, /delete process\.env\.BEEP_MODEL_CREDENTIAL_TOKEN/);
+  assert.match(apiSource, /delete process\.env\.BEEP_MODEL_GATEWAY_TOKEN/);
+  assert.match(apiSource, /delete process\.env\.BEEP_CONTROL_PLANE_RUNTIME_TOKEN/);
+  assert.match(apiSource, /delete process\.env\.BEEP_LCM_CONTEXT_TOKEN/);
+  assert.match(apiSource, /scrubSensitiveRuntimeEnv\(\)/);
+});
+
+test("LCM context extension captures explicit config instead of reading env per event", () => {
+  assert.match(lcmContextExtensionSource, /function readBeepExtensionConfig\(\)/);
+  assert.match(lcmContextExtensionSource, /const config = readBeepExtensionConfig\(\)\.lcmContext \|\| \{\}/);
+  assert.doesNotMatch(lcmContextExtensionSource, /process\.env\.BEEP_LCM_RUNTIME_SESSION_ID/);
+  assert.doesNotMatch(lcmContextExtensionSource, /process\.env\.BEEP_LCM_CONTEXT_TOKEN/);
+  assert.doesNotMatch(lcmContextExtensionSource, /positiveIntegerEnv/);
+});
+
+test("native prompt timeout aborts and nonblocking prompts are accepted asynchronously", () => {
+  assert.match(piNativeSource, /async runPromptWithTimeout\(input, options, timeoutMs\)/);
+  assert.match(piNativeSource, /Promise\.race\(\[nativePrompt, timeoutPromise\]\)/);
+  assert.match(piNativeSource, /await this\.abort\(\)/);
+  assert.match(piNativeSource, /Timed out waiting for Pi native prompt in session \$\{this\.id\}/);
+  assert.match(piNativeSource, /if \(!waitForCompletion\) \{/);
+  assert.match(piNativeSource, /this\.trackBackgroundPrompt\(promptPromise\)/);
+  assert.match(piNativeSource, /this\.activePrompt/);
+});
+
+test("native open and stop clean up resources", () => {
+  const catchIndex = piNativeSource.indexOf("} catch (error) {");
+  const closeIndex = piNativeSource.indexOf("this.closeStreams();", catchIndex);
+  const unregisterIndex = piNativeSource.indexOf("this.unregisterExtensionConfig?.();", catchIndex);
+  const stopIndex = piNativeSource.indexOf("async stop()");
+  const abortIndex = piNativeSource.indexOf("await this.abort()", stopIndex);
+  const disposeIndex = piNativeSource.indexOf("this.piSession?.dispose?.()", stopIndex);
+
+  assert.ok(catchIndex > 0, "open catch should exist");
+  assert.ok(closeIndex > catchIndex, "open failure should close streams");
+  assert.ok(unregisterIndex > catchIndex, "open failure should unregister extension config");
+  assert.ok(stopIndex > 0, "stop should exist");
+  assert.ok(abortIndex > stopIndex, "stop should abort active work");
+  assert.ok(disposeIndex > abortIndex, "stop should abort before dispose");
 });
 
 test("runtime capabilities surface high-level Codex web-search status", () => {
