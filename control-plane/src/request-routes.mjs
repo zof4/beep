@@ -1,4 +1,5 @@
 import { sendJson, sendNotFound } from "./http-utils.mjs";
+import { redactBeepInput, summarizeBeepInput } from "../../shared/native-input.mjs";
 
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;
@@ -7,7 +8,8 @@ const PUBLIC_REQUEST_FIELDS = [
   "requestId",
   "runtimeId",
   "runtimeRequestId",
-  "message",
+  "inputSummary",
+  "redactedInput",
   "status",
   "source",
   "error",
@@ -59,7 +61,15 @@ function publicRuntimeResult(runtimeResult) {
 function publicRequest(record) {
   const response = {};
   for (const field of PUBLIC_REQUEST_FIELDS) {
-    response[field] = field === "runtimeResult" ? publicRuntimeResult(record[field]) : (record[field] ?? null);
+    if (field === "runtimeResult") {
+      response[field] = publicRuntimeResult(record[field]);
+    } else if (field === "inputSummary") {
+      response[field] = record.inputSummary || summarizeBeepInput(record.input || []);
+    } else if (field === "redactedInput") {
+      response[field] = Array.isArray(record.input) ? redactBeepInput(record.input) : [];
+    } else {
+      response[field] = record[field] ?? null;
+    }
   }
   return response;
 }

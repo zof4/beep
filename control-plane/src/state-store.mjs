@@ -468,7 +468,8 @@ export class StateStore {
       schemaVersion: 1,
       requestId,
       runtimeId: request.runtimeId || null,
-      message: request.message || "",
+      input: Array.isArray(request.input) ? request.input : [],
+      inputSummary: request.inputSummary || null,
       status: "submitted",
       source: request.source || "control-plane",
       createdAt,
@@ -481,6 +482,7 @@ export class StateStore {
         requestId,
         runtimeId: created.runtimeId,
         status: created.status,
+        inputSummary: created.inputSummary,
       });
     });
     return created;

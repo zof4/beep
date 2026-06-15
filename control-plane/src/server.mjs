@@ -17,6 +17,7 @@ import { ToolBroker, hostPortForContainerPort, validatePreviewPort } from "./too
 import { createWebRunExecutor } from "./openai-web-search.mjs";
 import { Gatekeeper } from "./gatekeeper/index.mjs";
 import { ToolRegistry } from "./tool-registry.mjs";
+import { normalizeBeepInput, summarizeBeepInput } from "../../shared/native-input.mjs";
 
 export function createDefaultComponents() {
   const store = new StateStore();
@@ -211,15 +212,18 @@ export function createControlPlaneHandler({ store, runtimeManager, toolBroker, l
     if (request.method === "POST" && pathname === "/api/requests") {
       requireOperatorAuth(request);
       const body = await readJsonBody(request);
+      const input = normalizeBeepInput(body.input);
+      const inputSummary = summarizeBeepInput(input);
       await runtimeManager.ensureRuntime();
       const controlPlaneRequest = store.createAgentRequest({
         runtimeId: RUNTIME_ID,
-        message: String(body.message || ""),
+        input,
+        inputSummary,
         status: "forwarding",
         source: "api",
       });
       const runtimeBody = {
-        message: String(body.message || ""),
+        input,
         waitForCompletion: body.waitForCompletion !== false,
         timeoutMs: Number(body.timeoutMs || DEFAULT_REQUEST_TIMEOUT_MS),
       };

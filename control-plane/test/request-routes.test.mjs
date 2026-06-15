@@ -89,7 +89,10 @@ test("request list returns stable persisted request records", async () => {
     const handler = handlerFor({ store });
     const first = store.createAgentRequest({
       runtimeId: "local",
-      message: "first",
+      input: [
+        { type: "text", text: "first" },
+        { type: "image", mimeType: "image/png", data: "ZmFrZQ==", detail: "high" },
+      ],
       source: "api",
       internalNote: "do not expose",
     });
@@ -125,7 +128,8 @@ test("request list returns stable persisted request records", async () => {
     assert.deepEqual(Object.keys(payload.requests[0]).sort(), [
       "createdAt",
       "error",
-      "message",
+      "inputSummary",
+      "redactedInput",
       "requestId",
       "runtimeId",
       "runtimeRequestId",
@@ -136,6 +140,8 @@ test("request list returns stable persisted request records", async () => {
       "updatedAt",
     ]);
     assert.equal(payload.requests[0].requestId, first.requestId);
+    assert.equal(payload.requests[0].redactedInput[1].data, "[redacted]");
+    assert.equal(payload.requests[0].input?.[1]?.data, undefined);
     assert.equal(payload.requests[0].runtimeRequestId, "runtime-1");
     assert.deepEqual(payload.requests[0].runtimeResult, {
       ok: true,
@@ -165,11 +171,11 @@ test("request list passes runtimeId filter and clamps limit", async () => {
   const { store, cleanup } = tempStore();
   try {
     const handler = handlerFor({ store });
-    store.createAgentRequest({ runtimeId: "other", message: "other" });
-    store.createAgentRequest({ runtimeId: "local", message: "local-a" });
-    store.createAgentRequest({ runtimeId: "local", message: "local-b" });
+    store.createAgentRequest({ runtimeId: "other", input: [{ type: "text", text: "other" }] });
+    store.createAgentRequest({ runtimeId: "local", input: [{ type: "text", text: "local-a" }] });
+    store.createAgentRequest({ runtimeId: "local", input: [{ type: "text", text: "local-b" }] });
     for (let index = 0; index < 205; index += 1) {
-      store.createAgentRequest({ runtimeId: "bulk", message: `bulk-${index}` });
+      store.createAgentRequest({ runtimeId: "bulk", input: [{ type: "text", text: `bulk-${index}` }] });
     }
 
     const response = captureResponse();
@@ -208,7 +214,7 @@ test("single request route returns one stable persisted request record", async (
     const handler = handlerFor({ store });
     const created = store.createAgentRequest({
       runtimeId: "local",
-      message: "run this",
+      input: [{ type: "text", text: "run this" }],
       source: "api",
       internalNote: "do not expose",
     });
@@ -265,7 +271,7 @@ test("single request route requires operator auth", async () => {
   const { store, cleanup } = tempStore();
   try {
     const handler = handlerFor({ store });
-    const created = store.createAgentRequest({ runtimeId: "local", message: "run this" });
+    const created = store.createAgentRequest({ runtimeId: "local", input: [{ type: "text", text: "run this" }] });
     const response = captureResponse();
 
     await handler(request("GET", `/api/requests/${created.requestId}`), response.response);
@@ -327,7 +333,7 @@ test("request read routes return 405 for unsupported authenticated methods", asy
   }
 });
 
-test("POST request submission keeps the existing runtime forwarding behavior", async () => {
+test("POST request submission forwards native input unchanged and persists a redacted summary", async () => {
   const { store, cleanup } = tempStore();
   try {
     let ensureRuntimeCalls = 0;
@@ -353,7 +359,12 @@ test("POST request submission keeps the existing runtime forwarding behavior", a
         "POST",
         "/api/requests",
         { ...operatorHeaders(store), "content-type": "application/json" },
-        JSON.stringify({ message: "submit me" }),
+        JSON.stringify({
+          input: [
+            { type: "text", text: "submit me" },
+            { type: "image", mimeType: "image/png", data: "ZmFrZQ==", detail: "high" },
+          ],
+        }),
       ),
       response.response,
     );
@@ -365,8 +376,13 @@ test("POST request submission keeps the existing runtime forwarding behavior", a
     assert.equal(ensureRuntimeCalls, 1);
     assert.equal(forwarded.length, 1);
     assert.equal(forwarded[0].path, "/agent/submit");
-    assert.equal(JSON.parse(forwarded[0].options.body).message, "submit me");
+    assert.deepEqual(JSON.parse(forwarded[0].options.body).input, [
+      { type: "text", text: "submit me" },
+      { type: "image", mimeType: "image/png", data: "ZmFrZQ==", detail: "high" },
+    ]);
     assert.equal(persisted.runtimeRequestId, "runtime-post-1");
+    assert.equal(persisted.input[1].data, "ZmFrZQ==");
+    assert.equal(persisted.inputSummary.imageParts[0].byteLength, 4);
   } finally {
     cleanup();
   }
