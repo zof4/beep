@@ -34,16 +34,39 @@ function textFromInputParts(input) {
 }
 
 function userTextFromRequest(request) {
-  const summaryText = textFromInputSummary(request.inputSummary);
-  if (summaryText) return summaryText;
-
   const redactedInputText = textFromInputParts(request.redactedInput);
   if (redactedInputText) return redactedInputText;
 
   const inputText = textFromInputParts(request.input);
   if (inputText) return inputText;
 
+  const summaryText = textFromInputSummary(request.inputSummary);
+  if (summaryText) return summaryText;
+
   return typeof request.message === "string" ? request.message.trim() : "";
+}
+
+function isSensitivePayloadKey(key) {
+  return /^(data|imageData|base64|b64_json|bytes|blob)$/iu.test(String(key));
+}
+
+function sanitizeContextString(value, key) {
+  if (isSensitivePayloadKey(key) || /^data:image\/[a-z0-9.+-]+;base64,/iu.test(value)) {
+    return "[redacted]";
+  }
+  return value;
+}
+
+function sanitizeContextValue(value, key = "") {
+  if (Array.isArray(value)) return value.map((entry) => sanitizeContextValue(entry, key));
+  if (typeof value === "string") return sanitizeContextString(value, key);
+  if (!isPlainObject(value)) return value;
+
+  const sanitized = {};
+  for (const [nestedKey, nested] of Object.entries(value)) {
+    sanitized[nestedKey] = sanitizeContextValue(nested, nestedKey);
+  }
+  return sanitized;
 }
 
 async function fetchRuntimeJson(path, { runtimeManager = null, timeoutMs = 1500, headers = {} } = {}) {
@@ -113,7 +136,7 @@ function collectEventText(eventsPayload) {
   const events = Array.isArray(eventsPayload?.events) ? eventsPayload.events : [];
   return events
     .slice(-40)
-    .map((event, index) => `[${index + 1}] ${textFromValue(event, 2000)}`)
+    .map((event, index) => `[${index + 1}] ${textFromValue(sanitizeContextValue(event), 2000)}`)
     .join("\n");
 }
 

@@ -63,7 +63,9 @@ function seedStatusState(store) {
       localImagePartCount: 0,
       totalInlineImageBytes: 4,
       textPreview: "Create the first usable loop",
-      imageParts: [{ index: 1, source: "inline", mimeType: "image/png", byteLength: 4, detail: "high" }],
+      imageParts: [
+        { index: 1, source: "inline", mimeType: "image/png", byteLength: 4, detail: "high", data: inlineImageBytes },
+      ],
     },
     source: "api",
     internalNote: "hidden",
@@ -313,6 +315,7 @@ test("buildBackendStatus aggregates running runtime, memory, control-plane state
     assert.equal(status.controlPlane.recentRequests[0].input, undefined);
     assert.equal(status.controlPlane.recentRequests[0].inputSummary.textPreview, "Create the first usable loop");
     assert.equal(status.controlPlane.recentRequests[0].inputSummary.imageParts[0].byteLength, 4);
+    assert.equal(status.controlPlane.recentRequests[0].inputSummary.imageParts[0].data, undefined);
     assert.deepEqual(status.controlPlane.recentRequests[0].redactedInput, [
       { type: "text", text: "Create the first usable loop" },
       { type: "image", mimeType: "image/png", byteLength: 4, detail: "high", data: "[redacted]" },
