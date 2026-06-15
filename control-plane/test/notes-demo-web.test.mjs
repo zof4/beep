@@ -133,6 +133,43 @@ test("/notes/app.js serves demo JavaScript with core product controls", async ()
   }
 });
 
+test("/notes/app.js includes handwriting calibration UI without base64 image reads", async () => {
+  const { handler, cleanup } = tempHandler();
+  try {
+    const result = await call(handler, "GET", "/notes/app.js");
+
+    assert.equal(result.statusCode, 200);
+    assert.match(result.body, /handwritingCalibrationForm/u);
+    assert.match(result.body, /handwritingReferenceText/u);
+    assert.match(result.body, /useHandwritingCalibration/u);
+    assert.match(result.body, /handwritingSampleOrder/u);
+    assert.match(result.body, /uncertainSpans/u);
+    assert.match(result.body, /new FormData\(\)/u);
+    assert.doesNotMatch(result.body, /FileReader/u);
+    assert.doesNotMatch(result.body, /readAsDataURL/u);
+    assert.doesNotMatch(result.body, /dataUrl/u);
+  } finally {
+    cleanup();
+  }
+});
+
+test("/notes serves handwriting calibration controls", async () => {
+  const { handler, cleanup } = tempHandler();
+  try {
+    const result = await call(handler, "GET", "/notes");
+
+    assert.equal(result.statusCode, 200);
+    assert.match(result.body, /Handwriting calibration/u);
+    assert.match(result.body, /id="handwritingReferenceText"/u);
+    assert.match(result.body, /id="handwritingImageInput"/u);
+    assert.match(result.body, /id="useHandwritingCalibration"/u);
+    assert.match(result.body, /id="handwritingUncertainty"/u);
+    assert.match(result.body, /No handwriting uncertainty reported\./u);
+  } finally {
+    cleanup();
+  }
+});
+
 test("/notes/styles.css serves demo CSS with sidebar layout", async () => {
   const { handler, cleanup } = tempHandler();
   try {

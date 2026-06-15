@@ -96,6 +96,24 @@ const HTML = `<!doctype html>
             </div>
             <button id="processCaptureButton" type="submit">Create and process capture</button>
           </form>
+
+          <form id="handwritingCalibrationForm" class="entry-surface">
+            <div class="section-heading">
+              <h3>Handwriting calibration</h3>
+              <span>sample</span>
+            </div>
+            <div id="handwritingPromptText" class="row-meta">Loading calibration prompt.</div>
+            <label class="field-label" for="handwritingReferenceText">Reference text</label>
+            <textarea id="handwritingReferenceText" name="referenceText" placeholder="Write the prompt text exactly as shown"></textarea>
+            <label class="field-label" for="handwritingImageInput">Sample image</label>
+            <input id="handwritingImageInput" name="image" type="file" accept="image/png,image/jpeg,image/webp,image/heic,image/heif,.heic,.heif">
+            <label class="checkbox-row" for="useHandwritingCalibration">
+              <input id="useHandwritingCalibration" type="checkbox" checked>
+              <span>Use calibration in captures</span>
+            </label>
+            <button type="submit">Save handwriting sample</button>
+            <div id="handwritingSamplesList" class="sample-list empty-state">No handwriting samples saved.</div>
+          </form>
         </section>
 
         <section class="layer-view" aria-labelledby="layerTitle">
@@ -112,6 +130,7 @@ const HTML = `<!doctype html>
             <section>
               <h4>Readable rendition</h4>
               <div id="derivedLayer" class="layer-stack empty-state">No derived rendition yet.</div>
+              <div id="handwritingUncertainty" class="uncertainty-list empty-state">No handwriting uncertainty reported.</div>
             </section>
             <section>
               <h4>Comments/proposals</h4>
@@ -371,7 +390,9 @@ h4 {
 
 .scroll-list,
 .run-list,
-.proposal-list {
+.proposal-list,
+.sample-list,
+.uncertainty-list {
   display: grid;
   gap: 8px;
   margin-top: 10px;
@@ -443,6 +464,22 @@ h4 {
   display: grid;
   gap: 10px;
   padding: 14px;
+}
+
+#handwritingCalibrationForm {
+  grid-column: 1 / -1;
+}
+
+.checkbox-row {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+}
+
+.checkbox-row input {
+  flex: 0 0 auto;
+  width: auto;
 }
 
 .image-fields {
@@ -554,6 +591,7 @@ const state = {
   itemType: "note",
   captureKind: "text",
   captureImage: null,
+  handwriting: { profile: null, prompt: null, samples: [] },
 };
 
 const elements = {
@@ -578,12 +616,19 @@ const elements = {
   imageCaptureFields: document.getElementById("imageCaptureFields"),
   imageCaptureInput: document.getElementById("imageCaptureInput"),
   imagePreview: document.getElementById("imagePreview"),
+  handwritingCalibrationForm: document.getElementById("handwritingCalibrationForm"),
+  handwritingReferenceText: document.getElementById("handwritingReferenceText"),
+  handwritingImageInput: document.getElementById("handwritingImageInput"),
+  handwritingPromptText: document.getElementById("handwritingPromptText"),
+  handwritingSamplesList: document.getElementById("handwritingSamplesList"),
+  useHandwritingCalibration: document.getElementById("useHandwritingCalibration"),
   processCaptureButton: document.getElementById("processCaptureButton"),
   askBeepButton: document.getElementById("askBeepButton"),
   lockToggleButton: document.getElementById("lockToggleButton"),
   selectedItem: document.getElementById("selectedItem"),
   sourceLayer: document.getElementById("sourceLayer"),
   derivedLayer: document.getElementById("derivedLayer"),
+  handwritingUncertainty: document.getElementById("handwritingUncertainty"),
   secondaryLayer: document.getElementById("secondaryLayer"),
   runList: document.getElementById("runList"),
   proposalList: document.getElementById("proposalList"),
@@ -748,6 +793,37 @@ function renderSourceRecord(node, source) {
   return row;
 }
 
+function sourceHandwritingUncertaintySpans(sourceId) {
+  if (!sourceId) return [];
+  const runs = sortedRecords(state.workspace?.runs, state.workspace?.runOrder)
+    .filter((run) => run.sourceArtifactId === sourceId)
+    .sort((left, right) =>
+      String(right.updatedAt || right.createdAt || "").localeCompare(String(left.updatedAt || left.createdAt || "")),
+    );
+  return runs.flatMap((run) => {
+    const uncertainSpans = run.outputs?.handwriting?.uncertainSpans;
+    return Array.isArray(uncertainSpans) ? uncertainSpans.map((span) => ({ ...span, run })) : [];
+  });
+}
+
+function renderHandwritingUncertainty(source) {
+  clearChildren(elements.handwritingUncertainty);
+  const spans = sourceHandwritingUncertaintySpans(source?.id);
+  if (!spans.length) {
+    elements.handwritingUncertainty.className = "uncertainty-list empty-state";
+    elements.handwritingUncertainty.textContent = "No handwriting uncertainty reported.";
+    return;
+  }
+  elements.handwritingUncertainty.className = "uncertainty-list";
+  for (const span of spans) {
+    const alternatives = Array.isArray(span.alternatives) ? span.alternatives.filter(Boolean) : [];
+    const body = alternatives.length ? \`Alternatives: \${alternatives.join(", ")}\` : "No alternatives supplied.";
+    const when = span.run?.updatedAt || span.run?.createdAt;
+    const meta = [span.reason, shortDate(when)].filter(Boolean).join(" | ");
+    appendRecord(elements.handwritingUncertainty, span.text || "Uncertain text", body, meta);
+  }
+}
+
 function renderSelection() {
   const item = selectedItem();
   if (!item) {
@@ -769,6 +845,7 @@ function renderSelection() {
       empty(elements.sourceLayer, "No source selected.");
       empty(elements.derivedLayer, "No derived rendition yet.");
     }
+    renderHandwritingUncertainty(source);
     empty(elements.secondaryLayer, "Ask Beep to add secondary layer context.");
     elements.lockToggleButton.disabled = true;
     elements.askBeepButton.disabled = true;
@@ -796,6 +873,7 @@ function renderSelection() {
   } else {
     empty(elements.sourceLayer, "This item has no original capture.");
   }
+  renderHandwritingUncertainty(source);
 
   const derived = [...(item.derivedArtifactIds || []), ...(source?.derivedArtifactIds || [])]
     .map((id) => state.workspace?.derivedArtifacts?.[id])
@@ -868,6 +946,76 @@ function renderProposals() {
     row.className = "proposal-row";
     row.append(proposalActions(proposal));
   }
+}
+
+function mergeHandwritingSamples(...sampleGroups) {
+  const seen = new Set();
+  const merged = [];
+  for (const samples of sampleGroups) {
+    for (const sample of samples || []) {
+      if (!sample?.id || seen.has(sample.id)) continue;
+      seen.add(sample.id);
+      merged.push(sample);
+    }
+  }
+  return merged;
+}
+
+function workspaceHandwritingSamples() {
+  const profileId = state.handwriting.profile?.id;
+  const samplesById = state.workspace?.handwritingSamples || {};
+  return (state.workspace?.handwritingSampleOrder || [])
+    .map((id) => samplesById[id])
+    .filter((sample) => sample && (!profileId || sample.profileId === profileId));
+}
+
+function renderHandwritingSamples() {
+  const samples = mergeHandwritingSamples(workspaceHandwritingSamples(), state.handwriting.samples);
+  clearChildren(elements.handwritingSamplesList);
+  if (!samples.length) {
+    elements.handwritingSamplesList.className = "sample-list empty-state";
+    elements.handwritingSamplesList.textContent = "No handwriting samples saved.";
+    return;
+  }
+  elements.handwritingSamplesList.className = "sample-list";
+  for (const sample of samples) {
+    const image = sample.image || {};
+    const meta = [
+      sample.active === false ? "disabled" : "enabled",
+      image.mimeType,
+      formatBytes(image.sizeBytes),
+      shortDate(sample.updatedAt || sample.createdAt),
+    ]
+      .filter(Boolean)
+      .join(" | ");
+    const row = appendRecord(
+      elements.handwritingSamplesList,
+      sample.active === false ? "Inactive sample" : "Active sample",
+      sample.referenceText || "No reference text.",
+      meta,
+    );
+    const actions = document.createElement("div");
+    actions.className = "proposal-actions";
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.textContent = sample.active === false ? "Enable" : "Disable";
+    toggle.disabled = !sample.id;
+    toggle.addEventListener("click", () => toggleHandwritingSample(sample.id, sample.active === false));
+    actions.append(toggle);
+    row.append(actions);
+  }
+}
+
+async function loadHandwritingProfile() {
+  setStatus("Loading handwriting profile...");
+  const payload = await api("/api/notes/handwriting/profile");
+  state.handwriting.profile = payload.profile || null;
+  state.handwriting.prompt = payload.prompt || null;
+  state.handwriting.samples = Array.isArray(payload.samples) ? payload.samples : [];
+  elements.handwritingPromptText.textContent = state.handwriting.prompt?.referenceText || "No calibration prompt loaded.";
+  elements.handwritingReferenceText.value = state.handwriting.prompt?.referenceText || "";
+  renderHandwritingSamples();
+  setStatus("Handwriting profile loaded.");
 }
 
 async function loadWorkspace() {
@@ -965,6 +1113,45 @@ function buildCapturePayload() {
   return { kind: "text", body };
 }
 
+async function saveHandwritingSample() {
+  const draftedReferenceText = elements.handwritingReferenceText.value.trim();
+  if (!state.handwriting.profile || !state.handwriting.prompt) await loadHandwritingProfile();
+  const profileId = state.handwriting.profile?.id;
+  const promptId = state.handwriting.prompt?.id;
+  const referenceText = draftedReferenceText || elements.handwritingReferenceText.value.trim();
+  const image = elements.handwritingImageInput.files?.[0] || null;
+  if (!profileId) throw new Error("Handwriting profile is not loaded.");
+  if (!promptId) throw new Error("Handwriting prompt is not loaded.");
+  if (!referenceText) throw new Error("Reference text is required.");
+  if (!image) throw new Error("A handwriting sample image is required.");
+  const formData = new FormData();
+  formData.set("profileId", profileId);
+  formData.set("promptId", promptId);
+  formData.set("referenceText", referenceText);
+  formData.set("image", image, image.name || "handwriting-sample");
+  setStatus("Saving handwriting sample...");
+  await api("/api/notes/handwriting/samples", {
+    method: "POST",
+    body: formData,
+  });
+  elements.handwritingImageInput.value = "";
+  await loadWorkspace();
+  await loadHandwritingProfile();
+  setStatus("Handwriting sample saved.");
+}
+
+async function toggleHandwritingSample(sampleId, active) {
+  if (!sampleId) throw new Error("Handwriting sample id is required.");
+  setStatus(active ? "Enabling handwriting sample..." : "Disabling handwriting sample...");
+  await api(\`/api/notes/handwriting/samples/\${encodeURIComponent(sampleId)}/toggle\`, {
+    method: "POST",
+    body: { active },
+  });
+  await loadWorkspace();
+  await loadHandwritingProfile();
+  setStatus(active ? "Handwriting sample enabled." : "Handwriting sample disabled.");
+}
+
 async function processCapture() {
   const capture = buildCapturePayload();
   setStatus("Creating original capture...");
@@ -988,6 +1175,7 @@ function runOptions() {
   return {
     reviewPolicy: elements.reviewPolicySelect.value,
     beepMode: elements.beepModeSelect.value,
+    useHandwritingCalibration: elements.useHandwritingCalibration.checked,
   };
 }
 
@@ -1078,17 +1266,25 @@ function init() {
       setStatus(error instanceof Error ? error.message : String(error), true);
     }
   });
-  bindAsync(elements.refreshWorkspaceButton, "click", loadWorkspace);
+  bindAsync(elements.refreshWorkspaceButton, "click", async () => {
+    await loadWorkspace();
+    await loadHandwritingProfile();
+  });
   bindAsync(elements.itemForm, "submit", () => createItem(state.itemType));
   bindAsync(elements.captureForm, "submit", processCapture);
+  bindAsync(elements.handwritingCalibrationForm, "submit", saveHandwritingSample);
   bindAsync(elements.askBeepButton, "click", askBeep);
   bindAsync(elements.lockToggleButton, "click", toggleLock);
   elements.askBeepButton.disabled = true;
   elements.lockToggleButton.disabled = true;
   setCaptureKind("text");
   renderImagePreview();
+  renderHandwritingSamples();
   if (token()) {
-    loadWorkspace().catch((error) => setStatus(error instanceof Error ? error.message : String(error), true));
+    (async () => {
+      await loadWorkspace();
+      await loadHandwritingProfile();
+    })().catch((error) => setStatus(error instanceof Error ? error.message : String(error), true));
   }
 }
 
