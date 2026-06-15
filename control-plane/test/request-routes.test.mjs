@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
-import { createControlPlaneHandler } from "../src/server.mjs";
+import { createControlPlaneHandler, MAX_NATIVE_REQUEST_BYTES } from "../src/server.mjs";
 import { StateStore } from "../src/state-store.mjs";
 
 function tempStore() {
@@ -162,6 +162,49 @@ test("request list returns stable persisted request records", async () => {
     assert.equal(payload.requests[0].runtimeResult.lcm, undefined);
     assert.equal(payload.requests[0].runtimeResult.extra, undefined);
     assert.equal(payload.requests[0].internalNote, undefined);
+  } finally {
+    cleanup();
+  }
+});
+
+test("request read routes tolerate legacy records without native input", async () => {
+  const { store, cleanup } = tempStore();
+  try {
+    const legacyRequestId = "cp_req_legacy";
+    store.update((state) => {
+      state.agentRequests[legacyRequestId] = {
+        schemaVersion: 1,
+        requestId: legacyRequestId,
+        runtimeId: "local",
+        runtimeRequestId: "runtime-legacy",
+        message: "legacy secret",
+        status: "submitted",
+        source: "api",
+        error: null,
+        createdAt: "2026-06-02T01:00:00.000Z",
+        updatedAt: "2026-06-02T01:00:00.000Z",
+      };
+    });
+    const handler = handlerFor({ store });
+
+    const listResponse = captureResponse();
+    await handler(request("GET", "/api/requests", operatorHeaders(store)), listResponse.response);
+    const list = listResponse.json();
+    assert.equal(list.statusCode, 200);
+    assert.equal(list.payload.requests[0].requestId, legacyRequestId);
+    assert.equal(list.payload.requests[0].inputSummary, null);
+    assert.deepEqual(list.payload.requests[0].redactedInput, []);
+    assert.equal(list.payload.requests[0].message, undefined);
+    assert.equal(list.payload.requests[0].input, undefined);
+
+    const singleResponse = captureResponse();
+    await handler(request("GET", `/api/requests/${legacyRequestId}`, operatorHeaders(store)), singleResponse.response);
+    const single = singleResponse.json();
+    assert.equal(single.statusCode, 200);
+    assert.equal(single.payload.request.inputSummary, null);
+    assert.deepEqual(single.payload.request.redactedInput, []);
+    assert.equal(single.payload.request.message, undefined);
+    assert.equal(single.payload.request.input, undefined);
   } finally {
     cleanup();
   }
@@ -383,6 +426,90 @@ test("POST request submission forwards native input unchanged and persists a red
     assert.equal(persisted.runtimeRequestId, "runtime-post-1");
     assert.equal(persisted.input[1].data, "ZmFrZQ==");
     assert.equal(persisted.inputSummary.imageParts[0].byteLength, 4);
+  } finally {
+    cleanup();
+  }
+});
+
+test("POST request submission accepts native image bodies larger than the default JSON limit", async () => {
+  const { store, cleanup } = tempStore();
+  try {
+    assert.ok(MAX_NATIVE_REQUEST_BYTES >= 36 * 1024 * 1024);
+    const inlineImageBytes = 1024 * 1024 + 1;
+    const imageData = Buffer.alloc(inlineImageBytes, 1).toString("base64");
+    const forwarded = [];
+    const handler = handlerFor({
+      store,
+      runtimeManager: {
+        status: async () => ({ runtimeId: "local", running: false }),
+        ensureRuntime: async () => ({ runtimeId: "local", running: true }),
+        proxyToRuntime: async (path, options) => {
+          forwarded.push({ path, options });
+          return { ok: true, request: { id: "runtime-large-post-1" } };
+        },
+      },
+    });
+    const response = captureResponse();
+
+    await handler(
+      request(
+        "POST",
+        "/api/requests",
+        { ...operatorHeaders(store), "content-type": "application/json" },
+        JSON.stringify({
+          input: [
+            { type: "text", text: "large image" },
+            { type: "image", mimeType: "image/png", data: imageData },
+          ],
+        }),
+      ),
+      response.response,
+    );
+
+    const { statusCode, payload } = response.json();
+    assert.equal(statusCode, 200);
+    assert.equal(payload.ok, true);
+    assert.equal(forwarded.length, 1);
+    assert.equal(JSON.parse(forwarded[0].options.body).input[1].data.length, imageData.length);
+  } finally {
+    cleanup();
+  }
+});
+
+test("POST request submission returns 400 for invalid native input", async () => {
+  const { store, cleanup } = tempStore();
+  try {
+    let ensureRuntimeCalls = 0;
+    const handler = handlerFor({
+      store,
+      runtimeManager: {
+        status: async () => ({ runtimeId: "local", running: false }),
+        ensureRuntime: async () => {
+          ensureRuntimeCalls += 1;
+          return { runtimeId: "local", running: true };
+        },
+        proxyToRuntime: async () => {
+          throw new Error("runtime proxy should not be called");
+        },
+      },
+    });
+    const response = captureResponse();
+
+    await handler(
+      request(
+        "POST",
+        "/api/requests",
+        { ...operatorHeaders(store), "content-type": "application/json" },
+        JSON.stringify({ input: [{ type: "text", text: "" }] }),
+      ),
+      response.response,
+    );
+
+    const { statusCode, payload } = response.json();
+    assert.equal(statusCode, 400);
+    assert.equal(payload.ok, false);
+    assert.match(payload.error, /empty text/);
+    assert.equal(ensureRuntimeCalls, 0);
   } finally {
     cleanup();
   }

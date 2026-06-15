@@ -58,15 +58,34 @@ function publicRuntimeResult(runtimeResult) {
   };
 }
 
+function publicInputSummary(record) {
+  if (record.inputSummary) return record.inputSummary;
+  if (!Array.isArray(record.input) || record.input.length === 0) return null;
+  try {
+    return summarizeBeepInput(record.input);
+  } catch {
+    return null;
+  }
+}
+
+function publicRedactedInput(record) {
+  if (!Array.isArray(record.input) || record.input.length === 0) return [];
+  try {
+    return redactBeepInput(record.input);
+  } catch {
+    return [];
+  }
+}
+
 function publicRequest(record) {
   const response = {};
   for (const field of PUBLIC_REQUEST_FIELDS) {
     if (field === "runtimeResult") {
       response[field] = publicRuntimeResult(record[field]);
     } else if (field === "inputSummary") {
-      response[field] = record.inputSummary || summarizeBeepInput(record.input || []);
+      response[field] = publicInputSummary(record);
     } else if (field === "redactedInput") {
-      response[field] = Array.isArray(record.input) ? redactBeepInput(record.input) : [];
+      response[field] = publicRedactedInput(record);
     } else {
       response[field] = record[field] ?? null;
     }
