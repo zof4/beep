@@ -1,22 +1,19 @@
-import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join, posix } from "node:path";
 import { normalizeBeepInput } from "../../../shared/native-input.mjs";
 import { readJsonBody, sendJson } from "../http-utils.mjs";
 import { NotesBeepGateway } from "./beep-gateway.mjs";
+import {
+  MAX_IMAGE_UPLOAD_BYTES,
+  NATIVE_NOTES_IMAGE_MIME_TYPES,
+  captureMimeTypeFromUpload,
+  normalizeUploadedImageMediaFile,
+} from "./image-media.mjs";
 import { createPipelineRun, runPipeline } from "./pipeline-engine.mjs";
 import { readItemForBeep } from "./workspace-domain.mjs";
 import { NotesWorkspaceStore } from "./workspace-store.mjs";
 
-const NATIVE_NOTES_IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/webp"]);
-const HEIF_IMAGE_MIME_TYPES = new Set(["image/heic", "image/heif", "image/heic-sequence", "image/heif-sequence"]);
-const NOTES_IMAGE_MIME_TYPES = new Set([...NATIVE_NOTES_IMAGE_MIME_TYPES, ...HEIF_IMAGE_MIME_TYPES]);
 const IMAGE_DETAIL_VALUES = new Set(["low", "high", "original", "auto"]);
-const MAX_IMAGE_UPLOAD_BYTES = 40 * 1024 * 1024;
 const MAX_MULTIPART_CAPTURE_BYTES = MAX_IMAGE_UPLOAD_BYTES + 1024 * 1024;
-const NOTES_CAPTURE_WORKSPACE_DIR = "notes-captures";
 
 function newRouteId(prefix) {
   return `${prefix}_${Date.now().toString(36)}_${randomBytes(6).toString("base64url")}`;
@@ -85,61 +82,6 @@ function normalizeImageDetail(value) {
   const detail = String(value).trim();
   if (!IMAGE_DETAIL_VALUES.has(detail)) throw new Error("image detail must be low, high, original, or auto");
   return detail;
-}
-
-function heifFileExtension(mimeType) {
-  return mimeType.includes("heic") ? ".heic" : ".heif";
-}
-
-function fileExtensionForMimeType(mimeType) {
-  if (mimeType === "image/png") return ".png";
-  if (mimeType === "image/jpeg") return ".jpg";
-  if (mimeType === "image/webp") return ".webp";
-  if (mimeType.includes("heic")) return ".heic";
-  if (mimeType.includes("heif")) return ".heif";
-  return ".img";
-}
-
-function runSipsJpegConversion(inputPath, outputPath) {
-  return new Promise((resolve, reject) => {
-    const child = spawn("/usr/bin/sips", ["-s", "format", "jpeg", inputPath, "--out", outputPath], {
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.setEncoding("utf8");
-    child.stderr.setEncoding("utf8");
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk;
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk;
-    });
-    child.on("error", reject);
-    child.on("close", (code) => {
-      if (code === 0) {
-        resolve();
-        return;
-      }
-      reject(new Error((stderr || stdout || `sips exited with ${code}`).trim()));
-    });
-  });
-}
-
-async function convertHeifToJpegWithSips({ mimeType, data }) {
-  const dir = await mkdtemp(join(tmpdir(), "beep-notes-heif-"));
-  const inputPath = join(dir, `capture${heifFileExtension(mimeType)}`);
-  const outputPath = join(dir, "capture.jpg");
-  try {
-    await writeFile(inputPath, data);
-    await runSipsJpegConversion(inputPath, outputPath);
-    const jpeg = await readFile(outputPath);
-    return { mimeType: "image/jpeg", data: jpeg };
-  } catch (error) {
-    throw new Error(`invalid HEIF image data: ${errorMessage(error)}`);
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
 }
 
 function isMultipartFormData(request) {
@@ -229,96 +171,6 @@ function parseMultipartFormData(buffer, boundary) {
   return parts;
 }
 
-function captureMimeTypeFromUpload(upload) {
-  const headerMimeType = String(upload.contentType || "").trim().toLowerCase();
-  if (NOTES_IMAGE_MIME_TYPES.has(headerMimeType)) return headerMimeType;
-  const name = String(upload.filename || "").toLowerCase();
-  if (name.endsWith(".png")) return "image/png";
-  if (name.endsWith(".jpg") || name.endsWith(".jpeg")) return "image/jpeg";
-  if (name.endsWith(".webp")) return "image/webp";
-  if (name.endsWith(".heic")) return "image/heic";
-  if (name.endsWith(".heif")) return "image/heif";
-  return headerMimeType;
-}
-
-function normalizeConverterOutput(output) {
-  const mimeType = String(output?.mimeType ?? "").trim().toLowerCase();
-  if (!NATIVE_NOTES_IMAGE_MIME_TYPES.has(mimeType)) {
-    throw new Error(`unsupported converted image MIME type: ${mimeType || "unknown"}`);
-  }
-  const data = output?.data ?? output?.buffer;
-  if (!Buffer.isBuffer(data)) {
-    throw new Error("converted image data must be a Buffer");
-  }
-  return { mimeType, data };
-}
-
-async function writeWorkspaceCaptureFile({ workspaceHostPath, mimeType, data }) {
-  if (typeof workspaceHostPath !== "string" || workspaceHostPath.trim() === "") {
-    throw new Error("notes workspace host path is required for image captures");
-  }
-  const workspacePath = posix.join(NOTES_CAPTURE_WORKSPACE_DIR, `${newRouteId("capture")}${fileExtensionForMimeType(mimeType)}`);
-  const outputPath = join(workspaceHostPath, workspacePath);
-  await mkdir(join(workspaceHostPath, NOTES_CAPTURE_WORKSPACE_DIR), { recursive: true });
-  await writeFile(outputPath, data);
-  return workspacePath;
-}
-
-async function normalizeUploadedImageMediaFile(
-  upload,
-  { detail, workspaceHostPath, convertHeifToJpeg = convertHeifToJpegWithSips } = {},
-) {
-  const originalName = String(upload.filename || "image").trim() || "image";
-  const originalMimeType = captureMimeTypeFromUpload(upload);
-  if (!NOTES_IMAGE_MIME_TYPES.has(originalMimeType)) {
-    throw new Error(`unsupported image MIME type: ${originalMimeType || "unknown"}`);
-  }
-  if (upload.data.byteLength > MAX_IMAGE_UPLOAD_BYTES) {
-    const error = new Error("image file must be 40 MiB or smaller");
-    error.status = 413;
-    throw error;
-  }
-
-  let mimeType = originalMimeType;
-  let data = upload.data;
-  if (HEIF_IMAGE_MIME_TYPES.has(originalMimeType)) {
-    const converted = normalizeConverterOutput(
-      await convertHeifToJpeg({
-        mimeType: originalMimeType,
-        data: upload.data,
-        detail,
-        name: originalName,
-      }),
-    );
-    mimeType = converted.mimeType;
-    data = converted.data;
-  }
-  if (data.byteLength > MAX_IMAGE_UPLOAD_BYTES) {
-    const error = new Error("image file must be 40 MiB or smaller after conversion");
-    error.status = 413;
-    throw error;
-  }
-
-  const workspacePath = await writeWorkspaceCaptureFile({ workspaceHostPath, mimeType, data });
-  const converted = originalMimeType !== mimeType;
-  return {
-    kind: "image",
-    name: converted ? originalName.replace(/\.(?:heic|heif)$/iu, ".jpg") : originalName,
-    mimeType,
-    sizeBytes: data.byteLength,
-    detail,
-    workspacePath,
-    ...(converted
-      ? {
-          originalName,
-          originalMimeType,
-          originalSizeBytes: upload.data.byteLength,
-          convertedFrom: originalMimeType,
-        }
-      : {}),
-  };
-}
-
 async function localImageInputPartForMediaFile(file, index) {
   const inputFile = requiredPlainObject(file, `media.files[${index}]`);
   const mimeType = String(inputFile.mimeType ?? "").trim().toLowerCase();
@@ -362,10 +214,13 @@ async function normalizeMultipartCaptureInput(request, options = {}) {
   if (kind !== "image") throw new Error("multipart captures must be image captures");
   if (files.length !== 1) throw new Error("image capture multipart body must include one image file");
   const detail = normalizeImageDetail(fields.detail);
-  const file = await normalizeUploadedImageMediaFile(files[0], {
+  const upload = files[0];
+  captureMimeTypeFromUpload(upload);
+  const file = await normalizeUploadedImageMediaFile(upload, {
     detail,
     workspaceHostPath: options.workspaceHostPath,
-    convertHeifToJpeg: options.convertHeifToJpeg,
+    targetFormat: "jpeg",
+    convertHeif: options.convertHeif,
   });
   return {
     ...(String(fields.id ?? "").trim() ? { id: String(fields.id).trim() } : {}),
@@ -597,9 +452,9 @@ export async function handleNotesRoute({
     const input = isMultipartFormData(request)
       ? await normalizeMultipartCaptureInput(request, {
           workspaceHostPath: notesWorkspaceHostPath,
-          convertHeifToJpeg: notesImageConverter,
+          convertHeif: notesImageConverter,
         })
-      : await normalizeCaptureInput(await readJsonBody(request), { convertHeifToJpeg: notesImageConverter });
+      : await normalizeCaptureInput(await readJsonBody(request), { convertHeif: notesImageConverter });
     const source = notesStore.createSourceArtifact(input);
     sendJson(response, 200, { ok: true, source });
     return true;
@@ -623,7 +478,7 @@ export async function handleNotesRoute({
       replay: replayForSource(source),
       forwardRuntimeRequest,
       runInput: { kind: "processNote", sourceArtifactId: source.id },
-      context: { attachments: await imageInputPartsForSource(source, { convertHeifToJpeg: notesImageConverter }) },
+      context: { attachments: await imageInputPartsForSource(source, { convertHeif: notesImageConverter }) },
     });
     sendJson(response, 200, { ok: true, ...result });
     return true;

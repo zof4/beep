@@ -637,7 +637,7 @@ test("capture route rejects unsupported image media", async () => {
       "content-length": String(body.byteLength),
     });
 
-    assert.equal(rejected.statusCode, 400);
+    assert.equal(rejected.statusCode, 415);
     assert.match(rejected.payload.error, /unsupported image MIME type: image\/gif/u);
   } finally {
     cleanup();
