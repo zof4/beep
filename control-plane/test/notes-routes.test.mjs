@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -10,6 +10,7 @@ import { StateStore } from "../src/state-store.mjs";
 function tempHandler({
   proxyToRuntime = async () => ({ ok: true, finalText: "{}" }),
   notesImageConverter = undefined,
+  notesWorkspaceHostPath = undefined,
 } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "beep-notes-routes-test-"));
   const store = new StateStore(dir);
@@ -26,6 +27,7 @@ function tempHandler({
       throw new Error("local port proxy should not be called");
     },
     notesImageConverter,
+    notesWorkspaceHostPath,
   });
   return {
     handler,
@@ -44,6 +46,39 @@ function request(method, url, body = null, headers = {}) {
     req.end();
   });
   return req;
+}
+
+function rawRequest(method, url, body, headers = {}) {
+  const req = new PassThrough();
+  req.method = method;
+  req.url = url;
+  req.headers = headers;
+  process.nextTick(() => {
+    if (body) req.write(body);
+    req.end();
+  });
+  return req;
+}
+
+function multipartBody({ boundary, fields = {}, file }) {
+  const chunks = [];
+  for (const [name, value] of Object.entries(fields)) {
+    chunks.push(
+      Buffer.from(
+        `--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${String(value)}\r\n`,
+        "utf8",
+      ),
+    );
+  }
+  chunks.push(
+    Buffer.from(
+      `--${boundary}\r\nContent-Disposition: form-data; name="${file.fieldName || "image"}"; filename="${file.filename}"\r\nContent-Type: ${file.mimeType}\r\n\r\n`,
+      "utf8",
+    ),
+    file.data,
+    Buffer.from(`\r\n--${boundary}--\r\n`, "utf8"),
+  );
+  return Buffer.concat(chunks);
 }
 
 function captureResponse() {
@@ -67,6 +102,12 @@ function captureResponse() {
 async function call(handler, method, url, body, headers) {
   const captured = captureResponse();
   await handler(request(method, url, body, { "content-type": "application/json", ...headers }), captured.response);
+  return captured.json();
+}
+
+async function callRaw(handler, method, url, body, headers) {
+  const captured = captureResponse();
+  await handler(rawRequest(method, url, body, headers), captured.response);
   return captured.json();
 }
 
@@ -410,10 +451,44 @@ test("capture processing route materializes derived artifacts", async () => {
   }
 });
 
-test("capture processing route localAgent forwards image capture as native input", async () => {
+test("capture route accepts multipart image over 1 MiB and writes a workspace file without dataUrl metadata", async () => {
+  const workspaceDir = mkdtempSync(join(tmpdir(), "beep-notes-workspace-test-"));
+  const imageBytes = Buffer.alloc(1024 * 1024 + 17, 0x61);
+  const { handler, auth, cleanup } = tempHandler({ notesWorkspaceHostPath: workspaceDir });
+  try {
+    const boundary = "beep-notes-large-image";
+    const body = multipartBody({
+      boundary,
+      fields: { kind: "image", body: "Large whiteboard capture", detail: "auto" },
+      file: { filename: "whiteboard.png", mimeType: "image/png", data: imageBytes },
+    });
+    const source = await callRaw(handler, "POST", "/api/notes/captures", body, {
+      ...auth,
+      "content-type": `multipart/form-data; boundary=${boundary}`,
+      "content-length": String(body.byteLength),
+    });
+
+    assert.equal(source.statusCode, 200);
+    const file = source.payload.source.media.files[0];
+    assert.equal(file.name, "whiteboard.png");
+    assert.equal(file.mimeType, "image/png");
+    assert.equal(file.sizeBytes, imageBytes.byteLength);
+    assert.equal(file.detail, "auto");
+    assert.match(file.workspacePath, /^notes-captures\/.+\.png$/u);
+    assert.equal(Object.hasOwn(file, "dataUrl"), false);
+    assert.deepEqual(readFileSync(join(workspaceDir, file.workspacePath)), imageBytes);
+  } finally {
+    cleanup();
+    rmSync(workspaceDir, { recursive: true, force: true });
+  }
+});
+
+test("capture processing route localAgent forwards image capture as localImage input", async () => {
   const runtimeBodies = [];
-  const imageData = Buffer.from("fake-image").toString("base64");
+  const workspaceDir = mkdtempSync(join(tmpdir(), "beep-notes-workspace-test-"));
+  const imageBytes = Buffer.from("fake-image");
   const { handler, auth, cleanup } = tempHandler({
+    notesWorkspaceHostPath: workspaceDir,
     proxyToRuntime: async (path, options) => {
       assert.equal(path, "/agent/submit");
       const body = JSON.parse(options.body);
@@ -430,27 +505,17 @@ test("capture processing route localAgent forwards image capture as native input
     },
   });
   try {
-    const source = await call(
-      handler,
-      "POST",
-      "/api/notes/captures",
-      {
-        id: "src_image",
-        kind: "image",
-        body: "Whiteboard capture",
-        media: {
-          files: [
-            {
-              name: "whiteboard.png",
-              mimeType: "image/png",
-              sizeBytes: Buffer.byteLength("fake-image"),
-              dataUrl: `data:image/png;base64,${imageData}`,
-            },
-          ],
-        },
-      },
-      auth,
-    );
+    const boundary = "beep-notes-local-image";
+    const body = multipartBody({
+      boundary,
+      fields: { id: "src_image", kind: "image", body: "Whiteboard capture", detail: "auto" },
+      file: { filename: "whiteboard.png", mimeType: "image/png", data: imageBytes },
+    });
+    const source = await callRaw(handler, "POST", "/api/notes/captures", body, {
+      ...auth,
+      "content-type": `multipart/form-data; boundary=${boundary}`,
+      "content-length": String(body.byteLength),
+    });
     const processed = await call(
       handler,
       "POST",
@@ -464,24 +529,27 @@ test("capture processing route localAgent forwards image capture as native input
     assert.equal(processed.statusCode, 200);
     assert.equal(runtimeBodies.length > 0, true);
     assert.equal(runtimeBodies.every((body) => Object.hasOwn(body, "message") === false), true);
-    assert.equal(runtimeBodies.every((body) => body.input.some((part) => part?.type === "image")), true);
-    assert.deepEqual(runtimeBodies[0].input.find((part) => part?.type === "image"), {
-      type: "image",
-      mimeType: "image/png",
-      data: imageData,
+    assert.equal(runtimeBodies.every((body) => body.input.some((part) => part?.type === "localImage")), true);
+    assert.equal(runtimeBodies.every((body) => body.input.some((part) => part?.type === "image")), false);
+    assert.deepEqual(runtimeBodies[0].input.find((part) => part?.type === "localImage"), {
+      type: "localImage",
+      path: source.payload.source.media.files[0].workspacePath,
       detail: "auto",
     });
   } finally {
     cleanup();
+    rmSync(workspaceDir, { recursive: true, force: true });
   }
 });
 
-test("capture processing route converts HEIF capture to JPEG native input", async () => {
+test("capture processing route converts HEIF multipart capture to JPEG workspace localImage", async () => {
   const runtimeBodies = [];
   const converterCalls = [];
-  const heifData = Buffer.from("fake-heif").toString("base64");
-  const jpegData = Buffer.from("converted-jpeg").toString("base64");
+  const workspaceDir = mkdtempSync(join(tmpdir(), "beep-notes-workspace-test-"));
+  const heifData = Buffer.from("fake-heif");
+  const jpegData = Buffer.from("converted-jpeg");
   const { handler, auth, cleanup } = tempHandler({
+    notesWorkspaceHostPath: workspaceDir,
     notesImageConverter: async (input) => {
       converterCalls.push(input);
       return { mimeType: "image/jpeg", data: jpegData };
@@ -502,26 +570,17 @@ test("capture processing route converts HEIF capture to JPEG native input", asyn
     },
   });
   try {
-    const source = await call(
-      handler,
-      "POST",
-      "/api/notes/captures",
-      {
-        id: "src_heif",
-        kind: "image",
-        body: "iPhone photo",
-        media: {
-          files: [
-            {
-              name: "IMG_0001.HEIC",
-              mimeType: "image/heic",
-              dataUrl: `data:image/heic;base64,${heifData}`,
-            },
-          ],
-        },
-      },
-      auth,
-    );
+    const boundary = "beep-notes-heif-image";
+    const body = multipartBody({
+      boundary,
+      fields: { id: "src_heif", kind: "image", body: "iPhone photo", detail: "auto" },
+      file: { filename: "IMG_0001.HEIC", mimeType: "image/heic", data: heifData },
+    });
+    const source = await callRaw(handler, "POST", "/api/notes/captures", body, {
+      ...auth,
+      "content-type": `multipart/form-data; boundary=${boundary}`,
+      "content-length": String(body.byteLength),
+    });
     const processed = await call(
       handler,
       "POST",
@@ -537,40 +596,51 @@ test("capture processing route converts HEIF capture to JPEG native input", asyn
         mimeType: converterCalls[0].mimeType,
         data: converterCalls[0].data,
         name: converterCalls[0].name,
+        detail: converterCalls[0].detail,
       },
-      { mimeType: "image/heic", data: heifData, name: "IMG_0001.HEIC" },
+      { mimeType: "image/heic", data: heifData, name: "IMG_0001.HEIC", detail: "auto" },
     );
+    assert.equal(Buffer.isBuffer(converterCalls[0].data), true);
     assert.equal(source.payload.source.media.files[0].mimeType, "image/jpeg");
     assert.equal(source.payload.source.media.files[0].originalMimeType, "image/heic");
     assert.equal(source.payload.source.media.files[0].originalName, "IMG_0001.HEIC");
-    assert.equal(source.payload.source.media.files[0].dataUrl, `data:image/jpeg;base64,${jpegData}`);
+    assert.equal(source.payload.source.media.files[0].originalSizeBytes, heifData.byteLength);
+    assert.equal(Object.hasOwn(source.payload.source.media.files[0], "dataUrl"), false);
+    assert.deepEqual(readFileSync(join(workspaceDir, source.payload.source.media.files[0].workspacePath)), jpegData);
     assert.equal(processed.statusCode, 200);
     assert.equal(runtimeBodies.length > 0, true);
-    assert.deepEqual(runtimeBodies[0].input.find((part) => part?.type === "image"), {
-      type: "image",
-      mimeType: "image/jpeg",
-      data: jpegData,
+    assert.deepEqual(runtimeBodies[0].input.find((part) => part?.type === "localImage"), {
+      type: "localImage",
+      path: source.payload.source.media.files[0].workspacePath,
       detail: "auto",
     });
+    assert.equal(runtimeBodies[0].input.some((part) => part?.type === "image"), false);
   } finally {
     cleanup();
+    rmSync(workspaceDir, { recursive: true, force: true });
   }
 });
 
 test("capture route rejects unsupported image media", async () => {
-  const { handler, auth, cleanup } = tempHandler();
+  const workspaceDir = mkdtempSync(join(tmpdir(), "beep-notes-workspace-test-"));
+  const { handler, auth, cleanup } = tempHandler({ notesWorkspaceHostPath: workspaceDir });
   try {
-    const rejected = await call(
-      handler,
-      "POST",
-      "/api/notes/captures",
-      { kind: "image", body: "bad", media: { files: [{ mimeType: "image/gif", dataUrl: "data:image/gif;base64,R0lGODlh" }] } },
-      auth,
-    );
+    const boundary = "beep-notes-bad-image";
+    const body = multipartBody({
+      boundary,
+      fields: { kind: "image", body: "bad" },
+      file: { filename: "bad.gif", mimeType: "image/gif", data: Buffer.from("GIF89a") },
+    });
+    const rejected = await callRaw(handler, "POST", "/api/notes/captures", body, {
+      ...auth,
+      "content-type": `multipart/form-data; boundary=${boundary}`,
+      "content-length": String(body.byteLength),
+    });
 
     assert.equal(rejected.statusCode, 400);
     assert.match(rejected.payload.error, /unsupported image MIME type: image\/gif/u);
   } finally {
     cleanup();
+    rmSync(workspaceDir, { recursive: true, force: true });
   }
 });

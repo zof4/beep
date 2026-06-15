@@ -1,7 +1,14 @@
 import { createServer } from "node:http";
 import { request as httpRequest } from "node:http";
 import { pathToFileURL } from "node:url";
-import { DEFAULT_REQUEST_TIMEOUT_MS, HOST, PORT, RUNTIME_AUTH_PATH, RUNTIME_ID } from "./config.mjs";
+import {
+  DEFAULT_REQUEST_TIMEOUT_MS,
+  HOST,
+  NOTES_WORKSPACE_HOST_PATH,
+  PORT,
+  RUNTIME_AUTH_PATH,
+  RUNTIME_ID,
+} from "./config.mjs";
 import { handleApprovalRoute } from "./approval-routes.mjs";
 import { buildBackendStatus } from "./backend-status.mjs";
 import { resolveCodexCredentialFromAuthPath } from "./codex-token.mjs";
@@ -71,6 +78,7 @@ export function createControlPlaneHandler({
   toolBroker,
   localPortProxy = proxyLocalPort,
   notesImageConverter = undefined,
+  notesWorkspaceHostPath = NOTES_WORKSPACE_HOST_PATH,
 }) {
   function requireRuntimeAuth(request) {
     const expected = `Bearer ${store.ensureRuntimeToken()}`;
@@ -302,6 +310,7 @@ export function createControlPlaneHandler({
         requireOperatorAuth,
         forwardRuntimeRequest,
         notesImageConverter,
+        notesWorkspaceHostPath,
       });
       if (handled) return;
     }

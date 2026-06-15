@@ -545,7 +545,7 @@ const IMAGE_CAPTURE_MIME_TYPES = new Set([
   "image/webp",
   ...HEIF_CAPTURE_MIME_TYPES,
 ]);
-const MAX_IMAGE_CAPTURE_BYTES = 12 * 1024 * 1024;
+const MAX_IMAGE_CAPTURE_BYTES = 40 * 1024 * 1024;
 
 const state = {
   workspace: null,
@@ -622,8 +622,10 @@ async function api(path, options = {}) {
   };
   let body = options.body;
   if (body && typeof body !== "string") {
-    headers["content-type"] = "application/json";
-    body = JSON.stringify(body);
+    if (!(body instanceof FormData)) {
+      headers["content-type"] = "application/json";
+      body = JSON.stringify(body);
+    }
   }
   const response = await fetch(path, { ...options, headers, body });
   const payload = await response.json().catch(() => ({}));
@@ -739,15 +741,10 @@ function renderSourceRecord(node, source) {
   const title = file ? "Image capture" : "Original capture";
   const body = source.body || file?.name || "Empty capture";
   const row = appendRecord(node, title, body, shortDate(source.createdAt));
-  if (file?.dataUrl) {
-    const image = document.createElement("img");
-    image.className = "source-image";
-    image.src = file.dataUrl;
-    image.alt = file.name || "Captured image";
-    row.append(image);
-    const meta = [file.mimeType, formatBytes(file.sizeBytes)].filter(Boolean).join(" | ");
-    if (meta) row.append(text("div", meta, "row-meta"));
-  }
+  const meta = [file?.mimeType, formatBytes(file?.sizeBytes), file?.workspacePath ? "stored in workspace" : ""]
+    .filter(Boolean)
+    .join(" | ");
+  if (meta) row.append(text("div", meta, "row-meta"));
   return row;
 }
 
@@ -896,15 +893,6 @@ async function createItem(type) {
   await loadWorkspace();
 }
 
-function readImageFile(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.addEventListener("load", () => resolve(reader.result));
-    reader.addEventListener("error", () => reject(reader.error || new Error("Image could not be read.")));
-    reader.readAsDataURL(file);
-  });
-}
-
 function renderImagePreview() {
   clearChildren(elements.imagePreview);
   if (!state.captureImage) {
@@ -917,7 +905,7 @@ function renderImagePreview() {
     elements.imagePreview.append(text("div", "HEIC/HEIF selected. Preview appears after conversion.", "row-body"));
   } else {
     const image = document.createElement("img");
-    image.src = state.captureImage.dataUrl;
+    image.src = state.captureImage.previewUrl;
     image.alt = state.captureImage.name || "Selected image";
     elements.imagePreview.append(image);
   }
@@ -933,41 +921,32 @@ function captureMimeType(file) {
   return browserMimeType;
 }
 
-function normalizeFileDataUrl(value, mimeType) {
-  if (typeof value !== "string") throw new Error("Image could not be encoded as a data URL.");
-  const match = value.match(/^data:([^;,]*);base64,([A-Za-z0-9+/]*={0,2})$/u);
-  if (!match) throw new Error("Image could not be encoded as a data URL.");
-  const dataMimeType = match[1].toLowerCase();
-  const data = match[2];
-  if (
-    dataMimeType &&
-    dataMimeType !== mimeType &&
-    dataMimeType !== "application/octet-stream" &&
-    !(HEIF_CAPTURE_MIME_TYPES.has(dataMimeType) && HEIF_CAPTURE_MIME_TYPES.has(mimeType))
-  ) {
-    throw new Error("Image data URL MIME did not match the selected file.");
-  }
-  return \`data:\${mimeType};base64,\${data}\`;
-}
-
 async function updateCaptureImage() {
   const file = elements.imageCaptureInput.files?.[0] || null;
   if (!file) {
-    state.captureImage = null;
-    renderImagePreview();
+    clearCaptureImageSelection();
     return;
   }
+  clearCaptureImageSelection();
   const mimeType = captureMimeType(file);
-  if (!IMAGE_CAPTURE_MIME_TYPES.has(mimeType)) throw new Error(\`Unsupported image type: \${mimeType || "unknown"}\`);
-  if (file.size > MAX_IMAGE_CAPTURE_BYTES) throw new Error("Image must be 12 MB or smaller.");
-  const dataUrl = normalizeFileDataUrl(await readImageFile(file), mimeType);
+  if (!IMAGE_CAPTURE_MIME_TYPES.has(mimeType)) {
+    throw new Error(\`Unsupported image type: \${mimeType || "unknown"}\`);
+  }
+  if (file.size > MAX_IMAGE_CAPTURE_BYTES) throw new Error("Image must be 40 MB or smaller.");
   state.captureImage = {
+    file,
     name: file.name || "image",
     mimeType,
     sizeBytes: file.size,
-    dataUrl,
+    previewUrl: HEIF_CAPTURE_MIME_TYPES.has(mimeType) ? "" : URL.createObjectURL(file),
     detail: "auto",
   };
+  renderImagePreview();
+}
+
+function clearCaptureImageSelection() {
+  if (state.captureImage?.previewUrl) URL.revokeObjectURL(state.captureImage.previewUrl);
+  state.captureImage = null;
   renderImagePreview();
 }
 
@@ -975,7 +954,12 @@ function buildCapturePayload() {
   const body = elements.captureBodyInput.value.trim();
   if (state.captureKind === "image") {
     if (!state.captureImage) throw new Error("An image file is required.");
-    return { kind: "image", body, media: { files: [state.captureImage] } };
+    const formData = new FormData();
+    formData.set("kind", "image");
+    formData.set("body", body);
+    formData.set("detail", state.captureImage.detail || "auto");
+    formData.set("image", state.captureImage.file, state.captureImage.name);
+    return formData;
   }
   if (!body) throw new Error("Capture text is required.");
   return { kind: "text", body };
@@ -996,8 +980,7 @@ async function processCapture() {
   });
   elements.captureBodyInput.value = "";
   elements.imageCaptureInput.value = "";
-  state.captureImage = null;
-  renderImagePreview();
+  clearCaptureImageSelection();
   await loadWorkspace();
 }
 

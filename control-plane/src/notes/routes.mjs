@@ -1,8 +1,8 @@
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, posix } from "node:path";
 import { normalizeBeepInput } from "../../../shared/native-input.mjs";
 import { readJsonBody, sendJson } from "../http-utils.mjs";
 import { NotesBeepGateway } from "./beep-gateway.mjs";
@@ -14,7 +14,9 @@ const NATIVE_NOTES_IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image
 const HEIF_IMAGE_MIME_TYPES = new Set(["image/heic", "image/heif", "image/heic-sequence", "image/heif-sequence"]);
 const NOTES_IMAGE_MIME_TYPES = new Set([...NATIVE_NOTES_IMAGE_MIME_TYPES, ...HEIF_IMAGE_MIME_TYPES]);
 const IMAGE_DETAIL_VALUES = new Set(["low", "high", "original", "auto"]);
-const MAX_INLINE_IMAGE_BYTES = 12 * 1024 * 1024;
+const MAX_IMAGE_UPLOAD_BYTES = 40 * 1024 * 1024;
+const MAX_MULTIPART_CAPTURE_BYTES = MAX_IMAGE_UPLOAD_BYTES + 1024 * 1024;
+const NOTES_CAPTURE_WORKSPACE_DIR = "notes-captures";
 
 function newRouteId(prefix) {
   return `${prefix}_${Date.now().toString(36)}_${randomBytes(6).toString("base64url")}`;
@@ -85,21 +87,17 @@ function normalizeImageDetail(value) {
   return detail;
 }
 
-function parseImageDataUrl(value, expectedMimeType) {
-  if (typeof value !== "string" || value.trim() === "") {
-    throw new Error("invalid image data URL");
-  }
-  const match = value.trim().match(/^data:([^;,]+);base64,([A-Za-z0-9+/]*={0,2})$/u);
-  if (!match) throw new Error("invalid image data URL");
-  const mimeType = match[1].toLowerCase();
-  if (mimeType !== expectedMimeType) {
-    throw new Error(`invalid image data URL MIME: expected ${expectedMimeType}`);
-  }
-  return { mimeType, data: match[2] };
-}
-
 function heifFileExtension(mimeType) {
   return mimeType.includes("heic") ? ".heic" : ".heif";
+}
+
+function fileExtensionForMimeType(mimeType) {
+  if (mimeType === "image/png") return ".png";
+  if (mimeType === "image/jpeg") return ".jpg";
+  if (mimeType === "image/webp") return ".webp";
+  if (mimeType.includes("heic")) return ".heic";
+  if (mimeType.includes("heif")) return ".heif";
+  return ".img";
 }
 
 function runSipsJpegConversion(inputPath, outputPath) {
@@ -133,10 +131,10 @@ async function convertHeifToJpegWithSips({ mimeType, data }) {
   const inputPath = join(dir, `capture${heifFileExtension(mimeType)}`);
   const outputPath = join(dir, "capture.jpg");
   try {
-    await writeFile(inputPath, Buffer.from(data, "base64"));
+    await writeFile(inputPath, data);
     await runSipsJpegConversion(inputPath, outputPath);
     const jpeg = await readFile(outputPath);
-    return { mimeType: "image/jpeg", data: jpeg.toString("base64") };
+    return { mimeType: "image/jpeg", data: jpeg };
   } catch (error) {
     throw new Error(`invalid HEIF image data: ${errorMessage(error)}`);
   } finally {
@@ -144,77 +142,196 @@ async function convertHeifToJpegWithSips({ mimeType, data }) {
   }
 }
 
-function normalizeNativeImagePart({ mimeType, data, detail }) {
+function isMultipartFormData(request) {
+  return String(request.headers?.["content-type"] || "").toLowerCase().startsWith("multipart/form-data");
+}
+
+function multipartBoundary(request) {
+  const contentType = String(request.headers?.["content-type"] || "");
+  const match = contentType.match(/(?:^|;)\s*boundary=(?:"([^"]+)"|([^;]+))/iu);
+  const boundary = (match?.[1] || match?.[2] || "").trim();
+  if (!boundary) throw new Error("multipart boundary is required");
+  return boundary;
+}
+
+async function readRequestBuffer(request, limitBytes) {
+  const chunks = [];
+  let totalBytes = 0;
+  for await (const chunk of request) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    totalBytes += buffer.byteLength;
+    if (totalBytes > limitBytes) {
+      const error = new Error("request body too large");
+      error.status = 413;
+      throw error;
+    }
+    chunks.push(buffer);
+  }
+  return Buffer.concat(chunks, totalBytes);
+}
+
+function parseHeaderParameters(value) {
+  const parameters = {};
+  for (const segment of value.split(";").slice(1)) {
+    const [rawKey, ...rawValueParts] = segment.split("=");
+    const key = rawKey?.trim().toLowerCase();
+    if (!key) continue;
+    const rawValue = rawValueParts.join("=").trim();
+    parameters[key] = rawValue.startsWith('"') && rawValue.endsWith('"') ? rawValue.slice(1, -1) : rawValue;
+  }
+  return parameters;
+}
+
+function parseMultipartHeaders(value) {
+  const headers = {};
+  for (const line of value.split("\r\n")) {
+    const separator = line.indexOf(":");
+    if (separator <= 0) continue;
+    headers[line.slice(0, separator).trim().toLowerCase()] = line.slice(separator + 1).trim();
+  }
+  return headers;
+}
+
+function parseMultipartFormData(buffer, boundary) {
+  const boundaryMarker = Buffer.from(`--${boundary}`, "utf8");
+  const nextBoundaryMarker = Buffer.from(`\r\n--${boundary}`, "utf8");
+  let boundaryIndex = buffer.indexOf(boundaryMarker);
+  if (boundaryIndex < 0) throw new Error("multipart boundary was not found");
+  const parts = [];
+
+  while (boundaryIndex >= 0) {
+    let cursor = boundaryIndex + boundaryMarker.length;
+    const trailer = buffer.subarray(cursor, cursor + 2).toString("latin1");
+    if (trailer === "--") break;
+    if (trailer !== "\r\n") throw new Error("invalid multipart boundary");
+    cursor += 2;
+
+    const headerEnd = buffer.indexOf(Buffer.from("\r\n\r\n", "utf8"), cursor);
+    if (headerEnd < 0) throw new Error("invalid multipart part headers");
+    const headers = parseMultipartHeaders(buffer.subarray(cursor, headerEnd).toString("latin1"));
+    const bodyStart = headerEnd + 4;
+    const nextBoundaryIndex = buffer.indexOf(nextBoundaryMarker, bodyStart);
+    if (nextBoundaryIndex < 0) throw new Error("multipart closing boundary was not found");
+
+    const disposition = headers["content-disposition"] || "";
+    const dispositionParams = parseHeaderParameters(disposition);
+    if (dispositionParams.name) {
+      parts.push({
+        name: dispositionParams.name,
+        filename: dispositionParams.filename || "",
+        contentType: String(headers["content-type"] || "").trim().toLowerCase(),
+        data: buffer.subarray(bodyStart, nextBoundaryIndex),
+      });
+    }
+    boundaryIndex = nextBoundaryIndex + 2;
+  }
+
+  return parts;
+}
+
+function captureMimeTypeFromUpload(upload) {
+  const headerMimeType = String(upload.contentType || "").trim().toLowerCase();
+  if (NOTES_IMAGE_MIME_TYPES.has(headerMimeType)) return headerMimeType;
+  const name = String(upload.filename || "").toLowerCase();
+  if (name.endsWith(".png")) return "image/png";
+  if (name.endsWith(".jpg") || name.endsWith(".jpeg")) return "image/jpeg";
+  if (name.endsWith(".webp")) return "image/webp";
+  if (name.endsWith(".heic")) return "image/heic";
+  if (name.endsWith(".heif")) return "image/heif";
+  return headerMimeType;
+}
+
+function normalizeConverterOutput(output) {
+  const mimeType = String(output?.mimeType ?? "").trim().toLowerCase();
   if (!NATIVE_NOTES_IMAGE_MIME_TYPES.has(mimeType)) {
     throw new Error(`unsupported converted image MIME type: ${mimeType || "unknown"}`);
   }
-  const normalized = normalizeBeepInput(
-    [
-      { type: "text", text: "image capture" },
-      { type: "image", mimeType, data, detail },
-    ],
-    {
-      maxInlineImageBytes: MAX_INLINE_IMAGE_BYTES,
-      maxTotalInlineImageBytes: MAX_INLINE_IMAGE_BYTES,
-    },
-  );
-  return normalized[1];
+  const data = output?.data ?? output?.buffer;
+  if (!Buffer.isBuffer(data)) {
+    throw new Error("converted image data must be a Buffer");
+  }
+  return { mimeType, data };
 }
 
-async function nativeImageInputPartForMediaFile(file, index, { convertHeifToJpeg = convertHeifToJpegWithSips } = {}) {
+async function writeWorkspaceCaptureFile({ workspaceHostPath, mimeType, data }) {
+  if (typeof workspaceHostPath !== "string" || workspaceHostPath.trim() === "") {
+    throw new Error("notes workspace host path is required for image captures");
+  }
+  const workspacePath = posix.join(NOTES_CAPTURE_WORKSPACE_DIR, `${newRouteId("capture")}${fileExtensionForMimeType(mimeType)}`);
+  const outputPath = join(workspaceHostPath, workspacePath);
+  await mkdir(join(workspaceHostPath, NOTES_CAPTURE_WORKSPACE_DIR), { recursive: true });
+  await writeFile(outputPath, data);
+  return workspacePath;
+}
+
+async function normalizeUploadedImageMediaFile(
+  upload,
+  { detail, workspaceHostPath, convertHeifToJpeg = convertHeifToJpegWithSips } = {},
+) {
+  const originalName = String(upload.filename || "image").trim() || "image";
+  const originalMimeType = captureMimeTypeFromUpload(upload);
+  if (!NOTES_IMAGE_MIME_TYPES.has(originalMimeType)) {
+    throw new Error(`unsupported image MIME type: ${originalMimeType || "unknown"}`);
+  }
+  if (upload.data.byteLength > MAX_IMAGE_UPLOAD_BYTES) {
+    const error = new Error("image file must be 40 MiB or smaller");
+    error.status = 413;
+    throw error;
+  }
+
+  let mimeType = originalMimeType;
+  let data = upload.data;
+  if (HEIF_IMAGE_MIME_TYPES.has(originalMimeType)) {
+    const converted = normalizeConverterOutput(
+      await convertHeifToJpeg({
+        mimeType: originalMimeType,
+        data: upload.data,
+        detail,
+        name: originalName,
+      }),
+    );
+    mimeType = converted.mimeType;
+    data = converted.data;
+  }
+  if (data.byteLength > MAX_IMAGE_UPLOAD_BYTES) {
+    const error = new Error("image file must be 40 MiB or smaller after conversion");
+    error.status = 413;
+    throw error;
+  }
+
+  const workspacePath = await writeWorkspaceCaptureFile({ workspaceHostPath, mimeType, data });
+  const converted = originalMimeType !== mimeType;
+  return {
+    kind: "image",
+    name: converted ? originalName.replace(/\.(?:heic|heif)$/iu, ".jpg") : originalName,
+    mimeType,
+    sizeBytes: data.byteLength,
+    detail,
+    workspacePath,
+    ...(converted
+      ? {
+          originalName,
+          originalMimeType,
+          originalSizeBytes: upload.data.byteLength,
+          convertedFrom: originalMimeType,
+        }
+      : {}),
+  };
+}
+
+async function localImageInputPartForMediaFile(file, index) {
   const inputFile = requiredPlainObject(file, `media.files[${index}]`);
   const mimeType = String(inputFile.mimeType ?? "").trim().toLowerCase();
-  if (!NOTES_IMAGE_MIME_TYPES.has(mimeType)) {
+  if (!NATIVE_NOTES_IMAGE_MIME_TYPES.has(mimeType)) {
     throw new Error(`unsupported image MIME type: ${mimeType || "unknown"}`);
   }
   const detail = normalizeImageDetail(inputFile.detail);
-  const { data } = parseImageDataUrl(inputFile.dataUrl, mimeType);
-  try {
-    if (!HEIF_IMAGE_MIME_TYPES.has(mimeType)) {
-      return normalizeNativeImagePart({ mimeType, data, detail });
-    }
-    const converted = await convertHeifToJpeg({
-      mimeType,
-      data,
-      detail,
-      name: String(inputFile.name ?? "image").trim() || "image",
-    });
-    return normalizeNativeImagePart({
-      mimeType: String(converted?.mimeType ?? "").trim().toLowerCase(),
-      data: String(converted?.data ?? ""),
-      detail,
-    });
-  } catch (error) {
-    throw new Error(`invalid image data: ${errorMessage(error)}`);
-  }
-}
-
-async function normalizeImageMediaFile(file, index, options = {}) {
-  const inputFile = requiredPlainObject(file, `media.files[${index}]`);
-  const originalName = String(inputFile.name ?? "image").trim() || "image";
-  const originalMimeType = String(inputFile.mimeType ?? "").trim().toLowerCase();
-  const part = await nativeImageInputPartForMediaFile(inputFile, index, options);
-  const converted = originalMimeType && originalMimeType !== part.mimeType;
-  return {
-    kind: "image",
-    name: originalName,
-    mimeType: part.mimeType,
-    sizeBytes: Buffer.from(part.data, "base64").length,
-    dataUrl: `data:${part.mimeType};base64,${part.data}`,
-    detail: part.detail || "auto",
-    ...(converted ? { originalName, originalMimeType, convertedFrom: originalMimeType } : {}),
-  };
-}
-
-async function normalizeImageCaptureMedia(media, options = {}) {
-  const inputMedia = requiredPlainObject(media, "image capture media");
-  if (!Array.isArray(inputMedia.files) || inputMedia.files.length !== 1) {
-    throw new Error("image capture media.files must be one image file");
-  }
-  return {
-    schemaVersion: 1,
-    files: [await normalizeImageMediaFile(inputMedia.files[0], 0, options)],
-  };
+  const path = String(inputFile.workspacePath ?? "").trim();
+  if (!path) throw new Error(`media.files[${index}].workspacePath is required`);
+  return normalizeBeepInput([
+    { type: "text", text: "image capture" },
+    { type: "localImage", path, detail },
+  ])[1];
 }
 
 async function normalizeCaptureInput(body, options = {}) {
@@ -224,15 +341,44 @@ async function normalizeCaptureInput(body, options = {}) {
     return { ...input, kind, body: String(input.body ?? ""), media: null };
   }
   if (kind === "image") {
-    return { ...input, kind, body: String(input.body ?? ""), media: await normalizeImageCaptureMedia(input.media, options) };
+    throw new Error("image captures must use multipart/form-data");
   }
   throw new Error(`unsupported source artifact kind: ${kind}`);
+}
+
+async function normalizeMultipartCaptureInput(request, options = {}) {
+  const body = await readRequestBuffer(request, MAX_MULTIPART_CAPTURE_BYTES);
+  const parts = parseMultipartFormData(body, multipartBoundary(request));
+  const fields = {};
+  const files = [];
+  for (const part of parts) {
+    if (part.filename) {
+      files.push(part);
+    } else {
+      fields[part.name] = part.data.toString("utf8");
+    }
+  }
+  const kind = String(fields.kind || "image").trim();
+  if (kind !== "image") throw new Error("multipart captures must be image captures");
+  if (files.length !== 1) throw new Error("image capture multipart body must include one image file");
+  const detail = normalizeImageDetail(fields.detail);
+  const file = await normalizeUploadedImageMediaFile(files[0], {
+    detail,
+    workspaceHostPath: options.workspaceHostPath,
+    convertHeifToJpeg: options.convertHeifToJpeg,
+  });
+  return {
+    ...(String(fields.id ?? "").trim() ? { id: String(fields.id).trim() } : {}),
+    kind,
+    body: String(fields.body ?? ""),
+    media: { schemaVersion: 1, files: [file] },
+  };
 }
 
 async function imageInputPartsForSource(source, options = {}) {
   if (source?.kind !== "image") return [];
   const files = Array.isArray(source.media?.files) ? source.media.files : [];
-  return Promise.all(files.map((file, index) => nativeImageInputPartForMediaFile(file, index, options)));
+  return Promise.all(files.map((file, index) => localImageInputPartForMediaFile(file, index, options)));
 }
 
 function replayFor(item) {
@@ -358,6 +504,7 @@ export async function handleNotesRoute({
   requireOperatorAuth,
   forwardRuntimeRequest,
   notesImageConverter,
+  notesWorkspaceHostPath,
 }) {
   requireOperatorAuth(request);
 
@@ -447,8 +594,13 @@ export async function handleNotesRoute({
       sendMethodNotAllowed(response);
       return true;
     }
-    const body = await readJsonBody(request);
-    const source = notesStore.createSourceArtifact(await normalizeCaptureInput(body, { convertHeifToJpeg: notesImageConverter }));
+    const input = isMultipartFormData(request)
+      ? await normalizeMultipartCaptureInput(request, {
+          workspaceHostPath: notesWorkspaceHostPath,
+          convertHeifToJpeg: notesImageConverter,
+        })
+      : await normalizeCaptureInput(await readJsonBody(request), { convertHeifToJpeg: notesImageConverter });
+    const source = notesStore.createSourceArtifact(input);
     sendJson(response, 200, { ok: true, source });
     return true;
   }
