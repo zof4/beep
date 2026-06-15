@@ -131,7 +131,23 @@ function stagePrompt(stage, context) {
     `Source artifact: ${context.sourceArtifactId || "none"}.`,
     "Return JSON only with optional arrays: comments, proposals, derivedArtifacts.",
     "Do not mutate original user content. Create comments and proposals only.",
+    ...(Array.isArray(context.attachments) && context.attachments.length > 0
+      ? ["Attached images are part of the original capture. Inspect those image input parts directly."]
+      : []),
   ].join("\n");
+}
+
+function attachmentInputParts(context) {
+  if (context.attachments === undefined) return [];
+  if (!Array.isArray(context.attachments)) throw new Error("attachments must be an array");
+  return context.attachments.map((part) => structuredClone(part));
+}
+
+function nativeInputForStage(stage, context) {
+  return [
+    { type: "text", text: stagePrompt(stage, context) },
+    ...attachmentInputParts(context),
+  ];
 }
 
 export class NotesBeepGateway {
@@ -147,7 +163,7 @@ export class NotesBeepGateway {
     }
     if (this.mode === "localAgent") {
       if (!this.submitToAgent) throw new Error("submitToAgent is required for localAgent mode");
-      const result = await this.submitToAgent({ message: stagePrompt(stage, context), stage, context });
+      const result = await this.submitToAgent({ input: nativeInputForStage(stage, context), stage, context });
       return validateStageOutput(parseAgentJson(result));
     }
     throw new Error(`unsupported Beep gateway mode: ${this.mode}`);

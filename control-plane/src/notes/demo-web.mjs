@@ -79,10 +79,20 @@ const HTML = `<!doctype html>
           <form id="captureForm" class="entry-surface">
             <div class="section-heading">
               <h3>Original capture</h3>
-              <span>text</span>
+              <span id="captureKindLabel">text</span>
             </div>
+            <label class="field-label" for="captureKindSelect">Capture type</label>
+            <select id="captureKindSelect" name="kind">
+              <option value="text">Text</option>
+              <option value="image">Image</option>
+            </select>
             <label class="field-label" for="captureBodyInput">Capture text</label>
-            <textarea id="captureBodyInput" name="body" placeholder="Captured notebook text, voice transcript, or paste"></textarea>
+            <textarea id="captureBodyInput" name="body" placeholder="Captured notebook text, voice transcript, paste, or image caption"></textarea>
+            <div id="imageCaptureFields" class="image-fields" hidden>
+              <label class="field-label" for="imageCaptureInput">Image file</label>
+              <input id="imageCaptureInput" name="image" type="file" accept="image/png,image/jpeg,image/webp">
+              <div id="imagePreview" class="image-preview empty-state">No image selected.</div>
+            </div>
             <button id="processCaptureButton" type="submit">Create and process capture</button>
           </form>
         </section>
@@ -434,6 +444,34 @@ h4 {
   padding: 14px;
 }
 
+.image-fields {
+  display: grid;
+  gap: 8px;
+}
+
+.image-fields[hidden] {
+  display: none;
+}
+
+.image-preview {
+  align-items: center;
+  background: var(--surface-muted);
+  border: 1px dashed var(--line);
+  border-radius: var(--radius);
+  display: grid;
+  min-height: 120px;
+  overflow: hidden;
+  padding: 8px;
+}
+
+.image-preview img,
+.source-image {
+  border-radius: 6px;
+  max-height: 240px;
+  object-fit: contain;
+  width: 100%;
+}
+
 .selected-item {
   border-bottom: 1px solid var(--line);
   padding-bottom: 12px;
@@ -499,12 +537,16 @@ h4 {
 
 const JS = `const TOKEN_KEY = "beep-notes-operator-token";
 const PROMOTABLE_PROPOSAL_KINDS = new Set(["todo", "calendarBlock", "research"]);
+const IMAGE_CAPTURE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/webp"]);
+const MAX_IMAGE_CAPTURE_BYTES = 12 * 1024 * 1024;
 
 const state = {
   workspace: null,
   selectedItemId: null,
   selectedSourceId: null,
   itemType: "note",
+  captureKind: "text",
+  captureImage: null,
 };
 
 const elements = {
@@ -523,7 +565,12 @@ const elements = {
   createNoteButton: document.getElementById("createNoteButton"),
   createTodoButton: document.getElementById("createTodoButton"),
   captureForm: document.getElementById("captureForm"),
+  captureKindSelect: document.getElementById("captureKindSelect"),
+  captureKindLabel: document.getElementById("captureKindLabel"),
   captureBodyInput: document.getElementById("captureBodyInput"),
+  imageCaptureFields: document.getElementById("imageCaptureFields"),
+  imageCaptureInput: document.getElementById("imageCaptureInput"),
+  imagePreview: document.getElementById("imagePreview"),
   processCaptureButton: document.getElementById("processCaptureButton"),
   askBeepButton: document.getElementById("askBeepButton"),
   lockToggleButton: document.getElementById("lockToggleButton"),
@@ -626,6 +673,11 @@ function shortDate(value) {
   return Number.isNaN(date.getTime()) ? "" : date.toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 }
 
+function formatBytes(value) {
+  if (!Number.isFinite(value)) return "";
+  return value >= 1024 * 1024 ? \`\${(value / (1024 * 1024)).toFixed(1)} MB\` : \`\${Math.max(1, Math.round(value / 1024))} KB\`;
+}
+
 function renderWorkspace() {
   const workspace = state.workspace;
   if (!workspace) return;
@@ -671,6 +723,27 @@ function appendRecord(node, title, body, meta = "") {
   return row;
 }
 
+function sourceImageFile(source) {
+  return source?.kind === "image" && Array.isArray(source.media?.files) ? source.media.files[0] || null : null;
+}
+
+function renderSourceRecord(node, source) {
+  const file = sourceImageFile(source);
+  const title = file ? "Image capture" : "Original capture";
+  const body = source.body || file?.name || "Empty capture";
+  const row = appendRecord(node, title, body, shortDate(source.createdAt));
+  if (file?.dataUrl) {
+    const image = document.createElement("img");
+    image.className = "source-image";
+    image.src = file.dataUrl;
+    image.alt = file.name || "Captured image";
+    row.append(image);
+    const meta = [file.mimeType, formatBytes(file.sizeBytes)].filter(Boolean).join(" | ");
+    if (meta) row.append(text("div", meta, "row-meta"));
+  }
+  return row;
+}
+
 function renderSelection() {
   const item = selectedItem();
   if (!item) {
@@ -679,7 +752,7 @@ function renderSelection() {
     if (source) {
       clearChildren(elements.sourceLayer);
       elements.sourceLayer.className = "layer-stack";
-      appendRecord(elements.sourceLayer, "Original capture", source.body || "Empty capture", shortDate(source.createdAt));
+      renderSourceRecord(elements.sourceLayer, source);
       const derived = (source.derivedArtifactIds || []).map((id) => state.workspace?.derivedArtifacts?.[id]).filter(Boolean);
       clearChildren(elements.derivedLayer);
       elements.derivedLayer.className = "layer-stack";
@@ -715,7 +788,7 @@ function renderSelection() {
   elements.sourceLayer.className = "layer-stack";
   if (source) {
     state.selectedSourceId = source.id;
-    appendRecord(elements.sourceLayer, "Original capture", source.body || "Empty capture", shortDate(source.createdAt));
+    renderSourceRecord(elements.sourceLayer, source);
   } else {
     empty(elements.sourceLayer, "This item has no original capture.");
   }
@@ -816,13 +889,69 @@ async function createItem(type) {
   await loadWorkspace();
 }
 
-async function processCapture() {
+function readImageFile(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.addEventListener("load", () => resolve(reader.result));
+    reader.addEventListener("error", () => reject(reader.error || new Error("Image could not be read.")));
+    reader.readAsDataURL(file);
+  });
+}
+
+function renderImagePreview() {
+  clearChildren(elements.imagePreview);
+  if (!state.captureImage) {
+    elements.imagePreview.className = "image-preview empty-state";
+    elements.imagePreview.textContent = "No image selected.";
+    return;
+  }
+  elements.imagePreview.className = "image-preview";
+  const image = document.createElement("img");
+  image.src = state.captureImage.dataUrl;
+  image.alt = state.captureImage.name || "Selected image";
+  elements.imagePreview.append(image);
+  elements.imagePreview.append(text("div", \`\${state.captureImage.name} | \${formatBytes(state.captureImage.sizeBytes)}\`, "row-meta"));
+}
+
+async function updateCaptureImage() {
+  const file = elements.imageCaptureInput.files?.[0] || null;
+  if (!file) {
+    state.captureImage = null;
+    renderImagePreview();
+    return;
+  }
+  if (!IMAGE_CAPTURE_MIME_TYPES.has(file.type)) throw new Error(\`Unsupported image type: \${file.type || "unknown"}\`);
+  if (file.size > MAX_IMAGE_CAPTURE_BYTES) throw new Error("Image must be 12 MB or smaller.");
+  const dataUrl = await readImageFile(file);
+  if (typeof dataUrl !== "string" || !dataUrl.startsWith(\`data:\${file.type};base64,\`)) {
+    throw new Error("Image could not be encoded as a data URL.");
+  }
+  state.captureImage = {
+    name: file.name || "image",
+    mimeType: file.type,
+    sizeBytes: file.size,
+    dataUrl,
+    detail: "auto",
+  };
+  renderImagePreview();
+}
+
+function buildCapturePayload() {
   const body = elements.captureBodyInput.value.trim();
+  if (state.captureKind === "image") {
+    if (!state.captureImage) throw new Error("An image file is required.");
+    return { kind: "image", body, media: { files: [state.captureImage] } };
+  }
   if (!body) throw new Error("Capture text is required.");
+  return { kind: "text", body };
+}
+
+async function processCapture() {
+  const capture = buildCapturePayload();
   setStatus("Creating original capture...");
   const created = await api("/api/notes/captures", {
     method: "POST",
-    body: { kind: "text", body },
+    body: capture,
   });
   state.selectedSourceId = created.source.id;
   setStatus("Processing capture...");
@@ -831,6 +960,9 @@ async function processCapture() {
     body: runOptions(),
   });
   elements.captureBodyInput.value = "";
+  elements.imageCaptureInput.value = "";
+  state.captureImage = null;
+  renderImagePreview();
   await loadWorkspace();
 }
 
@@ -899,6 +1031,15 @@ function setItemType(type) {
   elements.itemBodyInput.placeholder = type === "todo" ? "Todo details" : "Write a note";
 }
 
+function setCaptureKind(kind) {
+  state.captureKind = kind === "image" ? "image" : "text";
+  elements.captureKindSelect.value = state.captureKind;
+  elements.captureKindLabel.textContent = state.captureKind;
+  elements.imageCaptureFields.hidden = state.captureKind !== "image";
+  elements.captureBodyInput.placeholder =
+    state.captureKind === "image" ? "Optional caption, context, or instruction" : "Captured notebook text, voice transcript, or paste";
+}
+
 function init() {
   elements.operatorTokenInput.value = localStorage.getItem(TOKEN_KEY) || "";
   elements.operatorTokenInput.addEventListener("change", saveToken);
@@ -909,6 +1050,16 @@ function init() {
   });
   elements.createNoteButton.addEventListener("click", () => setItemType("note"));
   elements.createTodoButton.addEventListener("click", () => setItemType("todo"));
+  elements.captureKindSelect.addEventListener("change", () => setCaptureKind(elements.captureKindSelect.value));
+  elements.imageCaptureInput.addEventListener("change", async () => {
+    try {
+      await updateCaptureImage();
+    } catch (error) {
+      state.captureImage = null;
+      renderImagePreview();
+      setStatus(error instanceof Error ? error.message : String(error), true);
+    }
+  });
   bindAsync(elements.refreshWorkspaceButton, "click", loadWorkspace);
   bindAsync(elements.itemForm, "submit", () => createItem(state.itemType));
   bindAsync(elements.captureForm, "submit", processCapture);
@@ -916,6 +1067,8 @@ function init() {
   bindAsync(elements.lockToggleButton, "click", toggleLock);
   elements.askBeepButton.disabled = true;
   elements.lockToggleButton.disabled = true;
+  setCaptureKind("text");
+  renderImagePreview();
   if (token()) {
     loadWorkspace().catch((error) => setStatus(error instanceof Error ? error.message : String(error), true));
   }

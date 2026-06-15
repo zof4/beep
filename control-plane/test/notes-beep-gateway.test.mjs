@@ -279,7 +279,7 @@ test("replay gateway rejects null canned output", async () => {
   );
 });
 
-test("local agent gateway calls injected submitter with stage prompt", async () => {
+test("local agent gateway calls injected submitter with native input parts", async () => {
   const calls = [];
   const gateway = new NotesBeepGateway({
     mode: "localAgent",
@@ -293,10 +293,22 @@ test("local agent gateway calls injected submitter with stage prompt", async () 
     },
   });
 
-  const output = await gateway.runStage("agentCommentary", { targetItemId: "item_1" });
+  const output = await gateway.runStage("agentCommentary", {
+    targetItemId: "item_1",
+    attachments: [{ type: "image", mimeType: "image/png", data: "ZmFrZQ==", detail: "high" }],
+  });
 
   assert.equal(calls.length, 1);
-  assert.match(calls[0].message, /Return JSON only/u);
+  assert.equal(Object.hasOwn(calls[0], "message"), false);
+  assert.equal(calls[0].input.length, 2);
+  assert.equal(calls[0].input[0].type, "text");
+  assert.match(calls[0].input[0].text, /Return JSON only/u);
+  assert.deepEqual(calls[0].input[1], {
+    type: "image",
+    mimeType: "image/png",
+    data: "ZmFrZQ==",
+    detail: "high",
+  });
   assert.equal(output.comments[0].body, "Agent comment.");
 });
 

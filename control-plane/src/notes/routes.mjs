@@ -1,9 +1,14 @@
 import { randomBytes } from "node:crypto";
+import { normalizeBeepInput } from "../../../shared/native-input.mjs";
 import { readJsonBody, sendJson } from "../http-utils.mjs";
 import { NotesBeepGateway } from "./beep-gateway.mjs";
 import { createPipelineRun, runPipeline } from "./pipeline-engine.mjs";
 import { readItemForBeep } from "./workspace-domain.mjs";
 import { NotesWorkspaceStore } from "./workspace-store.mjs";
+
+const NOTES_IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/webp"]);
+const IMAGE_DETAIL_VALUES = new Set(["low", "high", "original", "auto"]);
+const MAX_INLINE_IMAGE_BYTES = 12 * 1024 * 1024;
 
 function newRouteId(prefix) {
   return `${prefix}_${Date.now().toString(36)}_${randomBytes(6).toString("base64url")}`;
@@ -54,6 +59,104 @@ function titleFromText(text, fallback) {
   const normalized = String(text ?? "").trim().replace(/\s+/gu, " ");
   if (!normalized) return fallback;
   return normalized.length > 80 ? `${normalized.slice(0, 77)}...` : normalized;
+}
+
+function isPlainObject(value) {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function requiredPlainObject(value, fieldName) {
+  if (!isPlainObject(value)) throw new Error(`${fieldName} must be an object`);
+  return value;
+}
+
+function normalizeImageDetail(value) {
+  if (value === undefined || value === null || value === "") return "auto";
+  const detail = String(value).trim();
+  if (!IMAGE_DETAIL_VALUES.has(detail)) throw new Error("image detail must be low, high, original, or auto");
+  return detail;
+}
+
+function parseImageDataUrl(value, expectedMimeType) {
+  if (typeof value !== "string" || value.trim() === "") {
+    throw new Error("invalid image data URL");
+  }
+  const match = value.trim().match(/^data:([^;,]+);base64,([A-Za-z0-9+/]*={0,2})$/u);
+  if (!match) throw new Error("invalid image data URL");
+  const mimeType = match[1].toLowerCase();
+  if (mimeType !== expectedMimeType) {
+    throw new Error(`invalid image data URL MIME: expected ${expectedMimeType}`);
+  }
+  return { mimeType, data: match[2] };
+}
+
+function nativeImageInputPartForMediaFile(file, index) {
+  const inputFile = requiredPlainObject(file, `media.files[${index}]`);
+  const mimeType = String(inputFile.mimeType ?? "").trim().toLowerCase();
+  if (!NOTES_IMAGE_MIME_TYPES.has(mimeType)) {
+    throw new Error(`unsupported image MIME type: ${mimeType || "unknown"}`);
+  }
+  const detail = normalizeImageDetail(inputFile.detail);
+  const { data } = parseImageDataUrl(inputFile.dataUrl, mimeType);
+  try {
+    const normalized = normalizeBeepInput(
+      [
+        { type: "text", text: "image capture" },
+        { type: "image", mimeType, data, detail },
+      ],
+      {
+        maxInlineImageBytes: MAX_INLINE_IMAGE_BYTES,
+        maxTotalInlineImageBytes: MAX_INLINE_IMAGE_BYTES,
+      },
+    );
+    return normalized[1];
+  } catch (error) {
+    throw new Error(`invalid image data: ${errorMessage(error)}`);
+  }
+}
+
+function normalizeImageMediaFile(file, index) {
+  const inputFile = requiredPlainObject(file, `media.files[${index}]`);
+  const part = nativeImageInputPartForMediaFile(inputFile, index);
+  return {
+    kind: "image",
+    name: String(inputFile.name ?? "image").trim() || "image",
+    mimeType: part.mimeType,
+    sizeBytes: Buffer.from(part.data, "base64").length,
+    dataUrl: `data:${part.mimeType};base64,${part.data}`,
+    detail: part.detail || "auto",
+  };
+}
+
+function normalizeImageCaptureMedia(media) {
+  const inputMedia = requiredPlainObject(media, "image capture media");
+  if (!Array.isArray(inputMedia.files) || inputMedia.files.length !== 1) {
+    throw new Error("image capture media.files must be one image file");
+  }
+  return {
+    schemaVersion: 1,
+    files: [normalizeImageMediaFile(inputMedia.files[0], 0)],
+  };
+}
+
+function normalizeCaptureInput(body) {
+  const input = requiredPlainObject(body, "capture body");
+  const kind = String(input.kind || "text").trim();
+  if (kind === "text") {
+    return { ...input, kind, body: String(input.body ?? ""), media: null };
+  }
+  if (kind === "image") {
+    return { ...input, kind, body: String(input.body ?? ""), media: normalizeImageCaptureMedia(input.media) };
+  }
+  throw new Error(`unsupported source artifact kind: ${kind}`);
+}
+
+function imageInputPartsForSource(source) {
+  if (source?.kind !== "image") return [];
+  const files = Array.isArray(source.media?.files) ? source.media.files : [];
+  return files.map((file, index) => nativeImageInputPartForMediaFile(file, index));
 }
 
 function replayFor(item) {
@@ -132,10 +235,10 @@ function gatewayFor({ body, replay, forwardRuntimeRequest }) {
   if (body.beepMode === "localAgent") {
     return new NotesBeepGateway({
       mode: "localAgent",
-      submitToAgent: async ({ message }) =>
+      submitToAgent: async ({ input }) =>
         forwardRuntimeRequest("/agent/submit", {
           method: "POST",
-          body: { message, waitForCompletion: true },
+          body: { input, waitForCompletion: true },
         }),
     });
   }
@@ -143,7 +246,7 @@ function gatewayFor({ body, replay, forwardRuntimeRequest }) {
   return new NotesBeepGateway({ mode: "replay", replay });
 }
 
-async function runNotesPipeline({ notesStore, body, replay, forwardRuntimeRequest, runInput }) {
+async function runNotesPipeline({ notesStore, body, replay, forwardRuntimeRequest, runInput, context = {} }) {
   const run = createPipelineRun({
     id: newRouteId("run"),
     reviewPolicy: body.reviewPolicy,
@@ -151,6 +254,7 @@ async function runNotesPipeline({ notesStore, body, replay, forwardRuntimeReques
   });
   const completedRun = await runPipeline(run, {
     gateway: gatewayFor({ body, replay, forwardRuntimeRequest }),
+    context,
   });
   const materialized = materializeOutputs(notesStore, completedRun);
   const storedRun = notesStore.upsertRun(completedRun);
@@ -260,10 +364,7 @@ export async function handleNotesRoute({ request, response, pathname, store, req
       return true;
     }
     const body = await readJsonBody(request);
-    const source = notesStore.createSourceArtifact({
-      ...body,
-      kind: body.kind || "text",
-    });
+    const source = notesStore.createSourceArtifact(normalizeCaptureInput(body));
     sendJson(response, 200, { ok: true, source });
     return true;
   }
@@ -286,6 +387,7 @@ export async function handleNotesRoute({ request, response, pathname, store, req
       replay: replayForSource(source),
       forwardRuntimeRequest,
       runInput: { kind: "processNote", sourceArtifactId: source.id },
+      context: { attachments: imageInputPartsForSource(source) },
     });
     sendJson(response, 200, { ok: true, ...result });
     return true;

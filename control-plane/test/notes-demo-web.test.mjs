@@ -83,7 +83,10 @@ test("/notes serves the product demo HTML without operator auth", async () => {
     assert.match(result.body, /Readable rendition/u);
     assert.match(result.body, /<label class="field-label" for="itemTitleInput">Title<\/label>/u);
     assert.match(result.body, /<label class="field-label" for="itemBodyInput">Body<\/label>/u);
+    assert.match(result.body, /<label class="field-label" for="captureKindSelect">Capture type<\/label>/u);
     assert.match(result.body, /<label class="field-label" for="captureBodyInput">Capture text<\/label>/u);
+    assert.match(result.body, /<label class="field-label" for="imageCaptureInput">Image file<\/label>/u);
+    assert.match(result.body, /id="imagePreview"/u);
   } finally {
     cleanup();
   }
@@ -104,6 +107,10 @@ test("/notes/app.js serves demo JavaScript with core product controls", async ()
     assert.match(result.body, /askBeep/u);
     assert.match(result.body, /reviewPolicy/u);
     assert.match(result.body, /beepMode/u);
+    assert.match(result.body, /captureKind/u);
+    assert.match(result.body, /FileReader/u);
+    assert.match(result.body, /buildCapturePayload/u);
+    assert.match(result.body, /renderSourceRecord/u);
     assert.match(result.body, /state\.selectedSourceId = item\.sourceArtifactIds\?\.\[0\] \|\| null/u);
     assert.match(result.body, /sourceIds\.includes\(state\.selectedSourceId\)/u);
     assert.match(result.body, /sortedRecords\(state\.workspace\?\.runs, state\.workspace\?\.runOrder\)\.slice\(0, 8\)/u);

@@ -66,6 +66,12 @@ async function call(handler, method, url, body, headers) {
   return captured.json();
 }
 
+function runtimePromptFromSubmitBody(body) {
+  const { input } = JSON.parse(body);
+  assert.ok(Array.isArray(input), "runtime submit body should contain native input parts");
+  return input.find((part) => part?.type === "text")?.text || "";
+}
+
 test("notes workspace route requires operator auth", async () => {
   const { handler, cleanup } = tempHandler();
   try {
@@ -137,7 +143,7 @@ test("ask-beep route localAgent parses nested runtime finalText", async () => {
   const { handler, auth, cleanup } = tempHandler({
     proxyToRuntime: async (path, options) => {
       runtimeCalls.push({ path, options });
-      const { message } = JSON.parse(options.body);
+      const message = runtimePromptFromSubmitBody(options.body);
       const stageOutput = message.includes("agentCommentary")
         ? {
             comments: [{ targetId: "item_local", body: "Nested runtime comment.", sourceItemIds: ["item_local"] }],
@@ -170,6 +176,9 @@ test("ask-beep route localAgent parses nested runtime finalText", async () => {
 
     assert.equal(asked.statusCode, 200);
     assert.equal(runtimeCalls.every((callRecord) => callRecord.path === "/agent/submit"), true);
+    const submitted = JSON.parse(runtimeCalls[0].options.body);
+    assert.equal(Object.hasOwn(submitted, "message"), false);
+    assert.equal(submitted.waitForCompletion, true);
     assert.equal(asked.payload.run.status, "completed");
     assert.equal(asked.payload.comments[0].body, "Nested runtime comment.");
     assert.equal(asked.payload.proposals[0].title, "Nested runtime todo");
@@ -181,7 +190,7 @@ test("ask-beep route localAgent parses nested runtime finalText", async () => {
 test("item read route returns item-derived artifacts from ask-beep materialization", async () => {
   const { handler, auth, cleanup } = tempHandler({
     proxyToRuntime: async (path, options) => {
-      const { message } = JSON.parse(options.body);
+      const message = runtimePromptFromSubmitBody(options.body);
       const stageOutput = message.includes("agentCommentary")
         ? {
             comments: [{ targetId: "item_derived", body: "Derived artifact comment.", sourceItemIds: ["item_derived"] }],
@@ -344,7 +353,7 @@ test("proposal accept route promotes a todo", async () => {
 test("proposal accept route maps non-promotable proposal kinds to client errors", async () => {
   const { handler, auth, cleanup } = tempHandler({
     proxyToRuntime: async (path, options) => {
-      const { message } = JSON.parse(options.body);
+      const message = runtimePromptFromSubmitBody(options.body);
       const stageOutput = message.includes("draftExtraction")
         ? {
             proposals: [{ kind: "comment", title: "Comment only", body: "Do not promote.", sourceItemIds: ["item_comment"] }],
@@ -392,6 +401,90 @@ test("capture processing route materializes derived artifacts", async () => {
     assert.equal(processed.statusCode, 200);
     assert.equal(processed.payload.run.status, "completed");
     assert.equal(processed.payload.derivedArtifacts.length >= 1, true);
+  } finally {
+    cleanup();
+  }
+});
+
+test("capture processing route localAgent forwards image capture as native input", async () => {
+  const runtimeBodies = [];
+  const imageData = Buffer.from("fake-image").toString("base64");
+  const { handler, auth, cleanup } = tempHandler({
+    proxyToRuntime: async (path, options) => {
+      assert.equal(path, "/agent/submit");
+      const body = JSON.parse(options.body);
+      runtimeBodies.push(body);
+      const message = body.input.find((part) => part?.type === "text")?.text || "";
+      const stageOutput = message.includes("readableRendition")
+        ? {
+            derivedArtifacts: [
+              { kind: "readableRendition", body: "Photo shows a whiteboard note.", sourceArtifactIds: ["src_image"] },
+            ],
+          }
+        : {};
+      return { ok: true, finalText: JSON.stringify(stageOutput) };
+    },
+  });
+  try {
+    const source = await call(
+      handler,
+      "POST",
+      "/api/notes/captures",
+      {
+        id: "src_image",
+        kind: "image",
+        body: "Whiteboard capture",
+        media: {
+          files: [
+            {
+              name: "whiteboard.png",
+              mimeType: "image/png",
+              sizeBytes: Buffer.byteLength("fake-image"),
+              dataUrl: `data:image/png;base64,${imageData}`,
+            },
+          ],
+        },
+      },
+      auth,
+    );
+    const processed = await call(
+      handler,
+      "POST",
+      `/api/notes/captures/${source.payload.source.id}/process`,
+      { beepMode: "localAgent", reviewPolicy: "autopilot" },
+      auth,
+    );
+
+    assert.equal(source.statusCode, 200);
+    assert.equal(source.payload.source.media.files[0].mimeType, "image/png");
+    assert.equal(processed.statusCode, 200);
+    assert.equal(runtimeBodies.length > 0, true);
+    assert.equal(runtimeBodies.every((body) => Object.hasOwn(body, "message") === false), true);
+    assert.equal(runtimeBodies.every((body) => body.input.some((part) => part?.type === "image")), true);
+    assert.deepEqual(runtimeBodies[0].input.find((part) => part?.type === "image"), {
+      type: "image",
+      mimeType: "image/png",
+      data: imageData,
+      detail: "auto",
+    });
+  } finally {
+    cleanup();
+  }
+});
+
+test("capture route rejects unsupported image media", async () => {
+  const { handler, auth, cleanup } = tempHandler();
+  try {
+    const rejected = await call(
+      handler,
+      "POST",
+      "/api/notes/captures",
+      { kind: "image", body: "bad", media: { files: [{ mimeType: "image/gif", dataUrl: "data:image/gif;base64,R0lGODlh" }] } },
+      auth,
+    );
+
+    assert.equal(rejected.statusCode, 400);
+    assert.match(rejected.payload.error, /unsupported image MIME type: image\/gif/u);
   } finally {
     cleanup();
   }
