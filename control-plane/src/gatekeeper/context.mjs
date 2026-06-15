@@ -11,6 +11,41 @@ function textFromValue(value, maxChars = 20_000) {
   }
 }
 
+function isPlainObject(value) {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function textFromInputSummary(inputSummary) {
+  if (!isPlainObject(inputSummary)) return "";
+  return typeof inputSummary.textPreview === "string" ? inputSummary.textPreview.trim() : "";
+}
+
+function textFromInputParts(input) {
+  if (!Array.isArray(input)) return "";
+  return input
+    .filter((part) => isPlainObject(part) && part.type === "text" && typeof part.text === "string")
+    .map((part) => part.text.trim())
+    .filter(Boolean)
+    .join(" ")
+    .replace(/\s+/gu, " ")
+    .slice(0, 20_000);
+}
+
+function userTextFromRequest(request) {
+  const summaryText = textFromInputSummary(request.inputSummary);
+  if (summaryText) return summaryText;
+
+  const redactedInputText = textFromInputParts(request.redactedInput);
+  if (redactedInputText) return redactedInputText;
+
+  const inputText = textFromInputParts(request.input);
+  if (inputText) return inputText;
+
+  return typeof request.message === "string" ? request.message.trim() : "";
+}
+
 async function fetchRuntimeJson(path, { runtimeManager = null, timeoutMs = 1500, headers = {} } = {}) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -36,15 +71,16 @@ function collectRuntimeRequestText(requestsPayload) {
   const requests = Array.isArray(requestsPayload?.requests) ? requestsPayload.requests : [];
   return requests
     .slice(0, 8)
-    .map((request) =>
-      [
+    .map((request) => {
+      const userText = userTextFromRequest(request);
+      return [
         `request ${request.id || "unknown"} status=${request.status || "unknown"}`,
-        request.message ? `user: ${request.message}` : null,
+        userText ? `user: ${userText}` : null,
         request.finalText ? `assistant-final: ${request.finalText}` : null,
       ]
         .filter(Boolean)
-        .join("\n"),
-    )
+        .join("\n");
+    })
     .join("\n\n");
 }
 
@@ -60,15 +96,16 @@ function collectControlPlaneRequestText(store, runtimeId, toolCallId) {
   return store
     .listAgentRequests({ runtimeId, limit: 12 })
     .filter((request) => requestMatchesToolCall(request, toolCallId))
-    .map((request) =>
-      [
+    .map((request) => {
+      const userText = userTextFromRequest(request);
+      return [
         `control-plane-request ${request.requestId || "unknown"} status=${request.status || "unknown"}`,
         request.runtimeRequestId ? `runtime-request-id: ${request.runtimeRequestId}` : null,
-        request.message ? `user: ${request.message}` : null,
+        userText ? `user: ${userText}` : null,
       ]
         .filter(Boolean)
-        .join("\n"),
-    )
+        .join("\n");
+    })
     .join("\n\n");
 }
 

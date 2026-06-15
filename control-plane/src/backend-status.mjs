@@ -1,3 +1,5 @@
+import { redactBeepInput, summarizeBeepInput } from "../../shared/native-input.mjs";
+
 const RUNTIME_STOPPED_ERROR = "runtime is not running";
 const UNSAFE_RUNTIME_STATUS_KEYS = new Set([
   "cwd",
@@ -72,17 +74,37 @@ function projectFields(record, fields) {
   return projected;
 }
 
+function publicInputSummary(record) {
+  if (record?.inputSummary) return sanitizeNativeInputObject(record.inputSummary);
+  if (!Array.isArray(record?.input) || record.input.length === 0) return null;
+  try {
+    return sanitizeNativeInputObject(summarizeBeepInput(record.input));
+  } catch {
+    return null;
+  }
+}
+
+function publicRedactedInput(record) {
+  if (!Array.isArray(record?.input) || record.input.length === 0) return [];
+  try {
+    return sanitizeNativeInputObject(redactBeepInput(record.input));
+  } catch {
+    return [];
+  }
+}
+
 function projectAgentRequest(request) {
   const projected = projectFields(request, [
     "requestId",
     "runtimeId",
     "runtimeRequestId",
     "status",
-    "message",
     "error",
     "createdAt",
     "updatedAt",
   ]);
+  projected.inputSummary = publicInputSummary(request);
+  projected.redactedInput = publicRedactedInput(request);
   if (projected.error !== null) projected.error = redactRuntimeString(projected.error);
   return projected;
 }
@@ -120,6 +142,21 @@ function isUnsafeStatusKey(key) {
 
 function isScalarTelemetry(value) {
   return value === null || typeof value === "number" || typeof value === "boolean";
+}
+
+function sanitizeNativeInputObject(value, key = "") {
+  if (Array.isArray(value)) return value.map((entry) => sanitizeNativeInputObject(entry, key));
+  if (typeof value === "string") {
+    if (["type", "source", "mimeType", "detail", "data"].includes(key)) return value;
+    return redactRuntimeString(value);
+  }
+  if (!isPlainObject(value)) return value;
+
+  const sanitized = {};
+  for (const [nestedKey, nested] of Object.entries(value)) {
+    sanitized[nestedKey] = sanitizeNativeInputObject(nested, nestedKey);
+  }
+  return sanitized;
 }
 
 function sanitizeOperationalObject(value) {

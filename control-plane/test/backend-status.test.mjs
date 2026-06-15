@@ -49,9 +49,22 @@ function operatorHeaders(store) {
 }
 
 function seedStatusState(store) {
+  const inlineImageBytes = "ZmFrZQ==";
   const requestRecord = store.createAgentRequest({
     runtimeId: "local",
-    message: "Create the first usable loop",
+    input: [
+      { type: "text", text: "Create the first usable loop" },
+      { type: "image", mimeType: "image/png", data: inlineImageBytes, detail: "high" },
+    ],
+    inputSummary: {
+      partCount: 2,
+      textPartCount: 1,
+      imagePartCount: 1,
+      localImagePartCount: 0,
+      totalInlineImageBytes: 4,
+      textPreview: "Create the first usable loop",
+      imageParts: [{ index: 1, source: "inline", mimeType: "image/png", byteLength: 4, detail: "high" }],
+    },
     source: "api",
     internalNote: "hidden",
   });
@@ -286,7 +299,8 @@ test("buildBackendStatus aggregates running runtime, memory, control-plane state
     assert.deepEqual(Object.keys(status.controlPlane.recentRequests[0]).sort(), [
       "createdAt",
       "error",
-      "message",
+      "inputSummary",
+      "redactedInput",
       "requestId",
       "runtimeId",
       "runtimeRequestId",
@@ -295,7 +309,14 @@ test("buildBackendStatus aggregates running runtime, memory, control-plane state
     ]);
     assert.equal(status.controlPlane.recentRequests[0].requestId, requestRecord.requestId);
     assert.equal(status.controlPlane.recentRequests[0].runtimeRequestId, "runtime-request-1");
-    assert.equal(status.controlPlane.recentRequests[0].message, "Create the first usable loop");
+    assert.equal(status.controlPlane.recentRequests[0].message, undefined);
+    assert.equal(status.controlPlane.recentRequests[0].input, undefined);
+    assert.equal(status.controlPlane.recentRequests[0].inputSummary.textPreview, "Create the first usable loop");
+    assert.equal(status.controlPlane.recentRequests[0].inputSummary.imageParts[0].byteLength, 4);
+    assert.deepEqual(status.controlPlane.recentRequests[0].redactedInput, [
+      { type: "text", text: "Create the first usable loop" },
+      { type: "image", mimeType: "image/png", byteLength: 4, detail: "high", data: "[redacted]" },
+    ]);
     assert.equal(status.controlPlane.recentRequests[0].error, "runtime failed at [redacted-path] and [redacted-path]");
     assert.equal(status.controlPlane.pendingApprovals.length, 1);
     assert.equal(status.controlPlane.pendingApprovals[0].approvalId, approval.approvalId);
@@ -322,6 +343,7 @@ test("buildBackendStatus aggregates running runtime, memory, control-plane state
     assert.doesNotMatch(serializedRequests, /file:\/\/\/opt/u);
     assert.doesNotMatch(serializedRequests, /src\/db\/connection\.ts/u);
     assert.doesNotMatch(serializedRequests, /\/workspace\/private/u);
+    assert.doesNotMatch(serializedRequests, /ZmFrZQ==/u);
   } finally {
     cleanup();
   }
