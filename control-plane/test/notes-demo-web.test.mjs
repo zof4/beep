@@ -87,6 +87,8 @@ test("/notes serves the product demo HTML without operator auth", async () => {
     assert.match(result.body, /<label class="field-label" for="captureBodyInput">Capture text<\/label>/u);
     assert.match(result.body, /<label class="field-label" for="imageCaptureInput">Image file<\/label>/u);
     assert.match(result.body, /id="imagePreview"/u);
+    assert.match(result.body, /accept="image\/png,image\/jpeg,image\/webp,image\/heic,image\/heif,.heic,.heif"/u);
+    assert.match(result.body, /HEIC\/HEIF uploads convert to JPEG/u);
   } finally {
     cleanup();
   }
@@ -111,6 +113,9 @@ test("/notes/app.js serves demo JavaScript with core product controls", async ()
     assert.match(result.body, /FileReader/u);
     assert.match(result.body, /buildCapturePayload/u);
     assert.match(result.body, /renderSourceRecord/u);
+    assert.match(result.body, /HEIF_CAPTURE_MIME_TYPES/u);
+    assert.match(result.body, /captureMimeType/u);
+    assert.match(result.body, /normalizeFileDataUrl/u);
     assert.match(result.body, /state\.selectedSourceId = item\.sourceArtifactIds\?\.\[0\] \|\| null/u);
     assert.match(result.body, /sourceIds\.includes\(state\.selectedSourceId\)/u);
     assert.match(result.body, /sortedRecords\(state\.workspace\?\.runs, state\.workspace\?\.runOrder\)\.slice\(0, 8\)/u);

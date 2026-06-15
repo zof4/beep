@@ -7,7 +7,10 @@ import test from "node:test";
 import { createControlPlaneHandler } from "../src/server.mjs";
 import { StateStore } from "../src/state-store.mjs";
 
-function tempHandler({ proxyToRuntime = async () => ({ ok: true, finalText: "{}" }) } = {}) {
+function tempHandler({
+  proxyToRuntime = async () => ({ ok: true, finalText: "{}" }),
+  notesImageConverter = undefined,
+} = {}) {
   const dir = mkdtempSync(join(tmpdir(), "beep-notes-routes-test-"));
   const store = new StateStore(dir);
   const operatorToken = store.ensureOperatorToken();
@@ -22,6 +25,7 @@ function tempHandler({ proxyToRuntime = async () => ({ ok: true, finalText: "{}"
     localPortProxy: async () => {
       throw new Error("local port proxy should not be called");
     },
+    notesImageConverter,
   });
   return {
     handler,
@@ -465,6 +469,87 @@ test("capture processing route localAgent forwards image capture as native input
       type: "image",
       mimeType: "image/png",
       data: imageData,
+      detail: "auto",
+    });
+  } finally {
+    cleanup();
+  }
+});
+
+test("capture processing route converts HEIF capture to JPEG native input", async () => {
+  const runtimeBodies = [];
+  const converterCalls = [];
+  const heifData = Buffer.from("fake-heif").toString("base64");
+  const jpegData = Buffer.from("converted-jpeg").toString("base64");
+  const { handler, auth, cleanup } = tempHandler({
+    notesImageConverter: async (input) => {
+      converterCalls.push(input);
+      return { mimeType: "image/jpeg", data: jpegData };
+    },
+    proxyToRuntime: async (path, options) => {
+      assert.equal(path, "/agent/submit");
+      const body = JSON.parse(options.body);
+      runtimeBodies.push(body);
+      const message = body.input.find((part) => part?.type === "text")?.text || "";
+      const stageOutput = message.includes("readableRendition")
+        ? {
+            derivedArtifacts: [
+              { kind: "readableRendition", body: "Converted iPhone photo.", sourceArtifactIds: ["src_heif"] },
+            ],
+          }
+        : {};
+      return { ok: true, finalText: JSON.stringify(stageOutput) };
+    },
+  });
+  try {
+    const source = await call(
+      handler,
+      "POST",
+      "/api/notes/captures",
+      {
+        id: "src_heif",
+        kind: "image",
+        body: "iPhone photo",
+        media: {
+          files: [
+            {
+              name: "IMG_0001.HEIC",
+              mimeType: "image/heic",
+              dataUrl: `data:image/heic;base64,${heifData}`,
+            },
+          ],
+        },
+      },
+      auth,
+    );
+    const processed = await call(
+      handler,
+      "POST",
+      `/api/notes/captures/${source.payload.source.id}/process`,
+      { beepMode: "localAgent", reviewPolicy: "autopilot" },
+      auth,
+    );
+
+    assert.equal(source.statusCode, 200);
+    assert.equal(converterCalls.length, 1);
+    assert.deepEqual(
+      {
+        mimeType: converterCalls[0].mimeType,
+        data: converterCalls[0].data,
+        name: converterCalls[0].name,
+      },
+      { mimeType: "image/heic", data: heifData, name: "IMG_0001.HEIC" },
+    );
+    assert.equal(source.payload.source.media.files[0].mimeType, "image/jpeg");
+    assert.equal(source.payload.source.media.files[0].originalMimeType, "image/heic");
+    assert.equal(source.payload.source.media.files[0].originalName, "IMG_0001.HEIC");
+    assert.equal(source.payload.source.media.files[0].dataUrl, `data:image/jpeg;base64,${jpegData}`);
+    assert.equal(processed.statusCode, 200);
+    assert.equal(runtimeBodies.length > 0, true);
+    assert.deepEqual(runtimeBodies[0].input.find((part) => part?.type === "image"), {
+      type: "image",
+      mimeType: "image/jpeg",
+      data: jpegData,
       detail: "auto",
     });
   } finally {

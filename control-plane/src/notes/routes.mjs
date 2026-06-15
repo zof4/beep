@@ -1,4 +1,8 @@
+import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { normalizeBeepInput } from "../../../shared/native-input.mjs";
 import { readJsonBody, sendJson } from "../http-utils.mjs";
 import { NotesBeepGateway } from "./beep-gateway.mjs";
@@ -6,7 +10,9 @@ import { createPipelineRun, runPipeline } from "./pipeline-engine.mjs";
 import { readItemForBeep } from "./workspace-domain.mjs";
 import { NotesWorkspaceStore } from "./workspace-store.mjs";
 
-const NOTES_IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/webp"]);
+const NATIVE_NOTES_IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/webp"]);
+const HEIF_IMAGE_MIME_TYPES = new Set(["image/heic", "image/heif", "image/heic-sequence", "image/heif-sequence"]);
+const NOTES_IMAGE_MIME_TYPES = new Set([...NATIVE_NOTES_IMAGE_MIME_TYPES, ...HEIF_IMAGE_MIME_TYPES]);
 const IMAGE_DETAIL_VALUES = new Set(["low", "high", "original", "auto"]);
 const MAX_INLINE_IMAGE_BYTES = 12 * 1024 * 1024;
 
@@ -92,7 +98,70 @@ function parseImageDataUrl(value, expectedMimeType) {
   return { mimeType, data: match[2] };
 }
 
-function nativeImageInputPartForMediaFile(file, index) {
+function heifFileExtension(mimeType) {
+  return mimeType.includes("heic") ? ".heic" : ".heif";
+}
+
+function runSipsJpegConversion(inputPath, outputPath) {
+  return new Promise((resolve, reject) => {
+    const child = spawn("/usr/bin/sips", ["-s", "format", "jpeg", inputPath, "--out", outputPath], {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) {
+        resolve();
+        return;
+      }
+      reject(new Error((stderr || stdout || `sips exited with ${code}`).trim()));
+    });
+  });
+}
+
+async function convertHeifToJpegWithSips({ mimeType, data }) {
+  const dir = await mkdtemp(join(tmpdir(), "beep-notes-heif-"));
+  const inputPath = join(dir, `capture${heifFileExtension(mimeType)}`);
+  const outputPath = join(dir, "capture.jpg");
+  try {
+    await writeFile(inputPath, Buffer.from(data, "base64"));
+    await runSipsJpegConversion(inputPath, outputPath);
+    const jpeg = await readFile(outputPath);
+    return { mimeType: "image/jpeg", data: jpeg.toString("base64") };
+  } catch (error) {
+    throw new Error(`invalid HEIF image data: ${errorMessage(error)}`);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+function normalizeNativeImagePart({ mimeType, data, detail }) {
+  if (!NATIVE_NOTES_IMAGE_MIME_TYPES.has(mimeType)) {
+    throw new Error(`unsupported converted image MIME type: ${mimeType || "unknown"}`);
+  }
+  const normalized = normalizeBeepInput(
+    [
+      { type: "text", text: "image capture" },
+      { type: "image", mimeType, data, detail },
+    ],
+    {
+      maxInlineImageBytes: MAX_INLINE_IMAGE_BYTES,
+      maxTotalInlineImageBytes: MAX_INLINE_IMAGE_BYTES,
+    },
+  );
+  return normalized[1];
+}
+
+async function nativeImageInputPartForMediaFile(file, index, { convertHeifToJpeg = convertHeifToJpegWithSips } = {}) {
   const inputFile = requiredPlainObject(file, `media.files[${index}]`);
   const mimeType = String(inputFile.mimeType ?? "").trim().toLowerCase();
   if (!NOTES_IMAGE_MIME_TYPES.has(mimeType)) {
@@ -101,62 +170,69 @@ function nativeImageInputPartForMediaFile(file, index) {
   const detail = normalizeImageDetail(inputFile.detail);
   const { data } = parseImageDataUrl(inputFile.dataUrl, mimeType);
   try {
-    const normalized = normalizeBeepInput(
-      [
-        { type: "text", text: "image capture" },
-        { type: "image", mimeType, data, detail },
-      ],
-      {
-        maxInlineImageBytes: MAX_INLINE_IMAGE_BYTES,
-        maxTotalInlineImageBytes: MAX_INLINE_IMAGE_BYTES,
-      },
-    );
-    return normalized[1];
+    if (!HEIF_IMAGE_MIME_TYPES.has(mimeType)) {
+      return normalizeNativeImagePart({ mimeType, data, detail });
+    }
+    const converted = await convertHeifToJpeg({
+      mimeType,
+      data,
+      detail,
+      name: String(inputFile.name ?? "image").trim() || "image",
+    });
+    return normalizeNativeImagePart({
+      mimeType: String(converted?.mimeType ?? "").trim().toLowerCase(),
+      data: String(converted?.data ?? ""),
+      detail,
+    });
   } catch (error) {
     throw new Error(`invalid image data: ${errorMessage(error)}`);
   }
 }
 
-function normalizeImageMediaFile(file, index) {
+async function normalizeImageMediaFile(file, index, options = {}) {
   const inputFile = requiredPlainObject(file, `media.files[${index}]`);
-  const part = nativeImageInputPartForMediaFile(inputFile, index);
+  const originalName = String(inputFile.name ?? "image").trim() || "image";
+  const originalMimeType = String(inputFile.mimeType ?? "").trim().toLowerCase();
+  const part = await nativeImageInputPartForMediaFile(inputFile, index, options);
+  const converted = originalMimeType && originalMimeType !== part.mimeType;
   return {
     kind: "image",
-    name: String(inputFile.name ?? "image").trim() || "image",
+    name: originalName,
     mimeType: part.mimeType,
     sizeBytes: Buffer.from(part.data, "base64").length,
     dataUrl: `data:${part.mimeType};base64,${part.data}`,
     detail: part.detail || "auto",
+    ...(converted ? { originalName, originalMimeType, convertedFrom: originalMimeType } : {}),
   };
 }
 
-function normalizeImageCaptureMedia(media) {
+async function normalizeImageCaptureMedia(media, options = {}) {
   const inputMedia = requiredPlainObject(media, "image capture media");
   if (!Array.isArray(inputMedia.files) || inputMedia.files.length !== 1) {
     throw new Error("image capture media.files must be one image file");
   }
   return {
     schemaVersion: 1,
-    files: [normalizeImageMediaFile(inputMedia.files[0], 0)],
+    files: [await normalizeImageMediaFile(inputMedia.files[0], 0, options)],
   };
 }
 
-function normalizeCaptureInput(body) {
+async function normalizeCaptureInput(body, options = {}) {
   const input = requiredPlainObject(body, "capture body");
   const kind = String(input.kind || "text").trim();
   if (kind === "text") {
     return { ...input, kind, body: String(input.body ?? ""), media: null };
   }
   if (kind === "image") {
-    return { ...input, kind, body: String(input.body ?? ""), media: normalizeImageCaptureMedia(input.media) };
+    return { ...input, kind, body: String(input.body ?? ""), media: await normalizeImageCaptureMedia(input.media, options) };
   }
   throw new Error(`unsupported source artifact kind: ${kind}`);
 }
 
-function imageInputPartsForSource(source) {
+async function imageInputPartsForSource(source, options = {}) {
   if (source?.kind !== "image") return [];
   const files = Array.isArray(source.media?.files) ? source.media.files : [];
-  return files.map((file, index) => nativeImageInputPartForMediaFile(file, index));
+  return Promise.all(files.map((file, index) => nativeImageInputPartForMediaFile(file, index, options)));
 }
 
 function replayFor(item) {
@@ -274,7 +350,15 @@ function attachedLayers(workspace, item) {
   };
 }
 
-export async function handleNotesRoute({ request, response, pathname, store, requireOperatorAuth, forwardRuntimeRequest }) {
+export async function handleNotesRoute({
+  request,
+  response,
+  pathname,
+  store,
+  requireOperatorAuth,
+  forwardRuntimeRequest,
+  notesImageConverter,
+}) {
   requireOperatorAuth(request);
 
   const notesStore = new NotesWorkspaceStore({ store });
@@ -364,7 +448,7 @@ export async function handleNotesRoute({ request, response, pathname, store, req
       return true;
     }
     const body = await readJsonBody(request);
-    const source = notesStore.createSourceArtifact(normalizeCaptureInput(body));
+    const source = notesStore.createSourceArtifact(await normalizeCaptureInput(body, { convertHeifToJpeg: notesImageConverter }));
     sendJson(response, 200, { ok: true, source });
     return true;
   }
@@ -387,7 +471,7 @@ export async function handleNotesRoute({ request, response, pathname, store, req
       replay: replayForSource(source),
       forwardRuntimeRequest,
       runInput: { kind: "processNote", sourceArtifactId: source.id },
-      context: { attachments: imageInputPartsForSource(source) },
+      context: { attachments: await imageInputPartsForSource(source, { convertHeifToJpeg: notesImageConverter }) },
     });
     sendJson(response, 200, { ok: true, ...result });
     return true;

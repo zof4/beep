@@ -65,7 +65,13 @@ function matchingExposure(store, runtimeId, containerPort) {
   return { ...exposure, hostPort: expectedHostPort };
 }
 
-export function createControlPlaneHandler({ store, runtimeManager, toolBroker, localPortProxy = proxyLocalPort }) {
+export function createControlPlaneHandler({
+  store,
+  runtimeManager,
+  toolBroker,
+  localPortProxy = proxyLocalPort,
+  notesImageConverter = undefined,
+}) {
   function requireRuntimeAuth(request) {
     const expected = `Bearer ${store.ensureRuntimeToken()}`;
     if (request.headers.authorization !== expected) {
@@ -295,6 +301,7 @@ export function createControlPlaneHandler({ store, runtimeManager, toolBroker, l
         store,
         requireOperatorAuth,
         forwardRuntimeRequest,
+        notesImageConverter,
       });
       if (handled) return;
     }

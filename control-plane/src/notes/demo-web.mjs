@@ -90,7 +90,8 @@ const HTML = `<!doctype html>
             <textarea id="captureBodyInput" name="body" placeholder="Captured notebook text, voice transcript, paste, or image caption"></textarea>
             <div id="imageCaptureFields" class="image-fields" hidden>
               <label class="field-label" for="imageCaptureInput">Image file</label>
-              <input id="imageCaptureInput" name="image" type="file" accept="image/png,image/jpeg,image/webp">
+              <input id="imageCaptureInput" name="image" type="file" accept="image/png,image/jpeg,image/webp,image/heic,image/heif,.heic,.heif">
+              <div class="row-meta">HEIC/HEIF uploads convert to JPEG before Beep reads them.</div>
               <div id="imagePreview" class="image-preview empty-state">No image selected.</div>
             </div>
             <button id="processCaptureButton" type="submit">Create and process capture</button>
@@ -537,7 +538,13 @@ h4 {
 
 const JS = `const TOKEN_KEY = "beep-notes-operator-token";
 const PROMOTABLE_PROPOSAL_KINDS = new Set(["todo", "calendarBlock", "research"]);
-const IMAGE_CAPTURE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/webp"]);
+const HEIF_CAPTURE_MIME_TYPES = new Set(["image/heic", "image/heif", "image/heic-sequence", "image/heif-sequence"]);
+const IMAGE_CAPTURE_MIME_TYPES = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/webp",
+  ...HEIF_CAPTURE_MIME_TYPES,
+]);
 const MAX_IMAGE_CAPTURE_BYTES = 12 * 1024 * 1024;
 
 const state = {
@@ -906,11 +913,41 @@ function renderImagePreview() {
     return;
   }
   elements.imagePreview.className = "image-preview";
-  const image = document.createElement("img");
-  image.src = state.captureImage.dataUrl;
-  image.alt = state.captureImage.name || "Selected image";
-  elements.imagePreview.append(image);
+  if (HEIF_CAPTURE_MIME_TYPES.has(state.captureImage.mimeType)) {
+    elements.imagePreview.append(text("div", "HEIC/HEIF selected. Preview appears after conversion.", "row-body"));
+  } else {
+    const image = document.createElement("img");
+    image.src = state.captureImage.dataUrl;
+    image.alt = state.captureImage.name || "Selected image";
+    elements.imagePreview.append(image);
+  }
   elements.imagePreview.append(text("div", \`\${state.captureImage.name} | \${formatBytes(state.captureImage.sizeBytes)}\`, "row-meta"));
+}
+
+function captureMimeType(file) {
+  const browserMimeType = String(file.type || "").trim().toLowerCase();
+  if (IMAGE_CAPTURE_MIME_TYPES.has(browserMimeType)) return browserMimeType;
+  const name = String(file.name || "").toLowerCase();
+  if (name.endsWith(".heic")) return "image/heic";
+  if (name.endsWith(".heif")) return "image/heif";
+  return browserMimeType;
+}
+
+function normalizeFileDataUrl(value, mimeType) {
+  if (typeof value !== "string") throw new Error("Image could not be encoded as a data URL.");
+  const match = value.match(/^data:([^;,]*);base64,([A-Za-z0-9+/]*={0,2})$/u);
+  if (!match) throw new Error("Image could not be encoded as a data URL.");
+  const dataMimeType = match[1].toLowerCase();
+  const data = match[2];
+  if (
+    dataMimeType &&
+    dataMimeType !== mimeType &&
+    dataMimeType !== "application/octet-stream" &&
+    !(HEIF_CAPTURE_MIME_TYPES.has(dataMimeType) && HEIF_CAPTURE_MIME_TYPES.has(mimeType))
+  ) {
+    throw new Error("Image data URL MIME did not match the selected file.");
+  }
+  return \`data:\${mimeType};base64,\${data}\`;
 }
 
 async function updateCaptureImage() {
@@ -920,15 +957,13 @@ async function updateCaptureImage() {
     renderImagePreview();
     return;
   }
-  if (!IMAGE_CAPTURE_MIME_TYPES.has(file.type)) throw new Error(\`Unsupported image type: \${file.type || "unknown"}\`);
+  const mimeType = captureMimeType(file);
+  if (!IMAGE_CAPTURE_MIME_TYPES.has(mimeType)) throw new Error(\`Unsupported image type: \${mimeType || "unknown"}\`);
   if (file.size > MAX_IMAGE_CAPTURE_BYTES) throw new Error("Image must be 12 MB or smaller.");
-  const dataUrl = await readImageFile(file);
-  if (typeof dataUrl !== "string" || !dataUrl.startsWith(\`data:\${file.type};base64,\`)) {
-    throw new Error("Image could not be encoded as a data URL.");
-  }
+  const dataUrl = normalizeFileDataUrl(await readImageFile(file), mimeType);
   state.captureImage = {
     name: file.name || "image",
-    mimeType: file.type,
+    mimeType,
     sizeBytes: file.size,
     dataUrl,
     detail: "auto",
