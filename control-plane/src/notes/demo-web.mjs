@@ -780,6 +780,20 @@ function appendRecord(node, title, body, meta = "") {
   return row;
 }
 
+function runSummaryText(run) {
+  const summary = run.outputs?.runSummary;
+  if (!summary || summary.mode !== "agentOwned") return "";
+  const sampleIdsUsed = Array.isArray(summary.calibration?.sampleIdsUsed)
+    ? summary.calibration.sampleIdsUsed
+    : [];
+  const sampleCount = Number.isFinite(summary.calibration?.sampleCount) ? summary.calibration.sampleCount : 0;
+  const attempts = Array.isArray(summary.attempts) ? summary.attempts : [];
+  const retryCount = attempts.filter((attempt) => attempt?.status === "retry").length;
+  const toolCount = Number.isFinite(summary.tools?.count) ? summary.tools.count : 0;
+  const validation = summary.validation?.ok === false ? "validation failed" : "validated";
+  return \`Agent run | \${summary.thinking || "unknown"} | calibration \${sampleIdsUsed.length}/\${sampleCount} | tools \${toolCount} | retries \${retryCount} | \${validation}\`;
+}
+
 function sourceImageFile(source) {
   return source?.kind === "image" && Array.isArray(source.media?.files) ? source.media.files[0] || null : null;
 }
@@ -932,7 +946,9 @@ function renderRuns() {
   }
   elements.runList.className = "run-list";
   for (const run of runs) {
-    appendRecord(elements.runList, run.kind, \`\${run.reviewPolicy} | \${run.status}\`, shortDate(run.updatedAt || run.createdAt));
+    const row = appendRecord(elements.runList, run.kind, \`\${run.reviewPolicy} | \${run.status}\`, shortDate(run.updatedAt || run.createdAt));
+    const summary = runSummaryText(run);
+    if (summary) row.append(text("div", summary, "row-meta"));
   }
 }
 

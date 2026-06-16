@@ -133,6 +133,21 @@ test("/notes/app.js serves demo JavaScript with core product controls", async ()
   }
 });
 
+test("/notes/app.js includes compact agent-owned run summary rendering", async () => {
+  const { handler, cleanup } = tempHandler();
+  try {
+    const result = await call(handler, "GET", "/notes/app.js");
+
+    assert.equal(result.statusCode, 200);
+    assert.match(result.body, /function runSummaryText/u);
+    assert.match(result.body, /Agent run/u);
+    assert.match(result.body, /calibration/u);
+    assert.match(result.body, /tools/u);
+  } finally {
+    cleanup();
+  }
+});
+
 test("/notes/app.js includes handwriting calibration UI without base64 image reads", async () => {
   const { handler, cleanup } = tempHandler();
   try {
