@@ -1,9 +1,11 @@
 export const DEFAULT_HANDWRITING_PROFILE_ID = "profile_default";
 export const DEFAULT_HANDWRITING_PROMPT_ID = "hw_prompt_v2";
 export const PARTIAL_HANDWRITING_PROMPT_ID = "hw_prompt_v2_partial";
+export const STORY_HANDWRITING_PROMPT_ID = "hw_prompt_v2_story";
 
 const DEFAULT_PROMPT_VERSION = "v2";
 const PARTIAL_PROMPT_VERSION = "v2-partial";
+const STORY_PROMPT_VERSION = "v2-story";
 
 const DEFAULT_COVERAGE = Object.freeze({
   letters: Object.freeze(["a-z", "A-Z"]),
@@ -40,6 +42,10 @@ const PARTIAL_REFERENCE_TEXT = [
   "At the meeting, Jane Walker opened a small notebook and wrote the next action in clear words. The team reviewed the old record, compared the new result, and agreed to send a short answer before noon. Call Alex at 10:30, move option A/B into the archive, mark Q4 review as urgent, and cancel invoice #6190 only after Sam signs. Several marks can look alike in quick handwriting: l, I, 1, O, 0, S, 5, Z, 2, B, 8, m, n, u, v, w, r, and x.",
   "",
   "The quick brown fox jumps over the lazy dog, while five quirky jigsaw boxes vex young Quinn. Zoe packed yellow wax labels, a gray zipper bag, and six blue pens near the window. When a word is uncertain, compare the whole line: the, and, that, with, from, here, there, condition, action, meeting, review, writing, number, result, important, different, continued, and beginning. Write the date, name, amount, and reason on one line when possible. Leave enough space between words, but write naturally with your usual speed, slant, loops, joins, dots, crosses, pressure, baseline, and spacing.",
+].join("\n");
+
+const STORY_REFERENCE_TEXT = [
+  "On a rainy Thursday evening, Maya found a gray zipper bag under the window of the quiet archive. Inside were six blue pens, five yellow wax labels, a folded map, and a note from Quinn asking her to review invoice #6190 before 10:30. She walked past Room 507, called Alex, and wrote the result in her notebook: move option A/B to the old box, send Sam the answer before noon, and mark the Q4 review urgent. Near the loading gate, a quick brown fox jumped over a lazy dog painted on a sign, which made Zoe laugh as she packed the last carton. Because the ink was fading, Maya copied the troublesome shapes with care: l, I, 1, O, 0, S, 5, Z, 2, B, 8, m, n, u, v, w, r, and x. When the train finally arrived, she closed the notebook and kept the page for the morning meeting. The next day, Ben and Helen checked each line for names, dates, amounts, and reasons, then agreed that the strange little story was easier to write than a list.",
 ].join("\n");
 
 function nowIso() {
@@ -102,10 +108,22 @@ export function createPartialHandwritingPrompt({ createdAt = nowIso() } = {}) {
   };
 }
 
+export function createStoryHandwritingPrompt({ createdAt = nowIso() } = {}) {
+  return {
+    id: STORY_HANDWRITING_PROMPT_ID,
+    label: "Story handwriting calibration page",
+    promptVersion: STORY_PROMPT_VERSION,
+    referenceText: STORY_REFERENCE_TEXT,
+    coverage: cloneCoverage(DEFAULT_COVERAGE),
+    createdAt,
+  };
+}
+
 export function createDefaultHandwritingPrompts({ createdAt = nowIso() } = {}) {
   return [
     createDefaultHandwritingPrompt({ createdAt }),
     createPartialHandwritingPrompt({ createdAt }),
+    createStoryHandwritingPrompt({ createdAt }),
   ];
 }
 
