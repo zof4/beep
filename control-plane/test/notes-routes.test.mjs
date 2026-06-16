@@ -414,8 +414,10 @@ test("handwriting default prompt route returns calibration prompt", async () => 
 
     assert.equal(result.statusCode, 200);
     assert.equal(result.payload.ok, true);
-    assert.equal(result.payload.prompt.id, "hw_prompt_v1");
-    assert.match(result.payload.prompt.referenceText, /Monday Jan 5 at 10:30 AM/u);
+    assert.equal(result.payload.prompt.id, "hw_prompt_v2");
+    assert.equal(result.payload.prompt.promptVersion, "v2");
+    assert.match(result.payload.prompt.referenceText, /At the beginning of a quiet Monday meeting/u);
+    assert.match(result.payload.prompt.referenceText, /invoice #6190/u);
     assert.equal(result.payload.prompt.coverage.ambiguousPairs.includes("m/n/u/w"), true);
   } finally {
     cleanup();
@@ -430,7 +432,7 @@ test("handwriting profile route returns default profile with prompt and no sampl
     assert.equal(result.statusCode, 200);
     assert.equal(result.payload.ok, true);
     assert.equal(result.payload.profile.id, "profile_default");
-    assert.equal(result.payload.prompt.id, "hw_prompt_v1");
+    assert.equal(result.payload.prompt.id, "hw_prompt_v2");
     assert.deepEqual(result.payload.samples, []);
   } finally {
     cleanup();
@@ -456,7 +458,7 @@ test("handwriting sample route accepts HEIC multipart upload and projects active
       boundary,
       fields: {
         profileId: "profile_default",
-        promptId: "hw_prompt_v1",
+        promptId: "hw_prompt_v2",
         referenceText,
       },
       file: { filename: "sample.HEIC", mimeType: "image/heic", data: heicData },
@@ -489,7 +491,7 @@ test("handwriting sample route accepts HEIC multipart upload and projects active
       },
     );
     assert.equal(result.payload.sample.profileId, "profile_default");
-    assert.equal(result.payload.sample.promptId, "hw_prompt_v1");
+    assert.equal(result.payload.sample.promptId, "hw_prompt_v2");
     assert.equal(result.payload.sample.image.mimeType, "image/png");
     assert.equal(result.payload.sample.image.originalMimeType, "image/heic");
     assert.match(result.payload.sample.image.workspacePath, /^notes-captures\/.+\.png$/u);
@@ -513,7 +515,7 @@ test("handwriting sample toggle route deactivates a sample and updates profile p
       boundary,
       fields: {
         profileId: "profile_default",
-        promptId: "hw_prompt_v1",
+        promptId: "hw_prompt_v2",
         referenceText: "Monday Jan 5 at 10:30 AM - Call Sam about the research plan.",
       },
       file: { filename: "sample.png", mimeType: "image/png", data: Buffer.from("fake-png") },
@@ -566,7 +568,7 @@ test("handwriting sample route rejects unknown profile or prompt without persist
   const cases = [
     {
       name: "unknown profile",
-      fields: { profileId: "profile_missing", promptId: "hw_prompt_v1", referenceText },
+      fields: { profileId: "profile_missing", promptId: "hw_prompt_v2", referenceText },
       expectedError: /unknown handwriting profile: profile_missing/u,
     },
     {
@@ -615,7 +617,7 @@ test("handwriting sample route rejects blank profile or prompt without persistin
   const cases = [
     {
       name: "blank profile",
-      fields: { profileId: " ", promptId: "hw_prompt_v1", referenceText },
+      fields: { profileId: " ", promptId: "hw_prompt_v2", referenceText },
       expectedError: /handwriting profile id is required/u,
     },
     {
@@ -666,7 +668,7 @@ test("handwriting sample route rejects non-multipart uploads as client errors", 
       handler,
       "POST",
       "/api/notes/handwriting/samples",
-      { profileId: "profile_default", promptId: "hw_prompt_v1", referenceText: "Text" },
+      { profileId: "profile_default", promptId: "hw_prompt_v2", referenceText: "Text" },
       auth,
     );
 
@@ -687,7 +689,7 @@ test("handwriting sample route rejects multipart uploads without an image file",
       boundary,
       fields: {
         profileId: "profile_default",
-        promptId: "hw_prompt_v1",
+        promptId: "hw_prompt_v2",
         referenceText: "Monday Jan 5 at 10:30 AM - Call Sam about the research plan.",
       },
     });
@@ -713,7 +715,7 @@ test("handwriting sample route rejects multipart uploads without referenceText",
     const boundary = "beep-notes-handwriting-missing-reference";
     const body = multipartBody({
       boundary,
-      fields: { profileId: "profile_default", promptId: "hw_prompt_v1" },
+      fields: { profileId: "profile_default", promptId: "hw_prompt_v2" },
       file: { filename: "sample.png", mimeType: "image/png", data: Buffer.from("fake-png") },
     });
     const result = await callRaw(handler, "POST", "/api/notes/handwriting/samples", body, {
@@ -740,7 +742,7 @@ test("handwriting sample toggle route rejects non-boolean active values", async 
       boundary,
       fields: {
         profileId: "profile_default",
-        promptId: "hw_prompt_v1",
+        promptId: "hw_prompt_v2",
         referenceText: "Monday Jan 5 at 10:30 AM - Call Sam about the research plan.",
       },
       file: { filename: "sample.png", mimeType: "image/png", data: Buffer.from("fake-png") },
@@ -976,7 +978,7 @@ test("capture processing route includes active handwriting calibration samples",
       boundary: sampleBoundary,
       fields: {
         profileId: "profile_default",
-        promptId: "hw_prompt_v1",
+        promptId: "hw_prompt_v2",
         referenceText: "Monday Jan 5 at 10:30 AM - Call Sam about the research plan.",
       },
       file: { filename: "sample.HEIC", mimeType: "image/heic", data: Buffer.from("sample-heic") },

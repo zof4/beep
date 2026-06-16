@@ -17,13 +17,14 @@ test("default handwriting prompt is stable and covers ambiguous glyphs", () => {
   const prompt = createDefaultHandwritingPrompt({ createdAt: NOW });
 
   assert.equal(prompt.id, DEFAULT_HANDWRITING_PROMPT_ID);
-  assert.equal(prompt.promptVersion, "v1");
-  assert.match(prompt.referenceText, /Monday Jan 5 at 10:30 AM/u);
-  assert.match(prompt.referenceText, /minimum unusual universe/u);
-  assert.match(prompt.referenceText, /Call Sam/u);
+  assert.equal(prompt.promptVersion, "v2");
+  assert.match(prompt.referenceText, /At the beginning of a quiet Monday meeting/u);
+  assert.match(prompt.referenceText, /invoice #6190/u);
+  assert.match(prompt.referenceText, /q, x, z, j, k, v, y, and w/u);
+  assert.ok(prompt.referenceText.trim().split(/\s+/u).length > 350);
   assert.deepEqual(prompt.coverage.digits, ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]);
   assert.ok(prompt.coverage.ambiguousPairs.includes("m/n/u/w"));
-  assert.ok(prompt.coverage.domainTerms.includes("laundry"));
+  assert.ok(prompt.coverage.domainTerms.includes("meeting"));
 });
 
 test("default handwriting profile starts with no active samples", () => {

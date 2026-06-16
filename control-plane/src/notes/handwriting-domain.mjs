@@ -1,35 +1,37 @@
 export const DEFAULT_HANDWRITING_PROFILE_ID = "profile_default";
-export const DEFAULT_HANDWRITING_PROMPT_ID = "hw_prompt_v1";
+export const DEFAULT_HANDWRITING_PROMPT_ID = "hw_prompt_v2";
 
-const DEFAULT_PROMPT_VERSION = "v1";
+const DEFAULT_PROMPT_VERSION = "v2";
 
 const DEFAULT_COVERAGE = Object.freeze({
   letters: Object.freeze(["a-z", "A-Z"]),
   digits: Object.freeze(["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]),
-  punctuation: Object.freeze(["-", "/", "(", ")", ":", "?", "->", "&", "."]),
-  ambiguousPairs: Object.freeze(["m/n/u/w", "r/v", "s/5", "o/a", "e/c", "t/f", "g/y", "1/l/I", "0/O"]),
+  punctuation: Object.freeze(["-", "/", "(", ")", ":", "?", "->", "&", ".", ",", ";", '"', "#"]),
+  ambiguousPairs: Object.freeze(["m/n/u/w", "r/v/x", "s/5", "z/2", "b/8", "o/a", "e/c", "t/f", "g/y", "1/l/I", "0/O"]),
   domainTerms: Object.freeze([
-    "Monday",
-    "January",
-    "laundry",
-    "appointment",
-    "email",
+    "meeting",
+    "client interview",
+    "shipping delay",
+    "condition",
+    "action",
+    "archive",
+    "invoice",
     "research",
-    "follow up",
-    "call",
-    "buy",
-    "return",
-    "fix",
+    "review",
+    "notes",
+    "checklist",
+    "reminder",
   ]),
 });
 
 const DEFAULT_REFERENCE_TEXT = [
-  "Monday Jan 5 at 10:30 AM - Call Sam about the research plan.",
-  "Buy 2 blue pens, 5 index cards, and 10 envelopes.",
-  "minimum unusual universe: m n u w, r v, s 5, o a, e c, t f, g y.",
-  "Laundry / email / appointment / follow up / return shoes.",
-  "Fix HAPC study notes -> compare option A & option B.",
-  "I will write clear lists, dense notes, dates, names, and short fragments.",
+  "At the beginning of a quiet Monday meeting, Helen Chen opened the notebook and wrote the reason for the change in plain language. The project was not finished, but the team agreed that the next action was clear: review the evidence, compare the old record with the new one, and return before noon with a short decision. Ben, Marta, and Julian each added a line about the client interview, the shipping delay, and the condition of the shared folder. They wanted the note to be useful later, not perfect, so every sentence had to say who did what, when it happened, and why it mattered.",
+  "",
+  "In the afternoon, the same page became a checklist. Call Alex at 10:30. Send 25 labels, 8 blue pens, 4 black clips, and 12 envelopes to Room 507. Move option A/B into the archive; mark Q4 review as urgent; cancel invoice #6190 only after Jane signs. The quick draft included arrows, commas, slashes, parentheses, and a quote: \"Please revise the final section before Friday.\" No one liked the messy table, yet the numbers were important: 0, 1, 2, 3, 4, 5, 6, 7, 8, 9. Several marks were easy to confuse, especially l, I, 1, O, 0, S, 5, Z, 2, B, 8, m, n, u, v, w, r, and x.",
+  "",
+  "To make the sample broader, the group wrote a second note about ordinary work. The weather changed while the train moved north, and the station manager mentioned three missing cartons near the loading gate. A yellow jacket, five square boxes, and one gray zipper bag were placed beside the window. Quinn asked Xavier to organize the wax labels, zip the files, judge the fuzzy copy, and verify whether Zoe had the exact key. The sentence was odd, but it helped the page contain q, x, z, j, k, v, y, and w without turning the whole sample into nonsense.",
+  "",
+  "At the end, Helen copied a final reminder for herself. When handwriting is hard to read, look for patterns across repeated words: the, and, that, with, from, here, there, condition, action, meeting, review, writing, letter, number, answer, result, important, different, continued, and beginning. Compare tall letters with short ones, round letters with narrow ones, open loops with closed loops, and connected strokes with separated strokes. If a word is uncertain, keep the original image nearby and make the best reading only after checking the whole line.",
 ].join("\n");
 
 function nowIso() {
