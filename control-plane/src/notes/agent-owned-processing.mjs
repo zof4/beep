@@ -5,6 +5,7 @@ export const AGENT_OWNED_NOTES_STAGE = "agentOwnedNoteProcessing";
 export const AGENT_OWNED_THINKING = "xhigh";
 
 const ATTEMPT_STATUSES = new Set(["retry", "accepted", "failed"]);
+const MAX_ATTEMPT_REASON_LENGTH = 240;
 
 function isPlainObject(value) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
@@ -37,23 +38,43 @@ function sanitizeWarnings(value) {
   return value.map((entry) => String(entry ?? "").trim()).filter(Boolean);
 }
 
+function compactString(value, maxLength) {
+  const text = String(value ?? "").trim();
+  if (text.length <= maxLength) return text;
+  return text.slice(0, maxLength);
+}
+
 function sanitizeAttempts(value) {
   if (!Array.isArray(value)) return [];
   return value
     .filter((attempt) => isPlainObject(attempt))
-    .map((attempt) => ({ ...attempt, status: String(attempt.status ?? "").trim() }))
+    .map((attempt) => {
+      const status = String(attempt.status ?? "").trim();
+      const reason = compactString(attempt.reason, MAX_ATTEMPT_REASON_LENGTH);
+      return reason ? { status, reason } : { status };
+    })
     .filter((attempt) => ATTEMPT_STATUSES.has(attempt.status));
 }
 
+function currentImageSource(source) {
+  if (isPlainObject(source?.image)) return source.image;
+  const firstMediaFile = Array.isArray(source?.media?.files) ? source.media.files[0] : null;
+  if (!isPlainObject(firstMediaFile)) return {};
+  return firstMediaFile ?? {};
+}
+
 function currentCaptureManifest({ source, attachments }) {
-  const imagePath = source?.image?.workspacePath || source?.workspacePath || null;
-  const imageDetail = attachments.find((part) => part?.type === "localImage" && part.path === imagePath)?.detail || null;
+  const image = currentImageSource(source);
+  const imagePath = image.workspacePath || source?.workspacePath || null;
+  const attachmentDetail =
+    attachments.find((part) => part?.type === "localImage" && part.path === imagePath)?.detail || null;
+  const imageDetail = image.detail ?? attachmentDetail;
   return {
     sourceId: source?.id ?? null,
     imagePath,
     imageDetail,
-    imageMimeType: source?.image?.mimeType ?? null,
-    imageByteSize: source?.image?.byteSize ?? source?.image?.sizeBytes ?? null,
+    imageMimeType: image.mimeType ?? null,
+    imageByteSize: image.byteSize ?? image.sizeBytes ?? null,
     attachments: attachments.map((part) => ({
       type: part.type,
       path: part.path,
@@ -100,7 +121,8 @@ function requiredFinalJsonContract() {
     ],
     proposals: [
       {
-        kind: "todo|calendarBlock|research|comment|estimate|plan",
+        kind: "todo",
+        allowedKinds: ["todo", "calendarBlock", "research", "comment", "estimate", "plan"],
         title: "Proposal title.",
         body: "Proposal detail.",
         sourceArtifactIds: ["sourceArtifactId"],
@@ -121,8 +143,10 @@ export function agentTextFromResult(result) {
     result?.message ??
     result?.result?.finalText ??
     result?.result?.text ??
+    result?.result?.message ??
     result?.request?.finalText ??
     result?.request?.text ??
+    result?.request?.message ??
     ""
   );
 }
