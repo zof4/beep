@@ -377,6 +377,12 @@ function materializeOutputs(notesStore, run) {
   const derivedArtifacts = run.outputs.derivedArtifacts.map((artifact) =>
     notesStore.createDerivedArtifact({
       ...artifact,
+      sourceArtifactIds:
+        Array.isArray(artifact.sourceArtifactIds) && artifact.sourceArtifactIds.length > 0
+          ? artifact.sourceArtifactIds
+          : run.sourceArtifactId
+            ? [run.sourceArtifactId]
+            : [],
       sourceItemIds: artifact.sourceItemIds || (run.targetItemId ? [run.targetItemId] : []),
     }),
   );
@@ -449,6 +455,27 @@ function failedAgentOwnedRunSummary({ retryAttempts, validationErrors, calibrati
   };
 }
 
+function markAgentOwnedRunFailed(notesStore, run, stage, { message, retryAttempts, calibrationEnabled, sampleIdsProvided }) {
+  const failedAt = nowIso();
+  run.status = "failed";
+  run.currentStage = AGENT_OWNED_NOTES_STAGE;
+  run.pauseReason = null;
+  run.updatedAt = failedAt;
+  run.errors.push({ stage: AGENT_OWNED_NOTES_STAGE, message, at: failedAt });
+  run.outputs.runSummary = failedAgentOwnedRunSummary({
+    retryAttempts,
+    validationErrors: [message],
+    calibrationEnabled,
+    sampleIdsProvided,
+  });
+  if (stage) {
+    stage.status = "failed";
+    stage.error = message;
+    stage.completedAt = null;
+  }
+  return notesStore.upsertRun(run);
+}
+
 function gatewayFor({ body, replay, forwardRuntimeRequest }) {
   if (body.beepMode === "localAgent") {
     return new NotesBeepGateway({
@@ -510,15 +537,27 @@ async function runAgentOwnedNotesPipeline({
     throw new Error("notes workspace runtime path is required for agent-owned image processing");
   }
 
-  const sessionPayload = await readRuntimeJson(
-    await forwardRuntimeRequest("/sessions", {
-      method: "POST",
-      body: { prefix: "notes-agent-owned", thinking: AGENT_OWNED_THINKING, workspace: sessionRuntimeWorkspace },
-    }),
-    "agent-owned note session create",
-  );
-  const sessionId = String(sessionPayload?.session?.id ?? "").trim();
-  if (!sessionId) throw new Error("agent-owned note session create failed: missing session id");
+  const retryAttempts = [];
+  let sessionId = "";
+  try {
+    const sessionPayload = await readRuntimeJson(
+      await forwardRuntimeRequest("/sessions", {
+        method: "POST",
+        body: { prefix: "notes-agent-owned", thinking: AGENT_OWNED_THINKING, workspace: sessionRuntimeWorkspace },
+      }),
+      "agent-owned note session create",
+    );
+    sessionId = String(sessionPayload?.session?.id ?? "").trim();
+    if (!sessionId) throw new Error("agent-owned note session create failed: missing session id");
+  } catch (error) {
+    markAgentOwnedRunFailed(notesStore, run, stage, {
+      message: errorMessage(error),
+      retryAttempts,
+      calibrationEnabled,
+      sampleIdsProvided,
+    });
+    throw error;
+  }
 
   try {
     let promptInput = buildAgentOwnedNoteInput({
@@ -527,7 +566,6 @@ async function runAgentOwnedNotesPipeline({
       attachments: context.attachments,
       handwriting: context.handwriting,
     });
-    const retryAttempts = [];
     const startedAt = nowIso();
     run.status = "running";
     run.currentStage = AGENT_OWNED_NOTES_STAGE;
@@ -545,13 +583,24 @@ async function runAgentOwnedNotesPipeline({
     };
 
     for (let attemptNumber = 1; attemptNumber <= 3; attemptNumber += 1) {
-      const promptPayload = await readRuntimeJson(
-        await forwardRuntimeRequest(`/sessions/${sessionId}/prompt`, {
-          method: "POST",
-          body: { input: promptInput, waitForCompletion: true },
-        }),
-        "agent-owned note session prompt",
-      );
+      let promptPayload;
+      try {
+        promptPayload = await readRuntimeJson(
+          await forwardRuntimeRequest(`/sessions/${sessionId}/prompt`, {
+            method: "POST",
+            body: { input: promptInput, waitForCompletion: true },
+          }),
+          "agent-owned note session prompt",
+        );
+      } catch (error) {
+        markAgentOwnedRunFailed(notesStore, run, stage, {
+          message: errorMessage(error),
+          retryAttempts,
+          calibrationEnabled,
+          sampleIdsProvided,
+        });
+        throw error;
+      }
       let output;
       try {
         const parsed = parseAgentOwnedJson(promptPayload);
@@ -608,7 +657,14 @@ async function runAgentOwnedNotesPipeline({
       return { run: storedRun, ...materialized };
     }
 
-    throw new Error("agent-owned note processing ended without a result");
+    const error = new Error("agent-owned note processing ended without a result");
+    markAgentOwnedRunFailed(notesStore, run, stage, {
+      message: errorMessage(error),
+      retryAttempts,
+      calibrationEnabled,
+      sampleIdsProvided,
+    });
+    throw error;
   } finally {
     try {
       await forwardRuntimeRequest(`/sessions/${sessionId}`, { method: "DELETE" });

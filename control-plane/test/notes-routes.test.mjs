@@ -1006,6 +1006,132 @@ test("local-agent image capture processing uses Pi native session with xhigh thi
   }
 });
 
+test("agent-owned image processing attaches readable rendition to source when agent omits source links", async () => {
+  const runtime = createAgentOwnedRuntimeProxy({
+    firstFinalText: JSON.stringify({
+      derivedArtifacts: [{ kind: "readableRendition", body: "Readable output without explicit source links." }],
+      comments: [],
+      proposals: [],
+      handwriting: { sampleIdsUsed: [] },
+      observations: [],
+      runSummary: {
+        tools: { used: false, count: 0 },
+        attempts: [{ status: "accepted" }],
+      },
+    }),
+  });
+  const { handler, auth, store, cleanup } = tempHandler({ proxyToRuntime: runtime.proxyToRuntime });
+  try {
+    const notesStore = new NotesWorkspaceStore({ store });
+    const source = notesStore.createSourceArtifact({
+      id: "src_agent_unlinked_output",
+      kind: "image",
+      body: "Whiteboard capture",
+      media: {
+        schemaVersion: 1,
+        files: [
+          {
+            name: "current.jpg",
+            mimeType: "image/jpeg",
+            sizeBytes: 123,
+            workspacePath: "notes-captures/current.jpg",
+            detail: "auto",
+          },
+        ],
+      },
+    });
+
+    const processed = await call(
+      handler,
+      "POST",
+      `/api/notes/captures/${source.id}/process`,
+      { beepMode: "localAgent", reviewPolicy: "autopilot", useHandwritingCalibration: false },
+      auth,
+    );
+    const workspace = await call(handler, "GET", "/api/notes/workspace", null, auth);
+
+    assert.equal(processed.statusCode, 200);
+    assert.equal(processed.payload.derivedArtifacts.length, 1);
+    assert.deepEqual(processed.payload.derivedArtifacts[0].sourceArtifactIds, [source.id]);
+    assert.deepEqual(workspace.payload.workspace.sourceArtifacts[source.id].derivedArtifactIds, [
+      processed.payload.derivedArtifacts[0].id,
+    ]);
+  } finally {
+    cleanup();
+  }
+});
+
+test("agent-owned image processing persists failed run when session creation fails", async () => {
+  const calls = [];
+  const { handler, auth, store, cleanup } = tempHandler({
+    proxyToRuntime: async (path, options = {}) => {
+      const body = options.body === undefined ? undefined : runtimeSubmitBody(options.body);
+      calls.push({ path, body });
+      if (path === "/sessions") {
+        return { ok: false, error: "session transport failed" };
+      }
+      throw new Error(`Unexpected runtime path: ${path}`);
+    },
+  });
+  try {
+    const notesStore = new NotesWorkspaceStore({ store });
+    const source = notesStore.createSourceArtifact({
+      id: "src_session_failure",
+      kind: "image",
+      body: "Whiteboard capture",
+      media: {
+        schemaVersion: 1,
+        files: [
+          {
+            name: "current.jpg",
+            mimeType: "image/jpeg",
+            sizeBytes: 123,
+            workspacePath: "notes-captures/current.jpg",
+            detail: "auto",
+          },
+        ],
+      },
+    });
+
+    const processed = await call(
+      handler,
+      "POST",
+      `/api/notes/captures/${source.id}/process`,
+      { beepMode: "localAgent", reviewPolicy: "autopilot", useHandwritingCalibration: false },
+      auth,
+    );
+    const workspace = await call(handler, "GET", "/api/notes/workspace", null, auth);
+    const runs = Object.values(workspace.payload.workspace.runs).filter((run) => run.kind === "agentOwnedProcessNote");
+    const failedRun = runs[0];
+    const failedStage = failedRun?.stages.find((stage) => stage.name === "agentOwnedNoteProcessing");
+
+    assert.equal(processed.statusCode, 500);
+    assert.match(processed.payload.error, /agent-owned note session create failed: session transport failed/u);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].path, "/sessions");
+    assert.equal(runs.length, 1);
+    assert.equal(failedRun.status, "failed");
+    assert.equal(failedRun.currentStage, "agentOwnedNoteProcessing");
+    assert.equal(failedRun.pauseReason, null);
+    assert.equal(failedStage?.status, "failed");
+    assert.match(failedStage?.error || "", /agent-owned note session create failed: session transport failed/u);
+    assert.equal(failedStage?.completedAt, null);
+    assert.equal(failedRun.errors[0].stage, "agentOwnedNoteProcessing");
+    assert.match(failedRun.errors[0].message, /agent-owned note session create failed: session transport failed/u);
+    assert.equal(failedRun.outputs.runSummary.mode, "agentOwned");
+    assert.equal(failedRun.outputs.runSummary.thinking, "xhigh");
+    assert.deepEqual(failedRun.outputs.runSummary.validation, {
+      ok: false,
+      warnings: ["agent-owned note session create failed: session transport failed"],
+    });
+    assert.deepEqual(failedRun.outputs.runSummary.attempts, [
+      { status: "failed", reason: "agent-owned note session create failed: session transport failed" },
+    ]);
+  } finally {
+    cleanup();
+  }
+});
+
 test("local-agent image capture processing requires notes workspace before Pi session creation", async () => {
   const runtimeCalls = [];
   const dir = mkdtempSync(join(tmpdir(), "beep-notes-routes-test-"));
@@ -1330,6 +1456,23 @@ test("agent-owned image processing does not retry runtime prompt failures as val
       calls.map((callRecord) => callRecord.path),
       ["/sessions", "/sessions/sess_notes_1/prompt", "/sessions/sess_notes_1"],
     );
+    const workspace = await call(handler, "GET", "/api/notes/workspace", null, auth);
+    const runs = Object.values(workspace.payload.workspace.runs).filter((run) => run.kind === "agentOwnedProcessNote");
+    const failedRun = runs[0];
+    const failedStage = failedRun?.stages.find((stage) => stage.name === "agentOwnedNoteProcessing");
+    assert.equal(runs.length, 1);
+    assert.equal(failedRun.status, "failed");
+    assert.equal(failedRun.currentStage, "agentOwnedNoteProcessing");
+    assert.equal(failedRun.pauseReason, null);
+    assert.equal(failedStage?.status, "failed");
+    assert.match(failedStage?.error || "", /agent-owned note session prompt failed: runtime prompt transport failed/u);
+    assert.equal(failedStage?.completedAt, null);
+    assert.equal(failedRun.errors[0].stage, "agentOwnedNoteProcessing");
+    assert.match(failedRun.errors[0].message, /agent-owned note session prompt failed: runtime prompt transport failed/u);
+    assert.equal(failedRun.outputs.runSummary.validation.ok, false);
+    assert.deepEqual(failedRun.outputs.runSummary.attempts, [
+      { status: "failed", reason: "agent-owned note session prompt failed: runtime prompt transport failed" },
+    ]);
   } finally {
     cleanup();
   }
