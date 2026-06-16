@@ -16,6 +16,15 @@ import {
 import { createPipelineRun, runPipeline } from "./pipeline-engine.mjs";
 import { readItemForBeep } from "./workspace-domain.mjs";
 import { NotesWorkspaceStore } from "./workspace-store.mjs";
+import {
+  AGENT_OWNED_NOTES_STAGE,
+  AGENT_OWNED_PROCESS_NOTE_KIND,
+  AGENT_OWNED_THINKING,
+  buildAgentOwnedNoteInput,
+  buildAgentOwnedRetryInput,
+  parseAgentOwnedJson,
+  validateAgentOwnedNoteOutput,
+} from "./agent-owned-processing.mjs";
 
 const IMAGE_DETAIL_VALUES = new Set(["low", "high", "original", "auto"]);
 const MAX_MULTIPART_CAPTURE_BYTES = MAX_IMAGE_UPLOAD_BYTES + 1024 * 1024;
@@ -35,6 +44,10 @@ function sendUnknown(response, label, id) {
 
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error);
+}
+
+function nowIso() {
+  return new Date().toISOString();
 }
 
 function explicitClientStatus(error) {
@@ -372,6 +385,70 @@ function materializeOutputs(notesStore, run) {
   return { derivedArtifacts, comments, proposals };
 }
 
+function shouldUseAgentOwnedImageProcessing({ body, source }) {
+  return body?.beepMode === "localAgent" && source?.kind === "image";
+}
+
+async function readRuntimeJson(response, label) {
+  const payload = response && typeof response.json === "function" ? await response.json().catch(() => ({})) : response;
+  if (response && typeof response === "object" && "ok" in response && response.ok === false && payload?.ok !== true) {
+    throw new Error(`${label} failed: ${payload?.error || response.statusText || "runtime request failed"}`);
+  }
+  if (payload?.ok === false) {
+    throw new Error(`${label} failed: ${payload.error || "runtime request failed"}`);
+  }
+  return payload || {};
+}
+
+function outputArray(stageOutput, key) {
+  const value = stageOutput[key];
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) throw new Error(`${key} must be an array`);
+  return value;
+}
+
+function mergeAgentOwnedRunOutputs(current, output = {}) {
+  if (output === null || typeof output !== "object" || Array.isArray(output)) {
+    throw new Error("agent-owned note output must be an object");
+  }
+  return {
+    derivedArtifacts: [...current.derivedArtifacts, ...outputArray(output, "derivedArtifacts")],
+    comments: [...current.comments, ...outputArray(output, "comments")],
+    proposals: [...current.proposals, ...outputArray(output, "proposals")],
+    handwriting: output.handwriting === undefined ? current.handwriting || null : output.handwriting,
+    runSummary: output.runSummary ?? current.runSummary ?? null,
+  };
+}
+
+function compactAttempt(status, reason) {
+  const text = String(reason ?? "").trim();
+  return text ? { status, reason: text.length > 240 ? text.slice(0, 240) : text } : { status };
+}
+
+function validationErrorsFor(error) {
+  return Array.isArray(error?.validationErrors) && error.validationErrors.length > 0
+    ? error.validationErrors.map((entry) => String(entry ?? "").trim()).filter(Boolean)
+    : [errorMessage(error)];
+}
+
+function failedAgentOwnedRunSummary({ retryAttempts, validationErrors, calibrationEnabled, sampleIdsProvided }) {
+  return {
+    mode: "agentOwned",
+    thinking: AGENT_OWNED_THINKING,
+    calibration: {
+      enabled: Boolean(calibrationEnabled),
+      sampleCount: sampleIdsProvided.length,
+      sampleIdsUsed: [],
+    },
+    tools: { used: false, count: 0 },
+    attempts: [...retryAttempts, compactAttempt("failed", validationErrors.join(" "))],
+    validation: {
+      ok: false,
+      warnings: validationErrors,
+    },
+  };
+}
+
 function gatewayFor({ body, replay, forwardRuntimeRequest }) {
   if (body.beepMode === "localAgent") {
     return new NotesBeepGateway({
@@ -400,6 +477,125 @@ async function runNotesPipeline({ notesStore, body, replay, forwardRuntimeReques
   const materialized = materializeOutputs(notesStore, completedRun);
   const storedRun = notesStore.upsertRun(completedRun);
   return { run: storedRun, ...materialized };
+}
+
+async function runAgentOwnedNotesPipeline({
+  notesStore,
+  body,
+  forwardRuntimeRequest,
+  source,
+  context,
+  reviewPolicy,
+  sourceArtifactId,
+}) {
+  const run = createPipelineRun({
+    id: newRouteId("run"),
+    kind: AGENT_OWNED_PROCESS_NOTE_KIND,
+    sourceArtifactId,
+    reviewPolicy,
+  });
+  const stage = run.stages.find((entry) => entry.name === AGENT_OWNED_NOTES_STAGE);
+  const calibrationEnabled = Boolean(context.handwriting?.enabled);
+  const sampleIdsProvided = calibrationEnabled
+    ? (context.handwriting.samples || []).map((sample) => String(sample?.id ?? "").trim()).filter(Boolean)
+    : [];
+
+  const sessionPayload = await readRuntimeJson(
+    await forwardRuntimeRequest("/sessions", {
+      method: "POST",
+      body: { prefix: "notes-agent-owned", thinking: AGENT_OWNED_THINKING },
+    }),
+    "agent-owned note session create",
+  );
+  const sessionId = String(sessionPayload?.session?.id ?? "").trim();
+  if (!sessionId) throw new Error("agent-owned note session create failed: missing session id");
+
+  let promptInput = buildAgentOwnedNoteInput({
+    source,
+    sourceArtifactId,
+    attachments: context.attachments,
+    handwriting: context.handwriting,
+  });
+  const retryAttempts = [];
+  const startedAt = nowIso();
+  run.status = "running";
+  run.currentStage = AGENT_OWNED_NOTES_STAGE;
+  run.pauseReason = null;
+  run.updatedAt = startedAt;
+  if (stage) {
+    stage.status = "running";
+    stage.startedAt = startedAt;
+  }
+
+  const validationOptions = {
+    thinking: AGENT_OWNED_THINKING,
+    calibrationEnabled,
+    sampleIdsProvided,
+  };
+
+  for (let attemptNumber = 1; attemptNumber <= 3; attemptNumber += 1) {
+    try {
+      const promptPayload = await readRuntimeJson(
+        await forwardRuntimeRequest(`/sessions/${sessionId}/prompt`, {
+          method: "POST",
+          body: { input: promptInput, waitForCompletion: true },
+        }),
+        "agent-owned note session prompt",
+      );
+      const parsed = parseAgentOwnedJson(promptPayload);
+      const output = validateAgentOwnedNoteOutput(parsed, validationOptions);
+      run.outputs = mergeAgentOwnedRunOutputs(run.outputs, {
+        ...output,
+        runSummary: {
+          ...output.runSummary,
+          attempts: [...retryAttempts, ...(output.runSummary?.attempts || [])],
+        },
+      });
+      const completedAt = nowIso();
+      run.status = "completed";
+      run.currentStage = null;
+      run.pauseReason = null;
+      run.updatedAt = completedAt;
+      if (stage) {
+        stage.status = "completed";
+        stage.completedAt = completedAt;
+        stage.error = null;
+      }
+      const materialized = materializeOutputs(notesStore, run);
+      const storedRun = notesStore.upsertRun(run);
+      return { run: storedRun, ...materialized };
+    } catch (error) {
+      const validationErrors = validationErrorsFor(error);
+      if (attemptNumber < 3) {
+        retryAttempts.push(compactAttempt("retry", validationErrors.join(" ")));
+        promptInput = buildAgentOwnedRetryInput({ validationErrors, attemptNumber });
+        continue;
+      }
+
+      const failedAt = nowIso();
+      const message = validationErrors.join(" ");
+      run.status = "failed";
+      run.currentStage = AGENT_OWNED_NOTES_STAGE;
+      run.pauseReason = null;
+      run.updatedAt = failedAt;
+      run.errors.push({ stage: AGENT_OWNED_NOTES_STAGE, message, at: failedAt });
+      run.outputs.runSummary = failedAgentOwnedRunSummary({
+        retryAttempts,
+        validationErrors,
+        calibrationEnabled,
+        sampleIdsProvided,
+      });
+      if (stage) {
+        stage.status = "failed";
+        stage.error = message;
+      }
+      const materialized = materializeOutputs(notesStore, run);
+      const storedRun = notesStore.upsertRun(run);
+      return { run: storedRun, ...materialized };
+    }
+  }
+
+  throw new Error("agent-owned note processing ended without a result");
 }
 
 function linkedRecords(records, ids) {
@@ -610,17 +806,28 @@ export async function handleNotesRoute({
       return true;
     }
     const handwriting = handwritingContextForWorkspace(workspace, body.useHandwritingCalibration === true);
-    const result = await runNotesPipeline({
-      notesStore,
-      body,
-      replay: replayForSource(source),
-      forwardRuntimeRequest,
-      runInput: { kind: "processNote", sourceArtifactId: source.id },
-      context: {
-        attachments: await imageInputPartsForSource(source, { convertHeif: notesImageConverter }),
-        handwriting,
-      },
-    });
+    const context = {
+      attachments: await imageInputPartsForSource(source, { convertHeif: notesImageConverter }),
+      handwriting,
+    };
+    const result = shouldUseAgentOwnedImageProcessing({ body, source })
+      ? await runAgentOwnedNotesPipeline({
+          notesStore,
+          body,
+          forwardRuntimeRequest,
+          source,
+          context,
+          reviewPolicy: body.reviewPolicy,
+          sourceArtifactId: source.id,
+        })
+      : await runNotesPipeline({
+          notesStore,
+          body,
+          replay: replayForSource(source),
+          forwardRuntimeRequest,
+          runInput: { kind: "processNote", sourceArtifactId: source.id },
+          context,
+        });
     sendJson(response, 200, { ok: true, ...result });
     return true;
   }

@@ -265,7 +265,7 @@ export function buildAgentOwnedRetryInput({ validationErrors, attemptNumber }) {
     {
       type: "text",
       text: [
-        `Agent-owned image-note processing validation failed after attempt ${attemptNumber}.`,
+        `Validation failed after attempt ${attemptNumber} in agent-owned image-note processing.`,
         "Rework the same note using the native images and file paths already available in this session.",
         "Fix every validation issue. Return final JSON only, with no markdown, code fences, prose, or thinking text.",
         "Validation errors:",
