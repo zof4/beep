@@ -1043,6 +1043,72 @@ test("agent-owned image processing retries validation failures in the same sessi
   }
 });
 
+test("agent-owned image processing does not retry runtime prompt failures as validation failures", async () => {
+  const calls = [];
+  let promptCount = 0;
+  const { handler, auth, store, cleanup } = tempHandler({
+    proxyToRuntime: async (path, options = {}) => {
+      const body = options.body === undefined ? undefined : runtimeSubmitBody(options.body);
+      calls.push({ path, body });
+      if (path === "/sessions") {
+        return { ok: true, session: { id: "sess_notes_1" } };
+      }
+      if (path === "/sessions/sess_notes_1/prompt") {
+        promptCount += 1;
+        if (promptCount === 1) {
+          return { ok: false, error: "runtime prompt transport failed" };
+        }
+        return {
+          ok: true,
+          result: {
+            finalText: validAgentOwnedFinalText({
+              sourceArtifactId: "src_prompt_failure",
+              body: "Unexpected second prompt output.",
+            }),
+          },
+        };
+      }
+      throw new Error(`Unexpected runtime path: ${path}`);
+    },
+  });
+  try {
+    const notesStore = new NotesWorkspaceStore({ store });
+    const source = notesStore.createSourceArtifact({
+      id: "src_prompt_failure",
+      kind: "image",
+      body: "Whiteboard capture",
+      media: {
+        schemaVersion: 1,
+        files: [
+          {
+            name: "current.jpg",
+            mimeType: "image/jpeg",
+            sizeBytes: 123,
+            workspacePath: "notes-captures/current.jpg",
+            detail: "auto",
+          },
+        ],
+      },
+    });
+
+    const processed = await call(
+      handler,
+      "POST",
+      `/api/notes/captures/${source.id}/process`,
+      { beepMode: "localAgent", reviewPolicy: "autopilot", useHandwritingCalibration: false },
+      auth,
+    );
+
+    const promptCalls = calls.filter((callRecord) => callRecord.path === "/sessions/sess_notes_1/prompt");
+    assert.equal(processed.statusCode, 500);
+    assert.match(processed.payload.error, /agent-owned note session prompt failed: runtime prompt transport failed/u);
+    assert.equal(promptCalls.length, 1);
+    assert.equal(promptCalls[1]?.body, undefined);
+  } finally {
+    cleanup();
+  }
+});
+
 test("local-agent text capture processing stays on staged submit path", async () => {
   const runtimeCalls = [];
   const { handler, auth, cleanup } = tempHandler({

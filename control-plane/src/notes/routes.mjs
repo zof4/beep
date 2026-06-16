@@ -534,36 +534,17 @@ async function runAgentOwnedNotesPipeline({
   };
 
   for (let attemptNumber = 1; attemptNumber <= 3; attemptNumber += 1) {
+    const promptPayload = await readRuntimeJson(
+      await forwardRuntimeRequest(`/sessions/${sessionId}/prompt`, {
+        method: "POST",
+        body: { input: promptInput, waitForCompletion: true },
+      }),
+      "agent-owned note session prompt",
+    );
+    let output;
     try {
-      const promptPayload = await readRuntimeJson(
-        await forwardRuntimeRequest(`/sessions/${sessionId}/prompt`, {
-          method: "POST",
-          body: { input: promptInput, waitForCompletion: true },
-        }),
-        "agent-owned note session prompt",
-      );
       const parsed = parseAgentOwnedJson(promptPayload);
-      const output = validateAgentOwnedNoteOutput(parsed, validationOptions);
-      run.outputs = mergeAgentOwnedRunOutputs(run.outputs, {
-        ...output,
-        runSummary: {
-          ...output.runSummary,
-          attempts: [...retryAttempts, ...(output.runSummary?.attempts || [])],
-        },
-      });
-      const completedAt = nowIso();
-      run.status = "completed";
-      run.currentStage = null;
-      run.pauseReason = null;
-      run.updatedAt = completedAt;
-      if (stage) {
-        stage.status = "completed";
-        stage.completedAt = completedAt;
-        stage.error = null;
-      }
-      const materialized = materializeOutputs(notesStore, run);
-      const storedRun = notesStore.upsertRun(run);
-      return { run: storedRun, ...materialized };
+      output = validateAgentOwnedNoteOutput(parsed, validationOptions);
     } catch (error) {
       const validationErrors = validationErrorsFor(error);
       if (attemptNumber < 3) {
@@ -593,6 +574,27 @@ async function runAgentOwnedNotesPipeline({
       const storedRun = notesStore.upsertRun(run);
       return { run: storedRun, ...materialized };
     }
+
+    run.outputs = mergeAgentOwnedRunOutputs(run.outputs, {
+      ...output,
+      runSummary: {
+        ...output.runSummary,
+        attempts: [...retryAttempts, ...(output.runSummary?.attempts || [])],
+      },
+    });
+    const completedAt = nowIso();
+    run.status = "completed";
+    run.currentStage = null;
+    run.pauseReason = null;
+    run.updatedAt = completedAt;
+    if (stage) {
+      stage.status = "completed";
+      stage.completedAt = completedAt;
+      stage.error = null;
+    }
+    const materialized = materializeOutputs(notesStore, run);
+    const storedRun = notesStore.upsertRun(run);
+    return { run: storedRun, ...materialized };
   }
 
   throw new Error("agent-owned note processing ended without a result");
