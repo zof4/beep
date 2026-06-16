@@ -1,11 +1,21 @@
 import { createServer } from "node:http";
 import { request as httpRequest } from "node:http";
 import { pathToFileURL } from "node:url";
-import { DEFAULT_REQUEST_TIMEOUT_MS, HOST, PORT, RUNTIME_AUTH_PATH, RUNTIME_ID } from "./config.mjs";
+import {
+  DEFAULT_REQUEST_TIMEOUT_MS,
+  HOST,
+  NOTES_WORKSPACE_HOST_PATH,
+  NOTES_WORKSPACE_RUNTIME_PATH,
+  PORT,
+  RUNTIME_AUTH_PATH,
+  RUNTIME_ID,
+} from "./config.mjs";
 import { handleApprovalRoute } from "./approval-routes.mjs";
 import { buildBackendStatus } from "./backend-status.mjs";
 import { resolveCodexCredentialFromAuthPath } from "./codex-token.mjs";
 import { parseRequestUrl, readJsonBody, sendJson, sendNotFound, statusFromError } from "./http-utils.mjs";
+import { handleNotesDemoRoute } from "./notes/demo-web.mjs";
+import { handleNotesRoute } from "./notes/routes.mjs";
 import { buildLocalProxyOptions } from "./proxy-utils.mjs";
 import { handleRequestRoute } from "./request-routes.mjs";
 import { handleRuntimeAgentRoute, unsafeRuntimeAgentRequestTargetError } from "./runtime-agent-routes.mjs";
@@ -17,6 +27,9 @@ import { ToolBroker, hostPortForContainerPort, validatePreviewPort } from "./too
 import { createWebRunExecutor } from "./openai-web-search.mjs";
 import { Gatekeeper } from "./gatekeeper/index.mjs";
 import { ToolRegistry } from "./tool-registry.mjs";
+import { normalizeBeepInput, summarizeBeepInput } from "../../shared/native-input.mjs";
+
+export const MAX_NATIVE_REQUEST_BYTES = 40 * 1024 * 1024;
 
 export function createDefaultComponents() {
   const store = new StateStore();
@@ -60,7 +73,15 @@ function matchingExposure(store, runtimeId, containerPort) {
   return { ...exposure, hostPort: expectedHostPort };
 }
 
-export function createControlPlaneHandler({ store, runtimeManager, toolBroker, localPortProxy = proxyLocalPort }) {
+export function createControlPlaneHandler({
+  store,
+  runtimeManager,
+  toolBroker,
+  localPortProxy = proxyLocalPort,
+  notesImageConverter = undefined,
+  notesWorkspaceHostPath = NOTES_WORKSPACE_HOST_PATH,
+  notesWorkspaceRuntimePath = NOTES_WORKSPACE_RUNTIME_PATH,
+}) {
   function requireRuntimeAuth(request) {
     const expected = `Bearer ${store.ensureRuntimeToken()}`;
     if (request.headers.authorization !== expected) {
@@ -127,6 +148,10 @@ export function createControlPlaneHandler({ store, runtimeManager, toolBroker, l
     if (unsafeAgentPathError) {
       sendJson(response, 400, { ok: false, error: unsafeAgentPathError });
       return;
+    }
+
+    if (pathname === "/notes" || pathname.startsWith("/notes/")) {
+      if (handleNotesDemoRoute({ request, response, pathname })) return;
     }
 
     if (request.method === "GET" && pathname === "/health") {
@@ -210,16 +235,28 @@ export function createControlPlaneHandler({ store, runtimeManager, toolBroker, l
 
     if (request.method === "POST" && pathname === "/api/requests") {
       requireOperatorAuth(request);
-      const body = await readJsonBody(request);
+      const body = await readJsonBody(request, MAX_NATIVE_REQUEST_BYTES);
+      let input;
+      let inputSummary;
+      try {
+        input = normalizeBeepInput(body.input);
+        inputSummary = summarizeBeepInput(input);
+      } catch (error) {
+        if (error instanceof Error) {
+          error.status = 400;
+        }
+        throw error;
+      }
       await runtimeManager.ensureRuntime();
       const controlPlaneRequest = store.createAgentRequest({
         runtimeId: RUNTIME_ID,
-        message: String(body.message || ""),
+        input,
+        inputSummary,
         status: "forwarding",
         source: "api",
       });
       const runtimeBody = {
-        message: String(body.message || ""),
+        input,
         waitForCompletion: body.waitForCompletion !== false,
         timeoutMs: Number(body.timeoutMs || DEFAULT_REQUEST_TIMEOUT_MS),
       };
@@ -264,6 +301,21 @@ export function createControlPlaneHandler({ store, runtimeManager, toolBroker, l
         requireOperatorAuth,
       });
       return;
+    }
+
+    if (pathname === "/api/notes" || pathname.startsWith("/api/notes/")) {
+      const handled = await handleNotesRoute({
+        request,
+        response,
+        pathname,
+        store,
+        requireOperatorAuth,
+        forwardRuntimeRequest,
+        notesImageConverter,
+        notesWorkspaceHostPath,
+        notesWorkspaceRuntimePath,
+      });
+      if (handled) return;
     }
 
     if (pathname === "/api/agent" || pathname.startsWith("/api/agent/")) {

@@ -1,4 +1,5 @@
 import { sendJson, sendNotFound } from "./http-utils.mjs";
+import { redactBeepInput, summarizeBeepInput } from "../../shared/native-input.mjs";
 
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;
@@ -7,7 +8,8 @@ const PUBLIC_REQUEST_FIELDS = [
   "requestId",
   "runtimeId",
   "runtimeRequestId",
-  "message",
+  "inputSummary",
+  "redactedInput",
   "status",
   "source",
   "error",
@@ -56,10 +58,37 @@ function publicRuntimeResult(runtimeResult) {
   };
 }
 
+function publicInputSummary(record) {
+  if (record.inputSummary) return record.inputSummary;
+  if (!Array.isArray(record.input) || record.input.length === 0) return null;
+  try {
+    return summarizeBeepInput(record.input);
+  } catch {
+    return null;
+  }
+}
+
+function publicRedactedInput(record) {
+  if (!Array.isArray(record.input) || record.input.length === 0) return [];
+  try {
+    return redactBeepInput(record.input);
+  } catch {
+    return [];
+  }
+}
+
 function publicRequest(record) {
   const response = {};
   for (const field of PUBLIC_REQUEST_FIELDS) {
-    response[field] = field === "runtimeResult" ? publicRuntimeResult(record[field]) : (record[field] ?? null);
+    if (field === "runtimeResult") {
+      response[field] = publicRuntimeResult(record[field]);
+    } else if (field === "inputSummary") {
+      response[field] = publicInputSummary(record);
+    } else if (field === "redactedInput") {
+      response[field] = publicRedactedInput(record);
+    } else {
+      response[field] = record[field] ?? null;
+    }
   }
   return response;
 }

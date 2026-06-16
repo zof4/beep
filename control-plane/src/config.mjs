@@ -25,6 +25,9 @@ export const RUNTIME_AUTH_PATH =
   process.env.BEEP_CONTROL_PLANE_CODEX_AUTH_PATH || join(ROOT_DIR, ".beep-dev/state/codex/auth.json");
 export const RUNTIME_UPDATE_ENV_PATH =
   process.env.BEEP_RUNTIME_UPDATE_ENV_PATH || join(ROOT_DIR, ".beep-dev/update-state/runtime-update.env");
+export const NOTES_WORKSPACE_HOST_PATH =
+  process.env.BEEP_NOTES_WORKSPACE_HOST_PATH || join(ROOT_DIR, ".beep-dev/workspace");
+export const NOTES_WORKSPACE_RUNTIME_PATH = process.env.BEEP_NOTES_WORKSPACE_RUNTIME_PATH || "/workspace";
 export const SANDBOX_DOCKER_WORKSPACE_ROOT =
   process.env.BEEP_SANDBOX_DOCKER_WORKSPACE_ROOT || join(ROOT_DIR, ".beep-dev/workspace/sandboxes");
 export const SANDBOX_IMAGE = process.env.BEEP_SANDBOX_IMAGE || "beep-sandbox:local";

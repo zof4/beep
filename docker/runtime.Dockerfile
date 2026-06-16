@@ -59,6 +59,7 @@ RUN useradd --create-home --shell /bin/bash beep
 
 WORKDIR /runtime
 
+COPY shared/ /shared/
 COPY runtime/ /runtime/
 
 RUN mkdir -p /workspace /lcm /history /state \

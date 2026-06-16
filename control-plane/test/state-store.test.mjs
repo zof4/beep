@@ -77,7 +77,7 @@ test("state store create methods ignore caller-supplied reserved fields", () => 
     const agentRequest = store.createAgentRequest({
       requestId: "caller-request",
       runtimeId: "local",
-      message: "hello",
+      input: [{ type: "text", text: "hello" }],
       status: "approved",
       createdAt: "caller-created",
       updatedAt: "caller-updated",
@@ -108,6 +108,7 @@ test("state store create methods ignore caller-supplied reserved fields", () => 
 
     assert.match(agentRequest.requestId, /^cp_req_/);
     assert.equal(agentRequest.status, "submitted");
+    assert.deepEqual(agentRequest.input, [{ type: "text", text: "hello" }]);
     assert.notEqual(agentRequest.createdAt, "caller-created");
     assert.notEqual(agentRequest.updatedAt, "caller-updated");
     assert.equal(state.agentRequests[agentRequest.requestId].requestId, agentRequest.requestId);

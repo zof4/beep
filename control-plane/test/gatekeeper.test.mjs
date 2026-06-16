@@ -62,7 +62,10 @@ function validStaticSiteEvidence(overrides = {}) {
   };
 }
 
-function installRuntimeFetchMock(t, { store = null, onFetch = null, proveHealth = true } = {}) {
+function installRuntimeFetchMock(
+  t,
+  { store = null, onFetch = null, proveHealth = true, eventsPayload = { events: [] } } = {},
+) {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (url, options = {}) => {
     onFetch?.(url, options);
@@ -92,7 +95,7 @@ function installRuntimeFetchMock(t, { store = null, onFetch = null, proveHealth 
       return { ok: true, json: async () => ({ requests: [] }) };
     }
     if (requestUrl.pathname === "/agent/events") {
-      return { ok: true, json: async () => ({ events: [] }) };
+      return { ok: true, json: async () => eventsPayload };
     }
     if (requestUrl.pathname === "/agent/summary") {
       return { ok: true, json: async () => ({ summary: "" }) };
@@ -832,7 +835,16 @@ test("gatekeeper context excludes stale unrelated control-plane requests from au
     store.createAgentRequest({
       runtimeId: "local",
       toolCallId: "call_stale",
-      message: "Create a static preview container for /workspace/stale-site.",
+      input: [{ type: "text", text: "Create a static preview container for /workspace/stale-site." }],
+      inputSummary: {
+        partCount: 1,
+        textPartCount: 1,
+        imagePartCount: 0,
+        localImagePartCount: 0,
+        totalInlineImageBytes: 0,
+        textPreview: "Create a static preview container for /workspace/stale-site.",
+        imageParts: [],
+      },
     });
 
     const context = await collectGatekeeperContext({
@@ -848,15 +860,30 @@ test("gatekeeper context excludes stale unrelated control-plane requests from au
   }
 });
 
-test("gatekeeper context includes control-plane authorization scoped to the current tool call", async (t) => {
+test("gatekeeper context includes native control-plane authorization scoped to the current tool call", async (t) => {
   const { store, cleanup } = tempStore();
   installRuntimeFetchMock(t, { store });
   try {
     store.createAgentRequest({
       runtimeId: "local",
       toolCallId: "call_current",
-      message:
-        "Create a static site and request a managed static preview container for /workspace/api-sessions/agent_beep/site.",
+      input: [
+        {
+          type: "text",
+          text: "Create a static site and request a managed static preview container for /workspace/api-sessions/agent_beep/site.",
+        },
+        { type: "image", mimeType: "image/png", data: "ZmFrZQ==", detail: "high" },
+      ],
+      inputSummary: {
+        partCount: 2,
+        textPartCount: 1,
+        imagePartCount: 1,
+        localImagePartCount: 0,
+        totalInlineImageBytes: 4,
+        textPreview:
+          "Create a static site and request a managed static preview container for /workspace/api-sessions/agent_beep/site.",
+        imageParts: [{ index: 1, source: "inline", mimeType: "image/png", byteLength: 4, detail: "high" }],
+      },
     });
 
     const context = await collectGatekeeperContext({
@@ -867,6 +894,113 @@ test("gatekeeper context includes control-plane authorization scoped to the curr
 
     assert.match(context.authorizationText, /api-sessions\/agent_beep\/site/iu);
     assert.match(context.text, /CONTROL-PLANE USER REQUESTS/u);
+    assert.doesNotMatch(context.authorizationText, /ZmFrZQ==/u);
+    assert.doesNotMatch(context.text, /ZmFrZQ==/u);
+  } finally {
+    cleanup();
+  }
+});
+
+test("gatekeeper context falls back to safe native text parts when input summary is absent", async (t) => {
+  const { store, cleanup } = tempStore();
+  installRuntimeFetchMock(t, { store });
+  try {
+    store.createAgentRequest({
+      runtimeId: "local",
+      toolCallId: "call_current",
+      input: [
+        {
+          type: "text",
+          text: "Deploy the managed static site demo-site from /workspace/api-sessions/agent_beep/site.",
+        },
+        { type: "image", mimeType: "image/png", data: "ZmFrZQ==", detail: "low" },
+      ],
+    });
+
+    const context = await collectGatekeeperContext({
+      store,
+      runtimeId: "local",
+      toolCallId: "call_current",
+    });
+
+    assert.match(context.authorizationText, /Deploy the managed static site demo-site/iu);
+    assert.match(context.authorizationText, /api-sessions\/agent_beep\/site/iu);
+    assert.doesNotMatch(context.text, /ZmFrZQ==/u);
+  } finally {
+    cleanup();
+  }
+});
+
+test("gatekeeper context prefers full native text parts over truncated summary preview", async (t) => {
+  const { store, cleanup } = tempStore();
+  installRuntimeFetchMock(t, { store });
+  try {
+    const prefix = "Create a rich visual dashboard. ".repeat(14);
+    const fullText = `${prefix}Request a managed static preview container for /workspace/api-sessions/agent_beep/site.`;
+    assert.equal(fullText.slice(0, 240).includes("/workspace/api-sessions/agent_beep/site"), false);
+
+    store.createAgentRequest({
+      runtimeId: "local",
+      toolCallId: "call_current",
+      input: [
+        { type: "text", text: fullText },
+        { type: "image", mimeType: "image/png", data: "ZmFrZQ==", detail: "low" },
+      ],
+      inputSummary: {
+        partCount: 2,
+        textPartCount: 1,
+        imagePartCount: 1,
+        localImagePartCount: 0,
+        totalInlineImageBytes: 4,
+        textPreview: fullText.slice(0, 240),
+        imageParts: [{ index: 1, source: "inline", mimeType: "image/png", byteLength: 4, detail: "low" }],
+      },
+    });
+
+    const context = await collectGatekeeperContext({
+      store,
+      runtimeId: "local",
+      toolCallId: "call_current",
+    });
+
+    assert.match(context.authorizationText, /api-sessions\/agent_beep\/site/iu);
+    assert.doesNotMatch(context.text, /ZmFrZQ==/u);
+  } finally {
+    cleanup();
+  }
+});
+
+test("gatekeeper context redacts inline image data from runtime events", async (t) => {
+  const { store, cleanup } = tempStore();
+  installRuntimeFetchMock(t, {
+    store,
+    eventsPayload: {
+      events: [
+        {
+          type: "request.created",
+          status: "queued",
+          message: {
+            role: "user",
+            content: [
+              { type: "input_text", text: "Create a static preview." },
+              { type: "input_image", mimeType: "image/png", data: "ZmFrZQ==" },
+            ],
+          },
+        },
+      ],
+    },
+  });
+  try {
+    const context = await collectGatekeeperContext({
+      store,
+      runtimeId: "local",
+      toolCallId: "call_current",
+    });
+
+    assert.match(context.text, /RECENT AGENT EVENTS/u);
+    assert.match(context.text, /Create a static preview/iu);
+    assert.match(context.text, /queued/iu);
+    assert.doesNotMatch(context.text, /ZmFrZQ==/u);
   } finally {
     cleanup();
   }
