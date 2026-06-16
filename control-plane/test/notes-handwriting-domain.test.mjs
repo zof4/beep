@@ -3,10 +3,12 @@ import test from "node:test";
 import {
   DEFAULT_HANDWRITING_PROFILE_ID,
   DEFAULT_HANDWRITING_PROMPT_ID,
+  PARTIAL_HANDWRITING_PROMPT_ID,
   buildHandwritingContext,
   createDefaultHandwritingProfile,
   createDefaultHandwritingPrompt,
   createHandwritingSample,
+  createPartialHandwritingPrompt,
   normalizeHandwritingStageMetadata,
   toggleHandwritingSampleActive,
 } from "../src/notes/handwriting-domain.mjs";
@@ -25,6 +27,22 @@ test("default handwriting prompt is stable and covers ambiguous glyphs", () => {
   assert.deepEqual(prompt.coverage.digits, ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]);
   assert.ok(prompt.coverage.ambiguousPairs.includes("m/n/u/w"));
   assert.ok(prompt.coverage.domainTerms.includes("meeting"));
+});
+
+test("partial handwriting prompt is shorter and keeps core recognition coverage", () => {
+  const prompt = createPartialHandwritingPrompt({ createdAt: NOW });
+  const wordCount = prompt.referenceText.trim().split(/\s+/u).length;
+
+  assert.equal(prompt.id, PARTIAL_HANDWRITING_PROMPT_ID);
+  assert.equal(prompt.promptVersion, "v2-partial");
+  assert.match(prompt.referenceText, /At the meeting, Jane Walker/u);
+  assert.match(prompt.referenceText, /The quick brown fox jumps over the lazy dog/u);
+  assert.match(prompt.referenceText, /l, I, 1, O, 0, S, 5, Z, 2, B, 8/u);
+  assert.ok(wordCount >= 180);
+  assert.ok(wordCount <= 230);
+  assert.deepEqual(prompt.coverage.digits, ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]);
+  assert.ok(prompt.coverage.ambiguousPairs.includes("1/l/I"));
+  assert.ok(prompt.coverage.domainTerms.includes("invoice"));
 });
 
 test("default handwriting profile starts with no active samples", () => {

@@ -102,6 +102,8 @@ const HTML = `<!doctype html>
               <h3>Handwriting calibration</h3>
               <span>sample</span>
             </div>
+            <label class="field-label" for="handwritingPromptSelect">Prompt length</label>
+            <select id="handwritingPromptSelect" name="promptId"></select>
             <div id="handwritingPromptText" class="row-meta">Loading calibration prompt.</div>
             <label class="field-label" for="handwritingReferenceText">Reference text</label>
             <textarea id="handwritingReferenceText" name="referenceText" placeholder="Write the prompt text exactly as shown"></textarea>
@@ -591,7 +593,7 @@ const state = {
   itemType: "note",
   captureKind: "text",
   captureImage: null,
-  handwriting: { profile: null, prompt: null, samples: [] },
+  handwriting: { profile: null, prompt: null, prompts: [], samples: [] },
 };
 
 const elements = {
@@ -619,6 +621,7 @@ const elements = {
   handwritingCalibrationForm: document.getElementById("handwritingCalibrationForm"),
   handwritingReferenceText: document.getElementById("handwritingReferenceText"),
   handwritingImageInput: document.getElementById("handwritingImageInput"),
+  handwritingPromptSelect: document.getElementById("handwritingPromptSelect"),
   handwritingPromptText: document.getElementById("handwritingPromptText"),
   handwritingSamplesList: document.getElementById("handwritingSamplesList"),
   useHandwritingCalibration: document.getElementById("useHandwritingCalibration"),
@@ -1006,14 +1009,48 @@ function renderHandwritingSamples() {
   }
 }
 
+function promptWordCount(prompt) {
+  return String(prompt?.referenceText || "").trim().split(/\\s+/u).filter(Boolean).length;
+}
+
+function promptLabel(prompt) {
+  const label = prompt?.label || prompt?.id || "Calibration prompt";
+  const words = promptWordCount(prompt);
+  return words ? label + " (" + words + " words)" : label;
+}
+
+function renderHandwritingPromptOptions() {
+  clearChildren(elements.handwritingPromptSelect);
+  for (const prompt of state.handwriting.prompts) {
+    const option = document.createElement("option");
+    option.value = prompt.id;
+    option.textContent = promptLabel(prompt);
+    option.selected = prompt.id === state.handwriting.prompt?.id;
+    elements.handwritingPromptSelect.append(option);
+  }
+  elements.handwritingPromptSelect.disabled = state.handwriting.prompts.length <= 1;
+}
+
+function selectHandwritingPrompt(promptId) {
+  const prompt = state.handwriting.prompts.find((candidate) => candidate.id === promptId) || state.handwriting.prompt;
+  state.handwriting.prompt = prompt || null;
+  elements.handwritingPromptText.textContent = prompt?.referenceText || "No calibration prompt loaded.";
+  elements.handwritingReferenceText.value = prompt?.referenceText || "";
+  if (prompt?.id) elements.handwritingPromptSelect.value = prompt.id;
+}
+
 async function loadHandwritingProfile() {
   setStatus("Loading handwriting profile...");
   const payload = await api("/api/notes/handwriting/profile");
   state.handwriting.profile = payload.profile || null;
-  state.handwriting.prompt = payload.prompt || null;
+  state.handwriting.prompts = Array.isArray(payload.prompts) && payload.prompts.length
+    ? payload.prompts
+    : [payload.prompt].filter(Boolean);
+  const selectedPromptId = state.handwriting.prompt?.id || payload.prompt?.id || state.handwriting.prompts[0]?.id;
+  state.handwriting.prompt = state.handwriting.prompts.find((prompt) => prompt.id === selectedPromptId) || payload.prompt || null;
   state.handwriting.samples = Array.isArray(payload.samples) ? payload.samples : [];
-  elements.handwritingPromptText.textContent = state.handwriting.prompt?.referenceText || "No calibration prompt loaded.";
-  elements.handwritingReferenceText.value = state.handwriting.prompt?.referenceText || "";
+  renderHandwritingPromptOptions();
+  selectHandwritingPrompt(state.handwriting.prompt?.id);
   renderHandwritingSamples();
   setStatus("Handwriting profile loaded.");
 }
@@ -1257,6 +1294,7 @@ function init() {
   elements.createNoteButton.addEventListener("click", () => setItemType("note"));
   elements.createTodoButton.addEventListener("click", () => setItemType("todo"));
   elements.captureKindSelect.addEventListener("change", () => setCaptureKind(elements.captureKindSelect.value));
+  elements.handwritingPromptSelect.addEventListener("change", () => selectHandwritingPrompt(elements.handwritingPromptSelect.value));
   elements.imageCaptureInput.addEventListener("change", async () => {
     try {
       await updateCaptureImage();

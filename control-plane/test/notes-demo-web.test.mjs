@@ -140,6 +140,9 @@ test("/notes/app.js includes handwriting calibration UI without base64 image rea
 
     assert.equal(result.statusCode, 200);
     assert.match(result.body, /handwritingCalibrationForm/u);
+    assert.match(result.body, /handwritingPromptSelect/u);
+    assert.match(result.body, /selectHandwritingPrompt/u);
+    assert.match(result.body, /split\(\/\\s\+\/u\)/u);
     assert.match(result.body, /handwritingReferenceText/u);
     assert.match(result.body, /useHandwritingCalibration/u);
     assert.match(result.body, /handwritingSampleOrder/u);
@@ -160,6 +163,8 @@ test("/notes serves handwriting calibration controls", async () => {
 
     assert.equal(result.statusCode, 200);
     assert.match(result.body, /Handwriting calibration/u);
+    assert.match(result.body, /id="handwritingPromptSelect"/u);
+    assert.match(result.body, /Prompt length/u);
     assert.match(result.body, /id="handwritingPromptText"/u);
     assert.match(result.body, /id="handwritingCalibrationForm"/u);
     assert.match(result.body, /id="handwritingReferenceText"/u);

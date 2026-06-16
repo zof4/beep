@@ -7,6 +7,7 @@ import { StateStore } from "../src/state-store.mjs";
 import {
   DEFAULT_HANDWRITING_PROFILE_ID,
   DEFAULT_HANDWRITING_PROMPT_ID,
+  PARTIAL_HANDWRITING_PROMPT_ID,
   createDefaultHandwritingPrompt,
 } from "../src/notes/handwriting-domain.mjs";
 import { NotesWorkspaceStore } from "../src/notes/workspace-store.mjs";
@@ -155,7 +156,7 @@ test("workspace store normalizes inherited top-level notes fields without touchi
     for (const field of NOTES_ARRAY_FIELDS) {
       assert.equal(Object.hasOwn(workspace, field), true);
       if (field === "handwritingPromptOrder") {
-        assert.deepEqual(workspace.handwritingPromptOrder, [DEFAULT_HANDWRITING_PROMPT_ID]);
+        assert.deepEqual(workspace.handwritingPromptOrder, [DEFAULT_HANDWRITING_PROMPT_ID, PARTIAL_HANDWRITING_PROMPT_ID]);
       } else {
         assert.deepEqual(workspace[field], []);
       }
@@ -1082,8 +1083,9 @@ test("workspace store seeds default handwriting profile and prompt", () => {
       DEFAULT_HANDWRITING_PROFILE_ID,
     );
     assert.equal(workspace.handwritingPrompts[DEFAULT_HANDWRITING_PROMPT_ID].id, DEFAULT_HANDWRITING_PROMPT_ID);
+    assert.equal(workspace.handwritingPrompts[PARTIAL_HANDWRITING_PROMPT_ID].id, PARTIAL_HANDWRITING_PROMPT_ID);
     assert.deepEqual(workspace.handwritingSampleOrder, []);
-    assert.deepEqual(workspace.handwritingPromptOrder, [DEFAULT_HANDWRITING_PROMPT_ID]);
+    assert.deepEqual(workspace.handwritingPromptOrder, [DEFAULT_HANDWRITING_PROMPT_ID, PARTIAL_HANDWRITING_PROMPT_ID]);
   } finally {
     cleanup();
   }

@@ -3,7 +3,7 @@ import {
   DEFAULT_HANDWRITING_PROFILE_ID,
   DEFAULT_HANDWRITING_PROMPT_ID,
   createDefaultHandwritingProfile,
-  createDefaultHandwritingPrompt,
+  createDefaultHandwritingPrompts,
   createHandwritingSample as createHandwritingSampleDomain,
   toggleHandwritingSampleActive,
 } from "./handwriting-domain.mjs";
@@ -137,11 +137,14 @@ function ensureHandwritingDefaults(notes, now = nowIso) {
   if (!Object.hasOwn(notes.handwritingProfiles, DEFAULT_HANDWRITING_PROFILE_ID)) {
     notes.handwritingProfiles[DEFAULT_HANDWRITING_PROFILE_ID] = createDefaultHandwritingProfile({ createdAt: now() });
   }
-  if (!Object.hasOwn(notes.handwritingPrompts, DEFAULT_HANDWRITING_PROMPT_ID)) {
-    notes.handwritingPrompts[DEFAULT_HANDWRITING_PROMPT_ID] = createDefaultHandwritingPrompt({ createdAt: now() });
-  }
-  if (!notes.handwritingPromptOrder.includes(DEFAULT_HANDWRITING_PROMPT_ID)) {
-    notes.handwritingPromptOrder.push(DEFAULT_HANDWRITING_PROMPT_ID);
+  const createdAt = now();
+  for (const prompt of createDefaultHandwritingPrompts({ createdAt })) {
+    if (!Object.hasOwn(notes.handwritingPrompts, prompt.id)) {
+      notes.handwritingPrompts[prompt.id] = prompt;
+    }
+    if (!notes.handwritingPromptOrder.includes(prompt.id)) {
+      notes.handwritingPromptOrder.push(prompt.id);
+    }
   }
 }
 

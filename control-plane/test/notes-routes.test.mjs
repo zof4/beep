@@ -433,6 +433,11 @@ test("handwriting profile route returns default profile with prompt and no sampl
     assert.equal(result.payload.ok, true);
     assert.equal(result.payload.profile.id, "profile_default");
     assert.equal(result.payload.prompt.id, "hw_prompt_v2");
+    assert.deepEqual(
+      result.payload.prompts.map((prompt) => prompt.id),
+      ["hw_prompt_v2", "hw_prompt_v2_partial"],
+    );
+    assert.match(result.payload.prompts[1].referenceText, /The quick brown fox jumps over the lazy dog/u);
     assert.deepEqual(result.payload.samples, []);
   } finally {
     cleanup();

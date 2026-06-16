@@ -1,7 +1,9 @@
 export const DEFAULT_HANDWRITING_PROFILE_ID = "profile_default";
 export const DEFAULT_HANDWRITING_PROMPT_ID = "hw_prompt_v2";
+export const PARTIAL_HANDWRITING_PROMPT_ID = "hw_prompt_v2_partial";
 
 const DEFAULT_PROMPT_VERSION = "v2";
+const PARTIAL_PROMPT_VERSION = "v2-partial";
 
 const DEFAULT_COVERAGE = Object.freeze({
   letters: Object.freeze(["a-z", "A-Z"]),
@@ -32,6 +34,12 @@ const DEFAULT_REFERENCE_TEXT = [
   "To make the sample broader, the group wrote a second note about ordinary work. The weather changed while the train moved north, and the station manager mentioned three missing cartons near the loading gate. A yellow jacket, five square boxes, and one gray zipper bag were placed beside the window. Quinn asked Xavier to organize the wax labels, zip the files, judge the fuzzy copy, and verify whether Zoe had the exact key. The sentence was odd, but it helped the page contain q, x, z, j, k, v, y, and w without turning the whole sample into nonsense.",
   "",
   "At the end, Helen copied a final reminder for herself. When handwriting is hard to read, look for patterns across repeated words: the, and, that, with, from, here, there, condition, action, meeting, review, writing, letter, number, answer, result, important, different, continued, and beginning. Compare tall letters with short ones, round letters with narrow ones, open loops with closed loops, and connected strokes with separated strokes. If a word is uncertain, keep the original image nearby and make the best reading only after checking the whole line.",
+].join("\n");
+
+const PARTIAL_REFERENCE_TEXT = [
+  "At the meeting, Jane Walker opened a small notebook and wrote the next action in clear words. The team reviewed the old record, compared the new result, and agreed to send a short answer before noon. Call Alex at 10:30, move option A/B into the archive, mark Q4 review as urgent, and cancel invoice #6190 only after Sam signs. Several marks can look alike in quick handwriting: l, I, 1, O, 0, S, 5, Z, 2, B, 8, m, n, u, v, w, r, and x.",
+  "",
+  "The quick brown fox jumps over the lazy dog, while five quirky jigsaw boxes vex young Quinn. Zoe packed yellow wax labels, a gray zipper bag, and six blue pens near the window. When a word is uncertain, compare the whole line: the, and, that, with, from, here, there, condition, action, meeting, review, writing, number, result, important, different, continued, and beginning. Write the date, name, amount, and reason on one line when possible. Leave enough space between words, but write naturally with your usual speed, slant, loops, joins, dots, crosses, pressure, baseline, and spacing.",
 ].join("\n");
 
 function nowIso() {
@@ -81,6 +89,24 @@ export function createDefaultHandwritingPrompt({ createdAt = nowIso() } = {}) {
     coverage: cloneCoverage(DEFAULT_COVERAGE),
     createdAt,
   };
+}
+
+export function createPartialHandwritingPrompt({ createdAt = nowIso() } = {}) {
+  return {
+    id: PARTIAL_HANDWRITING_PROMPT_ID,
+    label: "Partial handwriting calibration page",
+    promptVersion: PARTIAL_PROMPT_VERSION,
+    referenceText: PARTIAL_REFERENCE_TEXT,
+    coverage: cloneCoverage(DEFAULT_COVERAGE),
+    createdAt,
+  };
+}
+
+export function createDefaultHandwritingPrompts({ createdAt = nowIso() } = {}) {
+  return [
+    createDefaultHandwritingPrompt({ createdAt }),
+    createPartialHandwritingPrompt({ createdAt }),
+  ];
 }
 
 export function createDefaultHandwritingProfile({ createdAt = nowIso() } = {}) {

@@ -419,10 +419,13 @@ function handwritingProfileProjection(notesStore) {
   const workspace = notesStore.readWorkspace();
   const profile = workspace.handwritingProfiles[DEFAULT_HANDWRITING_PROFILE_ID];
   const prompt = workspace.handwritingPrompts[DEFAULT_HANDWRITING_PROMPT_ID];
+  const prompts = (workspace.handwritingPromptOrder || [])
+    .map((id) => workspace.handwritingPrompts[id])
+    .filter(Boolean);
   const samples = (profile.activeSampleIds || [])
     .map((id) => workspace.handwritingSamples[id])
     .filter(Boolean);
-  return { profile, prompt, samples };
+  return { profile, prompt, prompts, samples };
 }
 
 export async function handleNotesRoute({
