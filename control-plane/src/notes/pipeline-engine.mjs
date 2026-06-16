@@ -7,6 +7,7 @@ const WORKFLOW_STAGES = {
     "plannerPass",
   ],
   askBeep: ["readContext", "agentCommentary", "draftExtraction"],
+  agentOwnedProcessNote: ["agentOwnedNoteProcessing"],
 };
 
 const REVIEW_POLICIES = new Set(["stepReview", "firstReadCheckpoint", "autopilot"]);
@@ -59,6 +60,7 @@ function mergeOutputs(outputs, stageOutput = {}) {
     comments: [...outputs.comments, ...outputArray(stageOutput, "comments")],
     proposals: [...outputs.proposals, ...outputArray(stageOutput, "proposals")],
     handwriting: stageOutput.handwriting === undefined ? outputs.handwriting || null : stageOutput.handwriting,
+    runSummary: stageOutput.runSummary ?? outputs.runSummary ?? null,
   };
 }
 
@@ -92,7 +94,7 @@ export function createPipelineRun(input) {
     currentStage: stages[0]?.name || null,
     pauseReason: null,
     stages,
-    outputs: { derivedArtifacts: [], comments: [], proposals: [], handwriting: null },
+    outputs: { derivedArtifacts: [], comments: [], proposals: [], handwriting: null, runSummary: null },
     errors: [],
     createdAt,
     updatedAt: createdAt,

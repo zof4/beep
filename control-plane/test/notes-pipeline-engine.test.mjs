@@ -128,6 +128,46 @@ test("askBeep workflow uses a shorter stage list", () => {
   ]);
 });
 
+test("agent-owned note processing runs as a single-stage workflow with a run summary", async () => {
+  const run = createPipelineRun({
+    id: "run_agent_owned",
+    kind: "agentOwnedProcessNote",
+    sourceArtifactId: "source_capture_1",
+    reviewPolicy: "autopilot",
+    createdAt: NOW,
+  });
+
+  assert.deepEqual(run.stages.map((stage) => stage.name), ["agentOwnedNoteProcessing"]);
+  assert.equal(run.outputs.runSummary, null);
+
+  const completed = await runPipeline(run, {
+    gateway: {
+      async runStage(stage) {
+        assert.equal(stage, "agentOwnedNoteProcessing");
+        return {
+          derivedArtifacts: [{ kind: "readableRendition", title: "Readable", body: "Buy milk." }],
+          comments: [],
+          proposals: [],
+          handwriting: { sampleIdsUsed: ["sample_1"], observations: [] },
+          runSummary: {
+            mode: "agentOwned",
+            thinking: "xhigh",
+            calibration: { enabled: true, sampleCount: 1, sampleIdsUsed: ["sample_1"] },
+            tools: { used: false, count: 0 },
+            attempts: [{ status: "accepted", reason: "Valid." }],
+            validation: { ok: true, warnings: [] },
+          },
+        };
+      },
+    },
+    now: () => NOW,
+  });
+
+  assert.equal(completed.status, "completed");
+  assert.equal(completed.outputs.derivedArtifacts[0].body, "Buy milk.");
+  assert.equal(completed.outputs.runSummary.mode, "agentOwned");
+});
+
 test("stepReview resumes stage by stage and completes after the final stage", async () => {
   let run = createPipelineRun({
     id: "run_5",
