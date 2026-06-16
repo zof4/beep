@@ -139,7 +139,7 @@ function runtimeSubmitBody(body) {
   return submitBody;
 }
 
-function createAgentOwnedRuntimeProxy({ firstFinalText, secondFinalText = null }) {
+function createAgentOwnedRuntimeProxy({ firstFinalText, secondFinalText = null, deleteOk = true }) {
   const calls = [];
   let promptCount = 0;
   return {
@@ -154,6 +154,9 @@ function createAgentOwnedRuntimeProxy({ firstFinalText, secondFinalText = null }
         const finalText = promptCount === 0 ? firstFinalText : secondFinalText || firstFinalText;
         promptCount += 1;
         return { ok: true, result: { finalText } };
+      }
+      if (path === "/sessions/sess_notes_1" && options.method === "DELETE") {
+        return deleteOk ? { ok: true } : { ok: false, error: "session cleanup failed" };
       }
       throw new Error(`Unexpected runtime path: ${path}`);
     },
@@ -981,8 +984,9 @@ test("local-agent image capture processing uses Pi native session with xhigh thi
     assert.equal(processed.payload.run.outputs.runSummary.thinking, "xhigh");
     assert.deepEqual(
       runtime.calls.map((callRecord) => callRecord.path),
-      ["/sessions", "/sessions/sess_notes_1/prompt"],
+      ["/sessions", "/sessions/sess_notes_1/prompt", "/sessions/sess_notes_1"],
     );
+    assert.equal(runtime.calls[2].options.method, "DELETE");
     assert.equal(runtime.calls[0].body.prefix, "notes-agent-owned");
     assert.equal(runtime.calls[0].body.thinking, "xhigh");
     assert.equal(runtime.calls[0].body.workspace, runtimeWorkspace);
@@ -1160,9 +1164,16 @@ test("agent-owned image processing retries validation failures in the same sessi
     );
 
     const promptCalls = runtime.calls.filter((callRecord) => callRecord.path === "/sessions/sess_notes_1/prompt");
+    const deleteCalls = runtime.calls.filter((callRecord) => callRecord.path === "/sessions/sess_notes_1");
     assert.equal(processed.statusCode, 200);
     assert.equal(processed.payload.run.status, "completed");
     assert.equal(promptCalls.length, 2);
+    assert.equal(deleteCalls.length, 1);
+    assert.equal(deleteCalls[0].options.method, "DELETE");
+    assert.deepEqual(
+      runtime.calls.map((callRecord) => callRecord.path),
+      ["/sessions", "/sessions/sess_notes_1/prompt", "/sessions/sess_notes_1/prompt", "/sessions/sess_notes_1"],
+    );
     assert.match(promptCalls[1].body.input.find((part) => part?.type === "text")?.text || "", /Validation failed after attempt 1/u);
     assert.equal(processed.payload.derivedArtifacts[0].body, "Second pass readable output.");
   } finally {
@@ -1214,16 +1225,32 @@ test("agent-owned image processing records failed run after final validation fai
     );
 
     const promptCalls = runtime.calls.filter((callRecord) => callRecord.path === "/sessions/sess_notes_1/prompt");
+    const deleteCalls = runtime.calls.filter((callRecord) => callRecord.path === "/sessions/sess_notes_1");
+    const failedStage = processed.payload.run.stages.find((stage) => stage.name === "agentOwnedNoteProcessing");
     assert.equal(processed.statusCode, 200);
     assert.equal(processed.payload.run.status, "failed");
     assert.equal(processed.payload.run.currentStage, "agentOwnedNoteProcessing");
-    assert.equal(processed.payload.run.stages.find((stage) => stage.name === "agentOwnedNoteProcessing")?.status, "failed");
-    assert.match(
-      processed.payload.run.stages.find((stage) => stage.name === "agentOwnedNoteProcessing")?.error || "",
-      /must return at least one readableRendition/u,
-    );
+    assert.equal(processed.payload.run.pauseReason, null);
+    assert.equal(failedStage?.status, "failed");
+    assert.match(failedStage?.error || "", /must return at least one readableRendition/u);
+    assert.equal(failedStage?.completedAt, null);
+    assert.equal(processed.payload.run.errors.length, 1);
+    assert.equal(processed.payload.run.errors[0].stage, "agentOwnedNoteProcessing");
+    assert.match(processed.payload.run.errors[0].message, /must return at least one readableRendition/u);
     assert.equal(processed.payload.run.outputs.runSummary.validation.ok, false);
     assert.equal(promptCalls.length, 3);
+    assert.equal(deleteCalls.length, 1);
+    assert.equal(deleteCalls[0].options.method, "DELETE");
+    assert.deepEqual(
+      runtime.calls.map((callRecord) => callRecord.path),
+      [
+        "/sessions",
+        "/sessions/sess_notes_1/prompt",
+        "/sessions/sess_notes_1/prompt",
+        "/sessions/sess_notes_1/prompt",
+        "/sessions/sess_notes_1",
+      ],
+    );
     assert.deepEqual(processed.payload.derivedArtifacts, []);
     assert.deepEqual(processed.payload.comments, []);
     assert.deepEqual(processed.payload.proposals, []);
@@ -1258,6 +1285,9 @@ test("agent-owned image processing does not retry runtime prompt failures as val
           },
         };
       }
+      if (path === "/sessions/sess_notes_1" && options.method === "DELETE") {
+        return { ok: true };
+      }
       throw new Error(`Unexpected runtime path: ${path}`);
     },
   });
@@ -1290,10 +1320,66 @@ test("agent-owned image processing does not retry runtime prompt failures as val
     );
 
     const promptCalls = calls.filter((callRecord) => callRecord.path === "/sessions/sess_notes_1/prompt");
+    const deleteCalls = calls.filter((callRecord) => callRecord.path === "/sessions/sess_notes_1");
     assert.equal(processed.statusCode, 500);
     assert.match(processed.payload.error, /agent-owned note session prompt failed: runtime prompt transport failed/u);
     assert.equal(promptCalls.length, 1);
+    assert.equal(deleteCalls.length, 1);
     assert.equal(promptCalls[1]?.body, undefined);
+    assert.deepEqual(
+      calls.map((callRecord) => callRecord.path),
+      ["/sessions", "/sessions/sess_notes_1/prompt", "/sessions/sess_notes_1"],
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test("agent-owned image processing ignores Pi session cleanup failures after success", async () => {
+  const runtime = createAgentOwnedRuntimeProxy({
+    firstFinalText: validAgentOwnedFinalText({
+      sourceArtifactId: "src_cleanup_failure",
+      body: "Readable image note despite cleanup failure.",
+    }),
+    deleteOk: false,
+  });
+  const { handler, auth, store, cleanup } = tempHandler({ proxyToRuntime: runtime.proxyToRuntime });
+  try {
+    const notesStore = new NotesWorkspaceStore({ store });
+    const source = notesStore.createSourceArtifact({
+      id: "src_cleanup_failure",
+      kind: "image",
+      body: "Whiteboard capture",
+      media: {
+        schemaVersion: 1,
+        files: [
+          {
+            name: "current.jpg",
+            mimeType: "image/jpeg",
+            sizeBytes: 123,
+            workspacePath: "notes-captures/current.jpg",
+            detail: "auto",
+          },
+        ],
+      },
+    });
+
+    const processed = await call(
+      handler,
+      "POST",
+      `/api/notes/captures/${source.id}/process`,
+      { beepMode: "localAgent", reviewPolicy: "autopilot", useHandwritingCalibration: false },
+      auth,
+    );
+
+    assert.equal(processed.statusCode, 200);
+    assert.equal(processed.payload.run.status, "completed");
+    assert.equal(processed.payload.derivedArtifacts[0].body, "Readable image note despite cleanup failure.");
+    assert.deepEqual(
+      runtime.calls.map((callRecord) => callRecord.path),
+      ["/sessions", "/sessions/sess_notes_1/prompt", "/sessions/sess_notes_1"],
+    );
+    assert.equal(runtime.calls[2].options.method, "DELETE");
   } finally {
     cleanup();
   }
@@ -1378,7 +1464,7 @@ test("capture processing route localAgent forwards image capture as localImage i
     assert.equal(processed.statusCode, 200);
     assert.deepEqual(
       runtime.calls.map((callRecord) => callRecord.path),
-      ["/sessions", "/sessions/sess_notes_1/prompt"],
+      ["/sessions", "/sessions/sess_notes_1/prompt", "/sessions/sess_notes_1"],
     );
     assert.equal(runtime.calls[0].body.workspace, runtimeWorkspace);
     assert.notEqual(runtime.calls[0].body.workspace, workspaceDir);
@@ -1464,7 +1550,7 @@ test("capture processing route includes active handwriting calibration samples",
     assert.equal(source.payload.source.media.files[0].mimeType, "image/jpeg");
     assert.deepEqual(
       runtime.calls.map((callRecord) => callRecord.path),
-      ["/sessions", "/sessions/sess_notes_1/prompt"],
+      ["/sessions", "/sessions/sess_notes_1/prompt", "/sessions/sess_notes_1"],
     );
     const firstInput = runtime.calls[1].body.input;
     assert.ok(Array.isArray(firstInput), "runtime input should be an array");
@@ -1545,7 +1631,7 @@ test("capture processing route converts HEIF multipart capture to JPEG workspace
     assert.equal(processed.statusCode, 200);
     assert.deepEqual(
       runtime.calls.map((callRecord) => callRecord.path),
-      ["/sessions", "/sessions/sess_notes_1/prompt"],
+      ["/sessions", "/sessions/sess_notes_1/prompt", "/sessions/sess_notes_1"],
     );
     assert.deepEqual(runtime.calls[1].body.input.find((part) => part?.type === "localImage"), {
       type: "localImage",

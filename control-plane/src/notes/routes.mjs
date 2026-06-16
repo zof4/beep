@@ -520,94 +520,102 @@ async function runAgentOwnedNotesPipeline({
   const sessionId = String(sessionPayload?.session?.id ?? "").trim();
   if (!sessionId) throw new Error("agent-owned note session create failed: missing session id");
 
-  let promptInput = buildAgentOwnedNoteInput({
-    source,
-    sourceArtifactId,
-    attachments: context.attachments,
-    handwriting: context.handwriting,
-  });
-  const retryAttempts = [];
-  const startedAt = nowIso();
-  run.status = "running";
-  run.currentStage = AGENT_OWNED_NOTES_STAGE;
-  run.pauseReason = null;
-  run.updatedAt = startedAt;
-  if (stage) {
-    stage.status = "running";
-    stage.startedAt = startedAt;
-  }
+  try {
+    let promptInput = buildAgentOwnedNoteInput({
+      source,
+      sourceArtifactId,
+      attachments: context.attachments,
+      handwriting: context.handwriting,
+    });
+    const retryAttempts = [];
+    const startedAt = nowIso();
+    run.status = "running";
+    run.currentStage = AGENT_OWNED_NOTES_STAGE;
+    run.pauseReason = null;
+    run.updatedAt = startedAt;
+    if (stage) {
+      stage.status = "running";
+      stage.startedAt = startedAt;
+    }
 
-  const validationOptions = {
-    thinking: AGENT_OWNED_THINKING,
-    calibrationEnabled,
-    sampleIdsProvided,
-  };
+    const validationOptions = {
+      thinking: AGENT_OWNED_THINKING,
+      calibrationEnabled,
+      sampleIdsProvided,
+    };
 
-  for (let attemptNumber = 1; attemptNumber <= 3; attemptNumber += 1) {
-    const promptPayload = await readRuntimeJson(
-      await forwardRuntimeRequest(`/sessions/${sessionId}/prompt`, {
-        method: "POST",
-        body: { input: promptInput, waitForCompletion: true },
-      }),
-      "agent-owned note session prompt",
-    );
-    let output;
-    try {
-      const parsed = parseAgentOwnedJson(promptPayload);
-      output = validateAgentOwnedNoteOutput(parsed, validationOptions);
-    } catch (error) {
-      const validationErrors = validationErrorsFor(error);
-      if (attemptNumber < 3) {
-        retryAttempts.push(compactAttempt("retry", validationErrors.join(" ")));
-        promptInput = buildAgentOwnedRetryInput({ validationErrors, attemptNumber });
-        continue;
+    for (let attemptNumber = 1; attemptNumber <= 3; attemptNumber += 1) {
+      const promptPayload = await readRuntimeJson(
+        await forwardRuntimeRequest(`/sessions/${sessionId}/prompt`, {
+          method: "POST",
+          body: { input: promptInput, waitForCompletion: true },
+        }),
+        "agent-owned note session prompt",
+      );
+      let output;
+      try {
+        const parsed = parseAgentOwnedJson(promptPayload);
+        output = validateAgentOwnedNoteOutput(parsed, validationOptions);
+      } catch (error) {
+        const validationErrors = validationErrorsFor(error);
+        if (attemptNumber < 3) {
+          retryAttempts.push(compactAttempt("retry", validationErrors.join(" ")));
+          promptInput = buildAgentOwnedRetryInput({ validationErrors, attemptNumber });
+          continue;
+        }
+
+        const failedAt = nowIso();
+        const message = validationErrors.join(" ");
+        run.status = "failed";
+        run.currentStage = AGENT_OWNED_NOTES_STAGE;
+        run.pauseReason = null;
+        run.updatedAt = failedAt;
+        run.errors.push({ stage: AGENT_OWNED_NOTES_STAGE, message, at: failedAt });
+        run.outputs.runSummary = failedAgentOwnedRunSummary({
+          retryAttempts,
+          validationErrors,
+          calibrationEnabled,
+          sampleIdsProvided,
+        });
+        if (stage) {
+          stage.status = "failed";
+          stage.error = message;
+        }
+        const materialized = materializeOutputs(notesStore, run);
+        const storedRun = notesStore.upsertRun(run);
+        return { run: storedRun, ...materialized };
       }
 
-      const failedAt = nowIso();
-      const message = validationErrors.join(" ");
-      run.status = "failed";
-      run.currentStage = AGENT_OWNED_NOTES_STAGE;
-      run.pauseReason = null;
-      run.updatedAt = failedAt;
-      run.errors.push({ stage: AGENT_OWNED_NOTES_STAGE, message, at: failedAt });
-      run.outputs.runSummary = failedAgentOwnedRunSummary({
-        retryAttempts,
-        validationErrors,
-        calibrationEnabled,
-        sampleIdsProvided,
+      run.outputs = mergeAgentOwnedRunOutputs(run.outputs, {
+        ...output,
+        runSummary: {
+          ...output.runSummary,
+          attempts: [...retryAttempts, ...(output.runSummary?.attempts || [])],
+        },
       });
+      const completedAt = nowIso();
+      run.status = "completed";
+      run.currentStage = null;
+      run.pauseReason = null;
+      run.updatedAt = completedAt;
       if (stage) {
-        stage.status = "failed";
-        stage.error = message;
+        stage.status = "completed";
+        stage.completedAt = completedAt;
+        stage.error = null;
       }
       const materialized = materializeOutputs(notesStore, run);
       const storedRun = notesStore.upsertRun(run);
       return { run: storedRun, ...materialized };
     }
 
-    run.outputs = mergeAgentOwnedRunOutputs(run.outputs, {
-      ...output,
-      runSummary: {
-        ...output.runSummary,
-        attempts: [...retryAttempts, ...(output.runSummary?.attempts || [])],
-      },
-    });
-    const completedAt = nowIso();
-    run.status = "completed";
-    run.currentStage = null;
-    run.pauseReason = null;
-    run.updatedAt = completedAt;
-    if (stage) {
-      stage.status = "completed";
-      stage.completedAt = completedAt;
-      stage.error = null;
+    throw new Error("agent-owned note processing ended without a result");
+  } finally {
+    try {
+      await forwardRuntimeRequest(`/sessions/${sessionId}`, { method: "DELETE" });
+    } catch {
+      // Best-effort runtime session cleanup must not mask processing results.
     }
-    const materialized = materializeOutputs(notesStore, run);
-    const storedRun = notesStore.upsertRun(run);
-    return { run: storedRun, ...materialized };
   }
-
-  throw new Error("agent-owned note processing ended without a result");
 }
 
 function linkedRecords(records, ids) {
