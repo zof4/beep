@@ -483,6 +483,7 @@ async function runAgentOwnedNotesPipeline({
   notesStore,
   body,
   forwardRuntimeRequest,
+  notesWorkspaceHostPath,
   source,
   context,
   reviewPolicy,
@@ -499,11 +500,15 @@ async function runAgentOwnedNotesPipeline({
   const sampleIdsProvided = calibrationEnabled
     ? (context.handwriting.samples || []).map((sample) => String(sample?.id ?? "").trim()).filter(Boolean)
     : [];
+  const sessionWorkspace = String(notesWorkspaceHostPath ?? "").trim();
+  if (!sessionWorkspace) {
+    throw new Error("notes workspace host path is required for agent-owned image processing");
+  }
 
   const sessionPayload = await readRuntimeJson(
     await forwardRuntimeRequest("/sessions", {
       method: "POST",
-      body: { prefix: "notes-agent-owned", thinking: AGENT_OWNED_THINKING },
+      body: { prefix: "notes-agent-owned", thinking: AGENT_OWNED_THINKING, workspace: sessionWorkspace },
     }),
     "agent-owned note session create",
   );
@@ -817,6 +822,7 @@ export async function handleNotesRoute({
           notesStore,
           body,
           forwardRuntimeRequest,
+          notesWorkspaceHostPath,
           source,
           context,
           reviewPolicy: body.reviewPolicy,

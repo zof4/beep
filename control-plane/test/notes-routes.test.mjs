@@ -6,6 +6,7 @@ import { PassThrough } from "node:stream";
 import test from "node:test";
 import { createControlPlaneHandler } from "../src/server.mjs";
 import { StateStore } from "../src/state-store.mjs";
+import { handleNotesRoute } from "../src/notes/routes.mjs";
 import { NotesWorkspaceStore } from "../src/notes/workspace-store.mjs";
 
 function tempHandler({
@@ -938,7 +939,11 @@ test("local-agent image capture processing uses Pi native session with xhigh thi
   const runtime = createAgentOwnedRuntimeProxy({
     firstFinalText: validAgentOwnedFinalText({ sourceArtifactId: "src_agent_image" }),
   });
-  const { handler, auth, store, cleanup } = tempHandler({ proxyToRuntime: runtime.proxyToRuntime });
+  const workspaceDir = mkdtempSync(join(tmpdir(), "beep-notes-workspace-test-"));
+  const { handler, auth, store, cleanup } = tempHandler({
+    notesWorkspaceHostPath: workspaceDir,
+    proxyToRuntime: runtime.proxyToRuntime,
+  });
   try {
     const notesStore = new NotesWorkspaceStore({ store });
     const source = notesStore.createSourceArtifact({
@@ -974,7 +979,9 @@ test("local-agent image capture processing uses Pi native session with xhigh thi
       runtime.calls.map((callRecord) => callRecord.path),
       ["/sessions", "/sessions/sess_notes_1/prompt"],
     );
+    assert.equal(runtime.calls[0].body.prefix, "notes-agent-owned");
     assert.equal(runtime.calls[0].body.thinking, "xhigh");
+    assert.equal(runtime.calls[0].body.workspace, workspaceDir);
     assert.equal(runtime.calls.some((callRecord) => callRecord.path === "/agent/submit"), false);
     const promptInput = runtime.calls[1].body.input;
     assert.ok(Array.isArray(promptInput), "session prompt body should contain native input parts");
@@ -986,6 +993,62 @@ test("local-agent image capture processing uses Pi native session with xhigh thi
     });
   } finally {
     cleanup();
+    rmSync(workspaceDir, { recursive: true, force: true });
+  }
+});
+
+test("local-agent image capture processing requires notes workspace before Pi session creation", async () => {
+  const runtimeCalls = [];
+  const dir = mkdtempSync(join(tmpdir(), "beep-notes-routes-test-"));
+  const store = new StateStore(dir);
+  const auth = {};
+  const handler = async (request, response) =>
+    handleNotesRoute({
+      request,
+      response,
+      pathname: new URL(request.url, "http://localhost").pathname,
+      store,
+      requireOperatorAuth: () => {},
+      forwardRuntimeRequest: async (path, options = {}) => {
+        runtimeCalls.push({ path, body: options.body === undefined ? undefined : runtimeSubmitBody(options.body) });
+        return { ok: true, session: { id: "sess_notes_1" } };
+      },
+      notesImageConverter: undefined,
+      notesWorkspaceHostPath: undefined,
+    });
+  try {
+    const notesStore = new NotesWorkspaceStore({ store });
+    const source = notesStore.createSourceArtifact({
+      id: "src_missing_workspace",
+      kind: "image",
+      body: "Whiteboard capture",
+      media: {
+        schemaVersion: 1,
+        files: [
+          {
+            name: "current.jpg",
+            mimeType: "image/jpeg",
+            sizeBytes: 123,
+            workspacePath: "notes-captures/current.jpg",
+            detail: "auto",
+          },
+        ],
+      },
+    });
+
+    const processed = await call(
+      handler,
+      "POST",
+      `/api/notes/captures/${source.id}/process`,
+      { beepMode: "localAgent", useHandwritingCalibration: false },
+      auth,
+    );
+
+    assert.equal(processed.statusCode, 400);
+    assert.match(processed.payload.error, /notes workspace host path is required for agent-owned image processing/u);
+    assert.deepEqual(runtimeCalls, []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 
@@ -1040,6 +1103,69 @@ test("agent-owned image processing retries validation failures in the same sessi
     assert.equal(processed.payload.derivedArtifacts[0].body, "Second pass readable output.");
   } finally {
     cleanup();
+  }
+});
+
+test("agent-owned image processing records failed run after final validation failure", async () => {
+  const runtime = createAgentOwnedRuntimeProxy({
+    firstFinalText: JSON.stringify({
+      derivedArtifacts: [],
+      comments: [],
+      proposals: [],
+      handwriting: { sampleIdsUsed: [] },
+      runSummary: { tools: { used: false, count: 0 }, attempts: [{ status: "retry" }] },
+    }),
+  });
+  const workspaceDir = mkdtempSync(join(tmpdir(), "beep-notes-workspace-test-"));
+  const { handler, auth, store, cleanup } = tempHandler({
+    notesWorkspaceHostPath: workspaceDir,
+    proxyToRuntime: runtime.proxyToRuntime,
+  });
+  try {
+    const notesStore = new NotesWorkspaceStore({ store });
+    const source = notesStore.createSourceArtifact({
+      id: "src_final_validation_failure",
+      kind: "image",
+      body: "Unreadable whiteboard capture",
+      media: {
+        schemaVersion: 1,
+        files: [
+          {
+            name: "current.jpg",
+            mimeType: "image/jpeg",
+            sizeBytes: 123,
+            workspacePath: "notes-captures/current.jpg",
+            detail: "auto",
+          },
+        ],
+      },
+    });
+
+    const processed = await call(
+      handler,
+      "POST",
+      `/api/notes/captures/${source.id}/process`,
+      { beepMode: "localAgent", reviewPolicy: "autopilot", useHandwritingCalibration: false },
+      auth,
+    );
+
+    const promptCalls = runtime.calls.filter((callRecord) => callRecord.path === "/sessions/sess_notes_1/prompt");
+    assert.equal(processed.statusCode, 200);
+    assert.equal(processed.payload.run.status, "failed");
+    assert.equal(processed.payload.run.currentStage, "agentOwnedNoteProcessing");
+    assert.equal(processed.payload.run.stages.find((stage) => stage.name === "agentOwnedNoteProcessing")?.status, "failed");
+    assert.match(
+      processed.payload.run.stages.find((stage) => stage.name === "agentOwnedNoteProcessing")?.error || "",
+      /must return at least one readableRendition/u,
+    );
+    assert.equal(processed.payload.run.outputs.runSummary.validation.ok, false);
+    assert.equal(promptCalls.length, 3);
+    assert.deepEqual(processed.payload.derivedArtifacts, []);
+    assert.deepEqual(processed.payload.comments, []);
+    assert.deepEqual(processed.payload.proposals, []);
+  } finally {
+    cleanup();
+    rmSync(workspaceDir, { recursive: true, force: true });
   }
 });
 
@@ -1188,9 +1314,12 @@ test("capture processing route localAgent forwards image capture as localImage i
       runtime.calls.map((callRecord) => callRecord.path),
       ["/sessions", "/sessions/sess_notes_1/prompt"],
     );
+    assert.equal(runtime.calls[0].body.workspace, workspaceDir);
     assert.equal(runtime.calls[1].body.input.some((part) => part?.type === "localImage"), true);
     assert.equal(runtime.calls[1].body.input.some((part) => part?.type === "image"), false);
-    assert.deepEqual(runtime.calls[1].body.input.find((part) => part?.type === "localImage"), {
+    const localImage = runtime.calls[1].body.input.find((part) => part?.type === "localImage");
+    assert.match(localImage.path, /^notes-captures\//u);
+    assert.deepEqual(localImage, {
       type: "localImage",
       path: source.payload.source.media.files[0].workspacePath,
       detail: "auto",
