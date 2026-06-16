@@ -364,6 +364,17 @@ test("native prompt timeout aborts and nonblocking prompts are accepted asynchro
   assert.match(piNativeSource, /this\.activePrompt/);
 });
 
+test("runtime session creation forwards request workspace into Pi native session options", () => {
+  const handlerIndex = apiSource.indexOf("async function handleCreateSession");
+  const optionsIndex = apiSource.indexOf("buildPiNativeSessionOptions({", handlerIndex);
+  const optionsEndIndex = apiSource.indexOf("})", optionsIndex);
+  const optionsSource = apiSource.slice(optionsIndex, optionsEndIndex);
+
+  assert.ok(handlerIndex > 0, "handleCreateSession should exist");
+  assert.ok(optionsIndex > handlerIndex, "handleCreateSession should build Pi native session options");
+  assert.match(optionsSource, /workspace:\s*body\.workspace/);
+});
+
 test("native open and stop clean up resources", () => {
   const catchIndex = piNativeSource.indexOf("} catch (error) {");
   const closeIndex = piNativeSource.indexOf("this.closeStreams();", catchIndex);

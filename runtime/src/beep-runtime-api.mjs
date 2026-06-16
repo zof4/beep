@@ -923,6 +923,7 @@ async function handleCreateSession(req, res) {
       model: body.model,
       thinking: body.thinking,
       prefix: body.prefix,
+      workspace: body.workspace,
     }),
   );
   sessions.set(session.id, session);

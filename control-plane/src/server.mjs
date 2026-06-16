@@ -5,6 +5,7 @@ import {
   DEFAULT_REQUEST_TIMEOUT_MS,
   HOST,
   NOTES_WORKSPACE_HOST_PATH,
+  NOTES_WORKSPACE_RUNTIME_PATH,
   PORT,
   RUNTIME_AUTH_PATH,
   RUNTIME_ID,
@@ -79,6 +80,7 @@ export function createControlPlaneHandler({
   localPortProxy = proxyLocalPort,
   notesImageConverter = undefined,
   notesWorkspaceHostPath = NOTES_WORKSPACE_HOST_PATH,
+  notesWorkspaceRuntimePath = NOTES_WORKSPACE_RUNTIME_PATH,
 }) {
   function requireRuntimeAuth(request) {
     const expected = `Bearer ${store.ensureRuntimeToken()}`;
@@ -311,6 +313,7 @@ export function createControlPlaneHandler({
         forwardRuntimeRequest,
         notesImageConverter,
         notesWorkspaceHostPath,
+        notesWorkspaceRuntimePath,
       });
       if (handled) return;
     }

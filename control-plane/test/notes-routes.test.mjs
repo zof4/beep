@@ -13,6 +13,7 @@ function tempHandler({
   proxyToRuntime = async () => ({ ok: true, finalText: "{}" }),
   notesImageConverter = undefined,
   notesWorkspaceHostPath = undefined,
+  notesWorkspaceRuntimePath = undefined,
 } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "beep-notes-routes-test-"));
   const store = new StateStore(dir);
@@ -30,6 +31,7 @@ function tempHandler({
     },
     notesImageConverter,
     notesWorkspaceHostPath,
+    notesWorkspaceRuntimePath,
   });
   return {
     handler,
@@ -940,8 +942,10 @@ test("local-agent image capture processing uses Pi native session with xhigh thi
     firstFinalText: validAgentOwnedFinalText({ sourceArtifactId: "src_agent_image" }),
   });
   const workspaceDir = mkdtempSync(join(tmpdir(), "beep-notes-workspace-test-"));
+  const runtimeWorkspace = "/runtime-notes-workspace";
   const { handler, auth, store, cleanup } = tempHandler({
     notesWorkspaceHostPath: workspaceDir,
+    notesWorkspaceRuntimePath: runtimeWorkspace,
     proxyToRuntime: runtime.proxyToRuntime,
   });
   try {
@@ -981,7 +985,8 @@ test("local-agent image capture processing uses Pi native session with xhigh thi
     );
     assert.equal(runtime.calls[0].body.prefix, "notes-agent-owned");
     assert.equal(runtime.calls[0].body.thinking, "xhigh");
-    assert.equal(runtime.calls[0].body.workspace, workspaceDir);
+    assert.equal(runtime.calls[0].body.workspace, runtimeWorkspace);
+    assert.notEqual(runtime.calls[0].body.workspace, workspaceDir);
     assert.equal(runtime.calls.some((callRecord) => callRecord.path === "/agent/submit"), false);
     const promptInput = runtime.calls[1].body.input;
     assert.ok(Array.isArray(promptInput), "session prompt body should contain native input parts");
@@ -1015,6 +1020,7 @@ test("local-agent image capture processing requires notes workspace before Pi se
       },
       notesImageConverter: undefined,
       notesWorkspaceHostPath: undefined,
+      notesWorkspaceRuntimePath: "/workspace",
     });
   try {
     const notesStore = new NotesWorkspaceStore({ store });
@@ -1049,6 +1055,64 @@ test("local-agent image capture processing requires notes workspace before Pi se
     assert.deepEqual(runtimeCalls, []);
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("local-agent image capture processing requires notes runtime workspace before Pi session creation", async () => {
+  const runtimeCalls = [];
+  const workspaceDir = mkdtempSync(join(tmpdir(), "beep-notes-workspace-test-"));
+  const dir = mkdtempSync(join(tmpdir(), "beep-notes-routes-test-"));
+  const store = new StateStore(dir);
+  const auth = {};
+  const handler = async (request, response) =>
+    handleNotesRoute({
+      request,
+      response,
+      pathname: new URL(request.url, "http://localhost").pathname,
+      store,
+      requireOperatorAuth: () => {},
+      forwardRuntimeRequest: async (path, options = {}) => {
+        runtimeCalls.push({ path, body: options.body === undefined ? undefined : runtimeSubmitBody(options.body) });
+        return { ok: true, session: { id: "sess_notes_1" } };
+      },
+      notesImageConverter: undefined,
+      notesWorkspaceHostPath: workspaceDir,
+      notesWorkspaceRuntimePath: "",
+    });
+  try {
+    const notesStore = new NotesWorkspaceStore({ store });
+    const source = notesStore.createSourceArtifact({
+      id: "src_missing_runtime_workspace",
+      kind: "image",
+      body: "Whiteboard capture",
+      media: {
+        schemaVersion: 1,
+        files: [
+          {
+            name: "current.jpg",
+            mimeType: "image/jpeg",
+            sizeBytes: 123,
+            workspacePath: "notes-captures/current.jpg",
+            detail: "auto",
+          },
+        ],
+      },
+    });
+
+    const processed = await call(
+      handler,
+      "POST",
+      `/api/notes/captures/${source.id}/process`,
+      { beepMode: "localAgent", useHandwritingCalibration: false },
+      auth,
+    );
+
+    assert.equal(processed.statusCode, 400);
+    assert.match(processed.payload.error, /notes workspace runtime path is required for agent-owned image processing/u);
+    assert.deepEqual(runtimeCalls, []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(workspaceDir, { recursive: true, force: true });
   }
 });
 
@@ -1282,9 +1346,11 @@ test("capture processing route localAgent forwards image capture as localImage i
     }),
   });
   const workspaceDir = mkdtempSync(join(tmpdir(), "beep-notes-workspace-test-"));
+  const runtimeWorkspace = "/workspace";
   const imageBytes = Buffer.from("fake-image");
   const { handler, auth, cleanup } = tempHandler({
     notesWorkspaceHostPath: workspaceDir,
+    notesWorkspaceRuntimePath: runtimeWorkspace,
     proxyToRuntime: runtime.proxyToRuntime,
   });
   try {
@@ -1314,7 +1380,8 @@ test("capture processing route localAgent forwards image capture as localImage i
       runtime.calls.map((callRecord) => callRecord.path),
       ["/sessions", "/sessions/sess_notes_1/prompt"],
     );
-    assert.equal(runtime.calls[0].body.workspace, workspaceDir);
+    assert.equal(runtime.calls[0].body.workspace, runtimeWorkspace);
+    assert.notEqual(runtime.calls[0].body.workspace, workspaceDir);
     assert.equal(runtime.calls[1].body.input.some((part) => part?.type === "localImage"), true);
     assert.equal(runtime.calls[1].body.input.some((part) => part?.type === "image"), false);
     const localImage = runtime.calls[1].body.input.find((part) => part?.type === "localImage");
